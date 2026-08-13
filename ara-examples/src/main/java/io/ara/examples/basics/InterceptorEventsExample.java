@@ -8,6 +8,8 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.SessionId;
 import io.ara.core.common.AgentId;
+import io.ara.core.common.Budget;
+import io.ara.core.common.Money;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmProfile;
 import io.ara.core.tool.AraTool;
@@ -16,7 +18,6 @@ import io.ara.core.tool.ToolResult;
 import io.ara.runtime.AraRuntime;
 import io.ara.runtime.stubs.ScriptedLlmClient;
 
-import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
@@ -130,9 +131,9 @@ public final class InterceptorEventsExample {
                 .agentId(AgentId.of("budget-agent")).agentType("t")
                 .primaryLlm(LlmProfile.builder()
                         .modelId("stub")
-                        .costInputPer1kTokens(1.0)
-                        .costOutputPer1kTokens(2.0)
-                        .costBudget(BigDecimal.valueOf(2.0))
+                        .costInputPer1kTokens(Money.of("1.0", "EUR"))
+                        .costOutputPer1kTokens(Money.of("2.0", "EUR"))
+                        .costBudget(Budget.limited(Money.of("2.0", "EUR")))
                         .build())
                 .plannerStrategy("react")
                 .maxTokensPerStep(1000)

@@ -135,7 +135,7 @@ by construction is the correct default, not a simplification pending a future po
   `AgentResponse` for *its* step too, and `PipelineResult.stepHistory()` retains every
   step's `StepResult` (including a step that ultimately failed) — so
   `PipelineResult.totalInputTokens()` / `totalOutputTokens()` / `totalTokens()` /
-  `totalCostUsd()` sum across every step, not just the last one. `stepsExecuted()` is
+  `totalCost()` sum across every step, not just the last one. `stepsExecuted()` is
   simply `stepHistory().stream().map(StepResult::stepName).toList()`.
 
 ## `PipelineAgents` / `PipelineStrategy` — pipeline as a real agent
@@ -418,7 +418,7 @@ return result.finalOutput();
   composition — the same split ARA already uses for `ExecutionStrategy` (pure algorithm)
   vs. `AgentInstance` (identity + lifecycle).
 - **Token/cost reporting on a pipeline agent is summed across every step**, via
-  `PipelineResult.totalInputTokens()`/`totalOutputTokens()`/`totalCostUsd()` — see the
+  `PipelineResult.totalInputTokens()`/`totalOutputTokens()`/`totalCost()` — see the
   `PipelineResult.lastResponse()` note above. `AgentResponse.totalTokens()` on the
   *outer* pipeline agent's own response (e.g. via `PipelineAgents.of(...)`) reflects
   this same sum, not just the last step, since `PipelineStrategy` feeds it from these

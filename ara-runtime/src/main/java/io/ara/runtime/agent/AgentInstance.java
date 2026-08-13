@@ -17,6 +17,7 @@ import io.ara.core.agent.SessionId;
 import io.ara.core.agent.SessionStore;
 import io.ara.core.agent.UserId;
 import io.ara.core.common.AgentId;
+import io.ara.core.common.Money;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmRouter;
@@ -583,10 +584,13 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         // attaches a genuine partial output (see ExecutionResult.failure(reason,
         // partialOutput, ...), used by PipelineStrategy) has it reach the caller instead
         // of being silently dropped here.
+        AgentConfig config = session.wiring().config();
+        Money cost = estimateCost(result.promptTokens(), result.outputTokens(), config);
         return AgentResponse.failure(taskId, agentId(), reason, elapsed,
                 result.iterationsDone(), result.promptTokens(), result.outputTokens(), result.steps())
                 .withContent(result.output())
-                .withLlmProvider(resolvedLlmProviderId(usedLlm, session.wiring().config()));
+                .withCost(cost)
+                .withLlmProvider(resolvedLlmProviderId(usedLlm, config));
     }
 
     /**
@@ -690,10 +694,16 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
      * ExecutionResult} tracks them separately.
      * When both input and output rates are zero (default), returns 0.0 (cost tracking disabled).
      */
-    private double estimateCost(int promptTokens, int outputTokens, AgentConfig config) {
-        double inputRate  = config.costInputPer1kTokens();
-        double outputRate = config.costOutputPer1kTokens();
-        if (inputRate == 0.0 && outputRate == 0.0) return 0.0;
-        return (promptTokens / 1_000.0) * inputRate + (outputTokens / 1_000.0) * outputRate;
+    private Money estimateCost(int promptTokens, int outputTokens, AgentConfig config) {
+        Money inputRate  = config.costInputPer1kTokens();
+        Money outputRate = config.costOutputPer1kTokens();
+        if (inputRate.amount().signum() == 0 && outputRate.amount().signum() == 0) {
+            return Money.zero(config.costCurrency());
+        }
+        return inputRate.multiply(fraction(promptTokens)).plus(outputRate.multiply(fraction(outputTokens)));
+    }
+
+    private static java.math.BigDecimal fraction(int tokens) {
+        return java.math.BigDecimal.valueOf(tokens).divide(java.math.BigDecimal.valueOf(1_000));
     }
 }

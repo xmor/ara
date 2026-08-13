@@ -73,6 +73,7 @@ class LlmProfileTest {
     @Test
     void nullTransportId_throws() {
         assertThrows(NullPointerException.class, () -> new LlmProfile(
-                null, null, null, null, null, null, "EUR", false, false, 0.0, 0.0, null));
+                null, null, null, null, null, io.ara.core.common.Budget.unlimited(), "EUR",
+                false, false, io.ara.core.common.Money.zero("EUR"), io.ara.core.common.Money.zero("EUR"), null));
     }
 }

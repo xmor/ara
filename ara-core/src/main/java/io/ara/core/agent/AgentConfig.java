@@ -1,6 +1,8 @@
 package io.ara.core.agent;
 
 import io.ara.core.common.AgentId;
+import io.ara.core.common.Budget;
+import io.ara.core.common.Money;
 import io.ara.core.llm.LlmConfig;
 import io.ara.core.llm.LlmProfile;
 import io.ara.core.llm.LlmSelectionPolicy;
@@ -67,9 +69,10 @@ public record AgentConfig(
     public boolean nativeJsonSchema(){ return llm.primary().nativeJsonSchema(); }
     public boolean logLlmIo()        { return llm.logIo(); }
     public int     logLlmIoMaxChars(){ return llm.logIoMaxChars(); }
-    public double  costInputPer1kTokens()  { return llm.primary().costInputPer1kTokens(); }
-    public double  costOutputPer1kTokens() { return llm.primary().costOutputPer1kTokens(); }
-    public java.math.BigDecimal costBudget() { return llm.primary().costBudget(); }
+    public Money   costInputPer1kTokens()  { return llm.primary().costInputPer1kTokens(); }
+    public Money   costOutputPer1kTokens() { return llm.primary().costOutputPer1kTokens(); }
+    public Budget  costBudget()            { return llm.primary().costBudget(); }
+    public String  costCurrency()          { return llm.primary().costCurrency(); }
 
     // -------------------------------------------------------------------------
     // Backward-compat delegation methods — execution

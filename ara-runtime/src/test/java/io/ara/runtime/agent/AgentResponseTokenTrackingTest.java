@@ -5,6 +5,7 @@ import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.common.AgentId;
+import io.ara.core.common.Money;
 import io.ara.core.llm.LlmProfile;
 import io.ara.runtime.AraRuntime;
 import io.ara.runtime.stubs.ScriptedLlmClient;
@@ -66,8 +67,8 @@ class AgentResponseTokenTrackingTest {
                 .agentId(AgentId.of("cost-agent")).agentType("t")
                 .primaryLlm(LlmProfile.builder()
                         .modelId("stub")
-                        .costInputPer1kTokens(1.0)
-                        .costOutputPer1kTokens(3.0)
+                        .costInputPer1kTokens(Money.of("1.0", "EUR"))
+                        .costOutputPer1kTokens(Money.of("3.0", "EUR"))
                         .build())
                 .plannerStrategy("react")
                 .maxIterations(5)
@@ -80,6 +81,6 @@ class AgentResponseTokenTrackingTest {
         // The old blended-average approximation would have given
         // (50/1000)*((1.0+3.0)/2) = 0.10 instead — a different, less accurate number.
         assertTrue(response.isSuccess(), response.failureReason());
-        assertEquals(0.11, response.estimatedCostUsd(), 1e-9);
+        assertEquals(0, response.estimatedCost().compareTo(Money.of("0.11", "EUR")));
     }
 }

@@ -1,5 +1,7 @@
 package io.ara.core.agent;
 
+import io.ara.core.common.Money;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
@@ -45,13 +47,13 @@ public final class AgentChain {
         int iterations = 0;
         int inputTokens = 0;
         int outputTokens = 0;
-        double cost = 0.0;
+        Money cost = Money.zero(responses.get(0).estimatedCost().currency());
         Duration elapsed = Duration.ZERO;
         for (AgentResponse r : responses) {
             iterations   += r.iterationsUsed();
             inputTokens  += r.inputTokens();
             outputTokens += r.outputTokens();
-            cost         += r.estimatedCostUsd();
+            cost          = cost.plus(r.estimatedCost());
             elapsed       = elapsed.plus(r.elapsedTime());
         }
 

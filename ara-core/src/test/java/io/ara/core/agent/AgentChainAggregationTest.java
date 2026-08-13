@@ -1,6 +1,7 @@
 package io.ara.core.agent;
 
 import io.ara.core.common.AgentId;
+import io.ara.core.common.Money;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -17,7 +18,12 @@ class AgentChainAggregationTest {
     private static final AgentId AGENT = AgentId.of("a1");
 
     private static AgentResponse ok(String content, int iterations, int in, int out, double cost, long millis) {
-        return AgentResponse.success("t1", AGENT, content, iterations, in, out, cost,
+        return ok(content, iterations, in, out, cost, "EUR", millis);
+    }
+
+    private static AgentResponse ok(String content, int iterations, int in, int out, double cost, String currency, long millis) {
+        return AgentResponse.success("t1", AGENT, content, iterations, in, out,
+                Money.of(java.math.BigDecimal.valueOf(cost), currency),
                 Duration.ofMillis(millis), List.of());
     }
 
@@ -50,10 +56,20 @@ class AgentChainAggregationTest {
                 ok("c", 3, 300, 30, 0.25, 300)));
 
         assertEquals(6, merged.iterationsUsed());
-        assertEquals(1.0, merged.estimatedCostUsd(), 1e-9);
+        assertEquals(0, merged.estimatedCost().compareTo(Money.of("1.0", "EUR")));
         assertEquals(Duration.ofMillis(600), merged.elapsedTime());
         assertEquals("merged", merged.content());
         assertTrue(merged.isSuccess());
+    }
+
+    @Test
+    void aggregateSuccess_mixedCurrencies_throws() {
+        List<AgentResponse> responses = List.of(
+                ok("a", 1, 1, 1, 0.5, "EUR", 1),
+                ok("b", 1, 1, 1, 0.5, "USD", 1));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> AgentChain.aggregateSuccess("merged", responses));
     }
 
     @Test
@@ -72,7 +88,7 @@ class AgentChainAggregationTest {
     @Test
     void failurePolicies_neverRenderTheLiteralTextNullInTheAggregateMessage() {
         AgentResponse reasonless = new AgentResponse("t1", AGENT, "", AgentState.FAILED,
-                0, 0, 0, 0.0, Duration.ZERO, null, java.time.Instant.now(), List.of(), null);
+                0, 0, 0, Money.ZERO_EUR, Duration.ZERO, null, java.time.Instant.now(), List.of(), null);
 
         AgentResponse partial = AgentChain.FailurePolicy.PARTIAL_OK.apply(
                 List.of(reasonless, ko("boom")), AgentChain.MergeStrategy.firstWins());
@@ -88,7 +104,7 @@ class AgentChainAggregationTest {
     @Test
     void partialOk_withNoSuccessesAndNoReasons_stillProducesAReadableMessage() {
         AgentResponse reasonless = new AgentResponse("t1", AGENT, "", AgentState.FAILED,
-                0, 0, 0, 0.0, Duration.ZERO, null, java.time.Instant.now(), List.of(), null);
+                0, 0, 0, Money.ZERO_EUR, Duration.ZERO, null, java.time.Instant.now(), List.of(), null);
 
         AgentResponse result = AgentChain.FailurePolicy.PARTIAL_OK.apply(
                 List.of(reasonless), AgentChain.MergeStrategy.firstWins());

@@ -6,6 +6,7 @@ import io.ara.core.agent.AgentState;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.common.AgentId;
+import io.ara.core.common.Money;
 
 import java.time.Duration;
 import java.util.List;
@@ -37,7 +38,8 @@ final class PipelineTestAgents {
             @Override public AgentState currentState() { return AgentState.IDLE; }
             @Override public AgentResponse execute(AgentTask task) {
                 return AgentResponse.success(task.taskId(), agentId, output, 1,
-                        inputTokens, outputTokens, costUsd, Duration.ofMillis(1), List.of());
+                        inputTokens, outputTokens, Money.of(java.math.BigDecimal.valueOf(costUsd), "EUR"),
+                        Duration.ofMillis(1), List.of());
             }
             @Override public void terminate() {}
         };

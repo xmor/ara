@@ -75,7 +75,8 @@ public class AraSimpleExample {
         System.out.printf("Content        : %s%n", response.content());
         System.out.printf("Iterations     : %d%n", response.iterationsUsed());
         System.out.printf("Tokens         : %d%n", response.totalTokens());
-        System.out.printf("Estimated cost : %.6f%n", response.estimatedCostUsd());
+        System.out.printf("Estimated cost : %s %s%n",
+                response.estimatedCost().amount().toPlainString(), response.estimatedCost().currency());
         System.out.printf("Elapsed        : %dms%n", response.elapsedTime().toMillis());
         System.out.printf("Agent state    : %s (back to IDLE, ready for reuse)%n",
                 agent.currentState());

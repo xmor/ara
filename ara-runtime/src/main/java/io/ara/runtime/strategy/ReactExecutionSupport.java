@@ -6,6 +6,8 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.ExecutionStep;
 import io.ara.core.agent.ExecutionTimeoutException;
+import io.ara.core.common.Budget;
+import io.ara.core.common.Money;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
@@ -717,22 +719,27 @@ final class ReactExecutionSupport {
             AgentConfig config, String taskId, int totalPromptTokens, int totalOutputTokens,
             int iterations, List<ExecutionStep> steps) {
 
-        java.math.BigDecimal budget = config.costBudget();
-        if (budget == null || (config.costInputPer1kTokens() <= 0 && config.costOutputPer1kTokens() <= 0)) {
+        Budget budget = config.costBudget();
+        Money inputRate  = config.costInputPer1kTokens();
+        Money outputRate = config.costOutputPer1kTokens();
+        if (inputRate.amount().signum() == 0 && outputRate.amount().signum() == 0) {
             return null;
         }
-        double spent = (totalPromptTokens / 1000.0) * config.costInputPer1kTokens()
-                     + (totalOutputTokens / 1000.0) * config.costOutputPer1kTokens();
-        double nextEst = (config.maxTokensPerStep() / 1000.0) * config.costOutputPer1kTokens();
-        if (spent + nextEst <= budget.doubleValue()) {
+        Money spent = inputRate.multiply(fraction(totalPromptTokens))
+                .plus(outputRate.multiply(fraction(totalOutputTokens)));
+        Money nextEst = outputRate.multiply(fraction(config.maxTokensPerStep()));
+        if (budget.permits(spent.plus(nextEst))) {
             return null;
         }
-        log.warn("Task [{}] cost budget exceeded: spent=${} nextEst=${} limit=${}",
-                taskId, "%.4f".formatted(spent), "%.4f".formatted(nextEst), budget);
+        log.warn("Task [{}] cost budget exceeded: spent={} nextEst={} limit={}",
+                taskId, spent, nextEst, budget);
         return ExecutionResult.failure(
-                "Cost budget $%.4f exceeded (spent $%.4f + next est. $%.4f)"
-                        .formatted(budget.doubleValue(), spent, nextEst),
+                "Cost budget %s exceeded (spent %s + next est. %s)".formatted(budget, spent, nextEst),
                 iterations, totalPromptTokens, totalOutputTokens, steps);
+    }
+
+    private static java.math.BigDecimal fraction(int tokens) {
+        return java.math.BigDecimal.valueOf(tokens).divide(java.math.BigDecimal.valueOf(1_000));
     }
 
     /** Truncates a string for INFO-level I/O logging; {@code maxChars <= 0} disables truncation. */

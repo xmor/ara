@@ -97,9 +97,9 @@ class ReactStrategyTest {
         AgentConfig config = AgentConfig.defaults()
                 .primaryLlm(LlmProfile.builder()
                         .modelId("stub")
-                        .costInputPer1kTokens(1.0)
-                        .costOutputPer1kTokens(2.0)
-                        .costBudget(java.math.BigDecimal.valueOf(2.0))
+                        .costInputPer1kTokens(io.ara.core.common.Money.of("1.0", "EUR"))
+                        .costOutputPer1kTokens(io.ara.core.common.Money.of("2.0", "EUR"))
+                        .costBudget(io.ara.core.common.Budget.limited(io.ara.core.common.Money.of("2.0", "EUR")))
                         .build())                .maxTokensPerStep(1000)
                 .maxIterations(10)
                 .build();
@@ -118,6 +118,34 @@ class ReactStrategyTest {
         assertFalse(result.isSuccess(), "should fail when budget is exceeded");
         assertTrue(result.failureReason().contains("budget") || result.failureReason().contains("Cost"),
                 "failure reason must mention budget, got: " + result.failureReason());
+        assertTrue(result.failureReason().contains("EUR"),
+                "failure reason must show the configured currency, got: " + result.failureReason());
+        assertFalse(result.failureReason().contains("$"),
+                "failure reason must not hardcode a dollar sign, got: " + result.failureReason());
+    }
+
+    @Test
+    void unlimited_budget_never_blocks_even_with_high_cost_rates() {
+        AgentConfig config = AgentConfig.defaults()
+                .primaryLlm(LlmProfile.builder()
+                        .modelId("stub")
+                        .costInputPer1kTokens(io.ara.core.common.Money.of("1000.0", "EUR"))
+                        .costOutputPer1kTokens(io.ara.core.common.Money.of("1000.0", "EUR"))
+                        .costBudget(io.ara.core.common.Budget.unlimited())
+                        .build())
+                .maxTokensPerStep(1000)
+                .maxIterations(5)
+                .build();
+
+        ScriptedLlmClient llm = ScriptedLlmClient.script()
+                .thenFinalAnswer("answer under unlimited budget")
+                .build();
+
+        TrackingMemory memory = seeded("sys", "test");
+        ExecutionResult result = new ReactStrategy().execute(
+                AgentTask.of("test"), llm, memory, NO_TOOLS, config);
+
+        assertTrue(result.isSuccess(), "an unlimited budget must never block, regardless of cost rates");
     }
 
     @Test
@@ -125,8 +153,8 @@ class ReactStrategyTest {
         AgentConfig config = AgentConfig.defaults()
                 .primaryLlm(LlmProfile.builder()
                         .modelId("stub")
-                        .costInputPer1kTokens(10.0)
-                        .costOutputPer1kTokens(10.0)
+                        .costInputPer1kTokens(io.ara.core.common.Money.of("10.0", "EUR"))
+                        .costOutputPer1kTokens(io.ara.core.common.Money.of("10.0", "EUR"))
                         .build())                .maxIterations(5)
                 .build();
 
@@ -147,9 +175,9 @@ class ReactStrategyTest {
         AgentConfig config = AgentConfig.defaults()
                 .primaryLlm(LlmProfile.builder()
                         .modelId("stub")
-                        .costInputPer1kTokens(0.0)
-                        .costOutputPer1kTokens(0.0)
-                        .costBudget(java.math.BigDecimal.valueOf(0.001))
+                        .costInputPer1kTokens(io.ara.core.common.Money.zero("EUR"))
+                        .costOutputPer1kTokens(io.ara.core.common.Money.zero("EUR"))
+                        .costBudget(io.ara.core.common.Budget.limited(io.ara.core.common.Money.of("0.001", "EUR")))
                         .build())                .maxIterations(5)
                 .build();
 
@@ -173,9 +201,9 @@ class ReactStrategyTest {
         AgentConfig config = AgentConfig.defaults()
                 .primaryLlm(LlmProfile.builder()
                         .modelId("stub")
-                        .costInputPer1kTokens(0.0)
-                        .costOutputPer1kTokens(2.0)
-                        .costBudget(java.math.BigDecimal.valueOf(2.0))
+                        .costInputPer1kTokens(io.ara.core.common.Money.zero("EUR"))
+                        .costOutputPer1kTokens(io.ara.core.common.Money.of("2.0", "EUR"))
+                        .costBudget(io.ara.core.common.Budget.limited(io.ara.core.common.Money.of("2.0", "EUR")))
                         .build())
                 .maxTokensPerStep(1000)
                 .maxIterations(10)
@@ -234,9 +262,9 @@ class ReactStrategyTest {
         AgentConfig config = AgentConfig.defaults()
                 .primaryLlm(LlmProfile.builder()
                         .modelId("stub")
-                        .costInputPer1kTokens(0.001)
-                        .costOutputPer1kTokens(0.002)
-                        .costBudget(java.math.BigDecimal.valueOf(100.0))
+                        .costInputPer1kTokens(io.ara.core.common.Money.of("0.001", "EUR"))
+                        .costOutputPer1kTokens(io.ara.core.common.Money.of("0.002", "EUR"))
+                        .costBudget(io.ara.core.common.Budget.limited(io.ara.core.common.Money.of("100.0", "EUR")))
                         .build())                .maxIterations(5)
                 .build();
 
@@ -258,9 +286,9 @@ class ReactStrategyTest {
         AgentConfig config = AgentConfig.defaults()
                 .primaryLlm(LlmProfile.builder()
                         .modelId("stub")
-                        .costInputPer1kTokens(5.0)
-                        .costOutputPer1kTokens(1.0)
-                        .costBudget(java.math.BigDecimal.valueOf(5.0))
+                        .costInputPer1kTokens(io.ara.core.common.Money.of("5.0", "EUR"))
+                        .costOutputPer1kTokens(io.ara.core.common.Money.of("1.0", "EUR"))
+                        .costBudget(io.ara.core.common.Budget.limited(io.ara.core.common.Money.of("5.0", "EUR")))
                         .build())                .maxTokensPerStep(100)
                 .maxIterations(10)
                 .build();

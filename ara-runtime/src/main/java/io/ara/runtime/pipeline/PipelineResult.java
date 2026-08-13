@@ -1,6 +1,7 @@
 package io.ara.runtime.pipeline;
 
 import io.ara.core.agent.AgentResponse;
+import io.ara.core.common.Money;
 import io.ara.runtime.pipeline.PipelineExecution.StepResult;
 
 import java.time.Duration;
@@ -55,9 +56,16 @@ public record PipelineResult(
         return totalInputTokens() + totalOutputTokens();
     }
 
-    /** Estimated USD cost summed across every executed step's {@link AgentResponse}, not just the last. */
-    public double totalCostUsd() {
-        return stepHistory.stream().mapToDouble(s -> s.response().estimatedCostUsd()).sum();
+    /** Estimated cost summed across every executed step's {@link AgentResponse}, not just the last. */
+    public Money totalCost() {
+        if (stepHistory.isEmpty()) {
+            return Money.ZERO_EUR;
+        }
+        Money total = Money.zero(stepHistory.get(0).response().estimatedCost().currency());
+        for (StepResult step : stepHistory) {
+            total = total.plus(step.response().estimatedCost());
+        }
+        return total;
     }
 
     public static PipelineResult success(

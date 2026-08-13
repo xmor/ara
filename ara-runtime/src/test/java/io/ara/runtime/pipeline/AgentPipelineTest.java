@@ -61,7 +61,7 @@ class AgentPipelineTest {
         assertEquals(300, r.totalInputTokens());
         assertEquals(125, r.totalOutputTokens());
         assertEquals(425, r.totalTokens());
-        assertEquals(0.05, r.totalCostUsd(), 1e-9);
+        assertEquals(0, r.totalCost().compareTo(io.ara.core.common.Money.of("0.05", "EUR")));
         // lastResponse() is unchanged: still only the last step's own response.
         assertEquals(200, r.lastResponse().inputTokens());
         assertEquals(75,  r.lastResponse().outputTokens());

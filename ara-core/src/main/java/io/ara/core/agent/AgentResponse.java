@@ -1,6 +1,7 @@
 package io.ara.core.agent;
 
 import io.ara.core.common.AgentId;
+import io.ara.core.common.Money;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -22,7 +23,7 @@ import java.util.Optional;
  * @param iterationsUsed  number of ReAct loop iterations consumed
  * @param inputTokens     prompt/input tokens consumed across all LLM calls in this execution
  * @param outputTokens    completion/output tokens consumed across all LLM calls in this execution
- * @param estimatedCostUsd approximate USD cost of all LLM calls
+ * @param estimatedCost   approximate cost of all LLM calls
  * @param elapsedTime     wall-clock duration from task submission to response
  * @param failureReason   human-readable reason for failure; empty when successful
  * @param completedAt     wall-clock timestamp of response emission
@@ -38,7 +39,7 @@ public record AgentResponse(
         int iterationsUsed,
         int inputTokens,
         int outputTokens,
-        double estimatedCostUsd,
+        Money estimatedCost,
         Duration elapsedTime,
         String failureReason,
         Instant completedAt,
@@ -51,6 +52,7 @@ public record AgentResponse(
         Objects.requireNonNull(agentId, "agentId must not be null");
         Objects.requireNonNull(content, "content must not be null");
         Objects.requireNonNull(finalState, "finalState must not be null");
+        Objects.requireNonNull(estimatedCost, "estimatedCost must not be null");
         Objects.requireNonNull(elapsedTime, "elapsedTime must not be null");
         Objects.requireNonNull(completedAt, "completedAt must not be null");
         steps = steps != null ? List.copyOf(steps) : List.of();
@@ -94,7 +96,7 @@ public record AgentResponse(
      * @param iterationsUsed ReAct loop iterations consumed
      * @param inputTokens    prompt/input tokens across all LLM calls
      * @param outputTokens   completion/output tokens across all LLM calls
-     * @param estimatedCost  estimated USD cost
+     * @param estimatedCost  estimated cost
      * @param elapsed        wall-clock execution duration
      * @return a successful {@code AgentResponse}
      */
@@ -105,7 +107,7 @@ public record AgentResponse(
             int iterationsUsed,
             int inputTokens,
             int outputTokens,
-            double estimatedCost,
+            Money estimatedCost,
             Duration elapsed,
             List<ExecutionStep> steps
     ) {
@@ -119,11 +121,11 @@ public record AgentResponse(
     /**
      * Factory method for a successful response from a single combined token count.
      *
-     * @deprecated use {@link #success(String, AgentId, String, int, int, int, double, Duration, List)}
+     * @deprecated use {@link #success(String, AgentId, String, int, int, int, Money, Duration, List)}
      *             when the strategy tracks prompt/output tokens separately. Kept for callers
      *             that only have a combined total: the full count is attributed to {@link
      *             #outputTokens}, {@link #inputTokens} is {@code 0} — {@link #totalTokens()}
-     *             is unaffected either way.
+     *             is unaffected either way. {@code estimatedCost} is interpreted as an EUR amount.
      */
     @Deprecated(forRemoval = false)
     public static AgentResponse success(
@@ -138,7 +140,7 @@ public record AgentResponse(
     ) {
         return new AgentResponse(
                 taskId, agentId, content, AgentState.DONE,
-                iterationsUsed, 0, totalTokens, estimatedCost,
+                iterationsUsed, 0, totalTokens, Money.of(java.math.BigDecimal.valueOf(estimatedCost), "EUR"),
                 elapsed, null, Instant.now(), steps, null
         );
     }
@@ -160,7 +162,7 @@ public record AgentResponse(
     ) {
         return new AgentResponse(
                 taskId, agentId, "", AgentState.FAILED,
-                0, 0, 0, 0.0, elapsed, failureReason, Instant.now(), List.of(), null
+                0, 0, 0, Money.ZERO_EUR, elapsed, failureReason, Instant.now(), List.of(), null
         );
     }
 
@@ -173,7 +175,7 @@ public record AgentResponse(
     ) {
         return new AgentResponse(
                 taskId, agentId, "", AgentState.FAILED,
-                0, 0, 0, 0.0, elapsed, failureReason, Instant.now(), steps, null
+                0, 0, 0, Money.ZERO_EUR, elapsed, failureReason, Instant.now(), steps, null
         );
     }
 
@@ -190,14 +192,14 @@ public record AgentResponse(
     ) {
         return new AgentResponse(
                 taskId, agentId, "", AgentState.FAILED,
-                iterationsUsed, inputTokens, outputTokens, 0.0, elapsed, failureReason, Instant.now(), steps, null
+                iterationsUsed, inputTokens, outputTokens, Money.ZERO_EUR, elapsed, failureReason, Instant.now(), steps, null
         );
     }
 
     /**
      * Factory method for a failed response from a single combined token count.
      *
-     * @deprecated see {@link #success(String, AgentId, String, int, int, int, double, Duration, List)}.
+     * @deprecated see {@link #success(String, AgentId, String, int, int, int, Money, Duration, List)}.
      */
     @Deprecated(forRemoval = false)
     public static AgentResponse failure(
@@ -211,7 +213,7 @@ public record AgentResponse(
     ) {
         return new AgentResponse(
                 taskId, agentId, "", AgentState.FAILED,
-                iterationsUsed, 0, totalTokens, 0.0, elapsed, failureReason, Instant.now(), steps, null
+                iterationsUsed, 0, totalTokens, Money.ZERO_EUR, elapsed, failureReason, Instant.now(), steps, null
         );
     }
 
@@ -219,12 +221,19 @@ public record AgentResponse(
     public AgentResponse withContent(String newContent) {
         Objects.requireNonNull(newContent, "newContent must not be null");
         return new AgentResponse(taskId, agentId, newContent, finalState, iterationsUsed,
-                inputTokens, outputTokens, estimatedCostUsd, elapsedTime, failureReason, completedAt, steps, llmProvider);
+                inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps, llmProvider);
     }
 
     /** Returns a copy of this response with {@code llmProvider} set. */
     public AgentResponse withLlmProvider(String llmProvider) {
         return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
-                inputTokens, outputTokens, estimatedCostUsd, elapsedTime, failureReason, completedAt, steps, llmProvider);
+                inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps, llmProvider);
+    }
+
+    /** Returns a copy of this response with {@code estimatedCost} replaced. */
+    public AgentResponse withCost(Money estimatedCost) {
+        Objects.requireNonNull(estimatedCost, "estimatedCost must not be null");
+        return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
+                inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps, llmProvider);
     }
 }

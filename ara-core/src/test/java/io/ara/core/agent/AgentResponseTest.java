@@ -1,6 +1,7 @@
 package io.ara.core.agent;
 
 import io.ara.core.common.AgentId;
+import io.ara.core.common.Money;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -23,7 +24,7 @@ class AgentResponseTest {
     @Test
     void success_withInputAndOutputSplit_reportsBothAndTheirSum() {
         AgentResponse response = AgentResponse.success(
-                "task-1", AGENT_ID, "done", 2, 30, 70, 0.01, Duration.ofMillis(5), List.of());
+                "task-1", AGENT_ID, "done", 2, 30, 70, Money.of("0.01", "EUR"), Duration.ofMillis(5), List.of());
 
         assertEquals(30, response.inputTokens());
         assertEquals(70, response.outputTokens());
@@ -54,7 +55,7 @@ class AgentResponseTest {
     @Test
     void withContentAndWithLlmProvider_preserveTheTokenSplit() {
         AgentResponse response = AgentResponse.success(
-                        "task-1", AGENT_ID, "done", 2, 30, 70, 0.01, Duration.ofMillis(5), List.of())
+                        "task-1", AGENT_ID, "done", 2, 30, 70, Money.of("0.01", "EUR"), Duration.ofMillis(5), List.of())
                 .withContent("new content")
                 .withLlmProvider("gpt-mini");
 
@@ -63,5 +64,14 @@ class AgentResponseTest {
         assertEquals(30, response.inputTokens());
         assertEquals(70, response.outputTokens());
         assertEquals(100, response.totalTokens());
+    }
+
+    @Test
+    void withCost_replacesEstimatedCost() {
+        AgentResponse response = AgentResponse.success(
+                        "task-1", AGENT_ID, "done", 2, 30, 70, Money.of("0.01", "EUR"), Duration.ofMillis(5), List.of())
+                .withCost(Money.of("5.00", "USD"));
+
+        assertEquals(0, response.estimatedCost().compareTo(Money.of("5.00", "USD")));
     }
 }

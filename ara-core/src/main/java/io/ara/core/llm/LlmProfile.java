@@ -1,6 +1,8 @@
 package io.ara.core.llm;
 
-import java.math.BigDecimal;
+import io.ara.core.common.Budget;
+import io.ara.core.common.Money;
+
 import java.util.Objects;
 
 /**
@@ -18,9 +20,11 @@ import java.util.Objects;
  *       config values that flow into {@link LlmCallContext} per call. Different profiles
  *       with different parameters but the same transport share the same {@link
  *       LlmClient} — no duplicated connections just because temperature differs.</li>
- *   <li><b>Asse C — governance</b> ({@link #costBudget()}, {@link #costBudgetCurrency()},
+ *   <li><b>Asse C — governance</b> ({@link #costBudget()}, {@link #costCurrency()},
  *       {@link #costInputPer1kTokens()}, {@link #costOutputPer1kTokens()}): per-agent
- *       values, unrelated to the transport's lifecycle.</li>
+ *       values, unrelated to the transport's lifecycle. Both tariffs and, when the
+ *       budget is {@link Budget.Limited}, its cap must share {@link #costCurrency()} —
+ *       enforced at construction.</li>
  * </ul>
  *
  * <p>{@link #pinnedTransportVersion()} (ADR-039 §4) is an opt-in escape hatch from the
@@ -41,12 +45,12 @@ public record LlmProfile(
         Double       temperature,
         Double       topP,
         Integer      maxTokens,
-        BigDecimal   costBudget,
-        String       costBudgetCurrency,
+        Budget       costBudget,
+        String       costCurrency,
         boolean      streamingEnabled,
         boolean      nativeJsonSchema,
-        double       costInputPer1kTokens,
-        double       costOutputPer1kTokens,
+        Money        costInputPer1kTokens,
+        Money        costOutputPer1kTokens,
         Long         pinnedTransportVersion
 ) {
     public LlmProfile {
@@ -55,10 +59,22 @@ public record LlmProfile(
             throw new IllegalArgumentException("temperature must be in [0.0, 2.0]");
         if (topP != null && (topP < 0.0 || topP > 1.0))
             throw new IllegalArgumentException("topP must be in [0.0, 1.0]");
-        if (costInputPer1kTokens < 0.0)
-            throw new IllegalArgumentException("costInputPer1kTokens must be >= 0.0");
-        if (costOutputPer1kTokens < 0.0)
-            throw new IllegalArgumentException("costOutputPer1kTokens must be >= 0.0");
+        Objects.requireNonNull(costInputPer1kTokens, "costInputPer1kTokens must not be null");
+        Objects.requireNonNull(costOutputPer1kTokens, "costOutputPer1kTokens must not be null");
+        Objects.requireNonNull(costBudget, "costBudget must not be null");
+        Objects.requireNonNull(costCurrency, "costCurrency must not be null");
+        if (!costCurrency.equals(costInputPer1kTokens.currency()))
+            throw new IllegalArgumentException(
+                    "costInputPer1kTokens currency (" + costInputPer1kTokens.currency()
+                            + ") must match costCurrency (" + costCurrency + ")");
+        if (!costCurrency.equals(costOutputPer1kTokens.currency()))
+            throw new IllegalArgumentException(
+                    "costOutputPer1kTokens currency (" + costOutputPer1kTokens.currency()
+                            + ") must match costCurrency (" + costCurrency + ")");
+        if (costBudget instanceof Budget.Limited limited && !costCurrency.equals(limited.cap().currency()))
+            throw new IllegalArgumentException(
+                    "costBudget cap currency (" + limited.cap().currency()
+                            + ") must match costCurrency (" + costCurrency + ")");
     }
 
     /**
@@ -79,15 +95,15 @@ public record LlmProfile(
         private Double       temperature        = null;
         private Double       topP               = null;
         private Integer      maxTokens          = null;
-        private BigDecimal   costBudget         = null;
-        private String       costBudgetCurrency = "EUR";
+        private Budget       costBudget         = Budget.unlimited();
+        private String       costCurrency       = "EUR";
         private String       baseUrl            = null;
         private String       apiKey             = null;
         private String       modelName          = null;
         private boolean      streamingEnabled        = false;
         private boolean      nativeJsonSchema        = false;
-        private double       costInputPer1kTokens    = 0.0;
-        private double       costOutputPer1kTokens   = 0.0;
+        private Money        costInputPer1kTokens    = Money.zero("EUR");
+        private Money        costOutputPer1kTokens   = Money.zero("EUR");
         private Long         pinnedTransportVersion  = null;
 
         private Builder() {}
@@ -99,8 +115,8 @@ public record LlmProfile(
         public Builder temperature(Double v)              { this.temperature = v;              return this; }
         public Builder topP(Double v)                     { this.topP = v;                     return this; }
         public Builder maxTokens(Integer v)               { this.maxTokens = v;                return this; }
-        public Builder costBudget(BigDecimal v)           { this.costBudget = v;               return this; }
-        public Builder costBudgetCurrency(String v)       { this.costBudgetCurrency = v;       return this; }
+        public Builder costBudget(Budget v)               { this.costBudget = v;               return this; }
+        public Builder costCurrency(String v)             { this.costCurrency = v;             return this; }
         /** Sugar for an inline {@link LlmTransport} — see the class javadoc. */
         public Builder baseUrl(String v)                  { this.baseUrl = v;                  return this; }
         /** Sugar for an inline {@link LlmTransport} — see the class javadoc. */
@@ -109,8 +125,8 @@ public record LlmProfile(
         public Builder modelName(String v)                { this.modelName = v;                return this; }
         public Builder streamingEnabled(boolean v)        { this.streamingEnabled = v;         return this; }
         public Builder nativeJsonSchema(boolean v)        { this.nativeJsonSchema = v;         return this; }
-        public Builder costInputPer1kTokens(double v)     { this.costInputPer1kTokens = v;     return this; }
-        public Builder costOutputPer1kTokens(double v)    { this.costOutputPer1kTokens = v;    return this; }
+        public Builder costInputPer1kTokens(Money v)      { this.costInputPer1kTokens = v;     return this; }
+        public Builder costOutputPer1kTokens(Money v)     { this.costOutputPer1kTokens = v;    return this; }
         /**
          * Opts into an explicit transport version pin (ADR-039 §4) instead of the default
          * follow-latest-at-pin-time. {@code null} (the default) means "use whatever is
@@ -123,7 +139,7 @@ public record LlmProfile(
                     ? new LlmTransport(baseUrl, apiKey, modelName)
                     : null;
             return new LlmProfile(transportId, inline, temperature, topP,
-                    maxTokens, costBudget, costBudgetCurrency,
+                    maxTokens, costBudget, costCurrency,
                     streamingEnabled, nativeJsonSchema,
                     costInputPer1kTokens, costOutputPer1kTokens, pinnedTransportVersion);
         }
