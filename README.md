@@ -536,7 +536,7 @@ the shorthand) carries the per-model settings:
 | `baseUrl` / `apiKey` / `modelName` | `null` | Optional per-profile overrides of the underlying client's connection settings |
 | `streamingEnabled` | `false` | Request streaming completions when the adapter supports it |
 | `nativeJsonSchema` | `false` | Use the provider's native structured-output / JSON-schema mode |
-| `costInputPer1kTokens` / `costOutputPer1kTokens` (`Money`) | `Money.zero("EUR")` | Unit prices used for cost accounting; see [`docs/cost-budget.md`](docs/cost-budget.md) |
+| `costInputPer1kTokens` / `costOutputPer1kTokens` (`Money`) | `Money.zero("EUR")` | Unit prices used for cost accounting |
 | `costBudget` (`Budget`) | `Budget.unlimited()` | Spending cap for the agent, denominated in `costCurrency` (defaults to `"EUR"`) |
 
 ### Execution — how tasks run
