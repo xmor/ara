@@ -20,6 +20,20 @@ jobs:
     name: Build, sign and upload
     runs-on: ubuntu-latest
 
+    # Maven Central rate-limits the shared IP ranges GitHub runners come from and answers
+    # HTTP 429; a cold CI run died on exactly that, before the POM was even readable.
+    # Maven Resolver does treat 429 as retryable, but only 3 times with a 5s interval,
+    # which a cold build — several hundred artifacts, the build extension among them —
+    # exhausts easily. More attempts and a longer backoff turn a red build into a slower
+    # green one. MAVEN_ARGS is honoured by Maven 3.9+; on anything older it is ignored
+    # and the defaults apply, so this can only help.
+    env:
+      MAVEN_ARGS: >-
+        -Daether.connector.http.retryHandler.count=8
+        -Daether.connector.http.retryHandler.interval=5000
+        -Daether.connector.http.retryHandler.intervalMax=60000
+        -Daether.connector.http.retryHandler.serviceUnavailable=429,500,502,503,504
+
     steps:
       - name: Check out the tag
         uses: actions/checkout@v4
