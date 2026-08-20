@@ -17,6 +17,13 @@
   <properties>
     <maven.deploy.skip>true</maven.deploy.skip>
     <ara.publish.skip>true</ara.publish.skip>
+    <!--
+    This module is runnable demos, not library code: it has no test sources by design,
+    so there is no execution data and a coverage floor would fail on arithmetic rather
+    than on a real regression. Skipping jacoco here keeps the gate meaningful in the
+    three modules where it measures something.
+    -->
+    <jacoco.skip>true</jacoco.skip>
   </properties>
 
   <dependencies>

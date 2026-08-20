@@ -24,6 +24,13 @@
       real provider.
   </description>
 
+  <properties>
+    <!-- Above the inherited floor: this module is the best covered of the three.
+         See the note on jacoco.min.* in the root pom before changing these. -->
+    <jacoco.min.instruction>0.63</jacoco.min.instruction>
+    <jacoco.min.branch>0.55</jacoco.min.branch>
+  </properties>
+
   <dependencies>
     <dependency>
       <groupId>io.github.xmor</groupId>

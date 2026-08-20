@@ -22,6 +22,10 @@
     <mcp.sdk.version>1.0.1</mcp.sdk.version>
     <!-- OTel — optional; pull in only when telemetry is needed -->
     <opentelemetry.version>1.51.0</opentelemetry.version>
+
+    <!-- Above the inherited floor. See the note on jacoco.min.* in the root pom. -->
+    <jacoco.min.instruction>0.61</jacoco.min.instruction>
+    <jacoco.min.branch>0.45</jacoco.min.branch>
   </properties>
 
   <dependencyManagement>

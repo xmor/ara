@@ -1,0 +1,58 @@
+name: CI
+
+# Runs the full build on every pull request and on every push to main.
+#
+# Until this workflow existed, the only automated build was release.yml, which fires
+# on a v* tag — that is, after a change has already been merged and tagged. A red test
+# was therefore discoverable only while cutting a release, at the worst possible moment.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# A pull request that gets several pushes in a row only needs the last one verified.
+# Superseded runs are cancelled instead of queueing behind each other.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # JDK 21 matches release.yml and the pom's <release>21</release>. The README
+      # claims "Java 21+", which no build currently verifies — adding a second JDK to
+      # this matrix is the cheap way to make that claim true, once a newer LTS has been
+      # confirmed green locally.
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # The same command release.yml runs before it uploads anything, so a PR is held
+      # to exactly the standard a release is held to. Includes the Maven Enforcer
+      # dependency-convergence rules, which are the only static analysis the build has.
+      - name: Build and test
+        run: mvn -B verify
+
+      # JaCoCo writes a report but nothing gates on it yet. Keeping the HTML around
+      # makes the current coverage inspectable from a PR, which is what a threshold
+      # has to be calibrated against before it can be turned on.
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-reports
+          path: '*/target/site/jacoco/'
+          if-no-files-found: ignore
+          retention-days: 14

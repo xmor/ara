@@ -87,6 +87,21 @@
         <mockito.version>5.14.2</mockito.version>
         <jacoco.version>0.8.14</jacoco.version>
         <javalin.version>6.7.0</javalin.version>
+
+        <!--
+        Coverage floor enforced by the jacoco `check` execution below. The values are
+        the ratios measured on the day CI was introduced, rounded down by ~2 points so
+        that an ordinary refactor does not turn the build red for arithmetic reasons.
+        They are a ratchet: raise them as coverage improves, never lower one to make a
+        build pass — lowering the floor to accept a change is how a gate stops meaning
+        anything. The defaults here are ara-core's; ara-runtime and ara-adapters cover
+        more and override them upward in their own poms.
+
+        Measured at introduction — ara-core 52.0/33.5, ara-runtime 65.8/57.1,
+        ara-adapters 63.9/47.4 (instruction/branch, 751 tests green).
+        -->
+        <jacoco.min.instruction>0.50</jacoco.min.instruction>
+        <jacoco.min.branch>0.31</jacoco.min.branch>
     </properties>
 
     <modules>
@@ -335,6 +350,38 @@
                         <goals>
                             <goal>report</goal>
                         </goals>
+                    </execution>
+                    <!--
+                    Declared after `report` so a failing check still leaves a readable
+                    HTML report behind to explain what dropped. BUNDLE scope means the
+                    floor applies to the module as a whole, not class by class: a single
+                    hard-to-test class should not need its own exemption.
+                    -->
+                    <execution>
+                        <id>check</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>INSTRUCTION</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${jacoco.min.instruction}</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${jacoco.min.branch}</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
