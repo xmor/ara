@@ -43,12 +43,20 @@ public interface ApprovalGate {
     /**
      * Submits a human decision for a pending approval request.
      *
-     * <p>If the future for {@code requestId} has already completed (e.g. timed out),
-     * this call is a silent no-op.
+     * <p>Exactly one decision is recorded per request. If two operators decide the same
+     * request concurrently the first to arrive wins and the loser is dropped silently —
+     * that is the only case in which this call does nothing and does not throw.
+     *
+     * <p>Once a request has been decided or has expired it is no longer pending, and
+     * submitting against it throws. This is deliberate: an operator acting on a stale
+     * list is a condition the caller — an HTTP surface, a CLI — has to be able to
+     * report back, and a silent success would be indistinguishable from a decision that
+     * actually took effect.
      *
      * @param requestId the UUID of the pending request; never {@code null}
      * @param decision  the human decision; never {@code null}
-     * @throws IllegalArgumentException if no pending request exists for {@code requestId}
+     * @throws IllegalArgumentException if no request with this id is pending: never
+     *                                  registered, or already decided or expired
      */
     void submit(String requestId, ApprovalDecision decision);
 
