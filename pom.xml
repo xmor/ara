@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
-         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>io.github.xmor</groupId>
@@ -20,16 +19,19 @@
     <name>ARA — Agent Runtime Architecture</name>
     <description>
         ARA is a JVM framework for building autonomous agents and multi-agent systems on Java 21.
-        It combines LLM integration, tool calling, deterministic I/O contracts, and multi-agent orchestration in a clean,
+        It combines LLM integration, tool calling, deterministic I/O contracts, and multi-agent
+        orchestration in a clean,
         interface-first architecture — no annotation magic, no reflection, no framework lock-in.
     </description>
-    <!-- Maven appends a child module's artifactId to the inherited <url> and <scm> values,
-         which would publish links like ".../ara.git/ara-core" that resolve to nothing —
-         every module lives in this single repository. <scm> suppresses that with the
-         child.scm.*.inherit.append.path attributes below. The matching
-         child.project.url.inherit.append.path attribute for <url> is silently ignored by
-         Maven 3.x (verified on 3.9.11), so each published module instead declares its own
-         <url> explicitly. -->
+    <!--
+    Maven appends a child module's artifactId to the inherited <url> and <scm> values,
+    which would publish links like ".../ara.git/ara-core" that resolve to nothing —
+    every module lives in this single repository. <scm> suppresses that with the
+    child.scm.*.inherit.append.path attributes below. The matching
+    child.project.url.inherit.append.path attribute for <url> is silently ignored by
+    Maven 3.x (verified on 3.9.11), so each published module instead declares its own
+    <url> explicitly.
+    -->
     <url>https://github.com/xmor/ara</url>
     <inceptionYear>2026</inceptionYear>
 
@@ -42,8 +44,8 @@
     </licenses>
 
     <scm child.scm.url.inherit.append.path="false"
-         child.scm.connection.inherit.append.path="false"
-         child.scm.developerConnection.inherit.append.path="false">
+        child.scm.connection.inherit.append.path="false"
+        child.scm.developerConnection.inherit.append.path="false">
         <url>https://github.com/xmor/ara</url>
         <connection>scm:git:https://github.com/xmor/ara.git</connection>
         <developerConnection>scm:git:git@github.com:xmor/ara.git</developerConnection>
@@ -56,12 +58,14 @@
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-        <!-- Maven Central publishing switch. false (the default inherited here) means
-             "this module is published". A module that must stay off Central sets
-             <ara.publish.skip>true</ara.publish.skip> in its own <properties>; to start
-             publishing it, delete that single line. Defaulting to false rather than true
-             keeps the flag honest: a module is opted *out* explicitly and visibly, so a
-             module never silently stops being published because someone forgot to opt in. -->
+        <!--
+        Maven Central publishing switch. false (the default inherited here) means
+        "this module is published". A module that must stay off Central sets
+        <ara.publish.skip>true</ara.publish.skip> in its own <properties>; to start
+        publishing it, delete that single line. Defaulting to false rather than true
+        keeps the flag honest: a module is opted *out* explicitly and visibly, so a
+        module never silently stops being published because someone forgot to opt in.
+        -->
         <ara.publish.skip>false</ara.publish.skip>
 
         <!-- Plugin versions used only by the release path -->
@@ -72,10 +76,12 @@
         <slf4j.version>2.0.18</slf4j.version>
         <logback.version>1.5.38</logback.version>
         <jackson.version>2.22.1</jackson.version>
-        <!-- jackson-annotations does not ship a patch release in lockstep with
-             core/databind (there is no 2.22.1 artifact for it, only 2.22) — kept as
-             its own property so the mismatch is explicit instead of a typo waiting
-             to happen if someone reuses jackson.version here. -->
+        <!--
+        jackson-annotations does not ship a patch release in lockstep with
+        core/databind (there is no 2.22.1 artifact for it, only 2.22) — kept as
+        its own property so the mismatch is explicit instead of a typo waiting
+        to happen if someone reuses jackson.version here.
+        -->
         <jackson-annotations.version>2.22</jackson-annotations.version>
         <junit.version>5.11.3</junit.version>
         <mockito.version>5.14.2</mockito.version>
@@ -87,15 +93,18 @@
         <module>ara-core</module>
         <module>ara-runtime</module>
         <module>ara-adapters</module>
+        <module>ara-examples</module>
     </modules>
 
     <dependencyManagement>
         <dependencies>
 
-            <!-- ARA modules — declared here rather than by importing ara-bom.
-                 ara-bom is the consumer-facing deliverable listing these same
-                 artifacts; importing it from the build parent inverts the
-                 relationship and forms a pom import cycle. -->
+            <!--
+            ARA modules — declared here rather than by importing ara-bom.
+            ara-bom is the consumer-facing deliverable listing these same
+            artifacts; importing it from the build parent inverts the
+            relationship and forms a pom import cycle.
+            -->
             <dependency>
                 <groupId>io.github.xmor</groupId>
                 <artifactId>ara-core</artifactId>
@@ -111,10 +120,17 @@
                 <artifactId>ara-adapters</artifactId>
                 <version>${project.version}</version>
             </dependency>
+            <dependency>
+                <groupId>io.github.xmor</groupId>
+                <artifactId>ara-examples</artifactId>
+                <version>${project.version}</version>
+            </dependency>
 
-            <!-- Javalin — optional HTTP layer for ara-gateway only. Managed here so
-                 the enforcer's dependencyConvergence rule has one authoritative
-                 version for its transitive tree across the whole reactor. -->
+            <!--
+            Javalin — optional HTTP layer for ara-gateway only. Managed here so
+            the enforcer's dependencyConvergence rule has one authoritative
+            version for its transitive tree across the whole reactor.
+            -->
             <dependency>
                 <groupId>io.javalin</groupId>
                 <artifactId>javalin</artifactId>
@@ -138,13 +154,15 @@
                 <version>${logback.version}</version>
             </dependency>
 
-            <!-- JSON Processing — core and annotations pinned explicitly, not just
-                 databind: langchain4j-core (ara-adapters) declares its own
-                 jackson-core/jackson-annotations versions directly (not via a BOM),
-                 so without these two entries the enforcer's dependencyConvergence
-                 rule sees two different versions of each in the tree the moment
-                 jackson.version diverges from whatever langchain4j-core happens to
-                 pin — as it now does after bumping past 2.21.3/2.21. -->
+            <!--
+            JSON Processing — core and annotations pinned explicitly, not just
+            databind: langchain4j-core (ara-adapters) declares its own
+            jackson-core/jackson-annotations versions directly (not via a BOM),
+            so without these two entries the enforcer's dependencyConvergence
+            rule sees two different versions of each in the tree the moment
+            jackson.version diverges from whatever langchain4j-core happens to
+            pin — as it now does after bumping past 2.21.3/2.21.
+            -->
             <dependency>
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-databind</artifactId>
@@ -161,8 +179,10 @@
                 <version>${jackson-annotations.version}</version>
             </dependency>
 
-            <!-- Testing — junit-bom keeps junit-jupiter (5.x) and the
-                 junit-platform-* artifacts (1.x) on matching versions -->
+            <!--
+            Testing — junit-bom keeps junit-jupiter (5.x) and the
+            junit-platform-* artifacts (1.x) on matching versions
+            -->
             <dependency>
                 <groupId>org.junit</groupId>
                 <artifactId>junit-bom</artifactId>
@@ -193,18 +213,22 @@
             <artifactId>slf4j-api</artifactId>
         </dependency>
 
-        <!-- Logging backend is test-scoped on purpose: a library must not force a
-             binding on its consumers. Application-style modules (ara-examples)
-             declare logback-classic at runtime scope themselves. -->
+        <!--
+        Logging backend is test-scoped on purpose: a library must not force a
+        binding on its consumers. Application-style modules (ara-examples)
+        declare logback-classic at runtime scope themselves.
+        -->
         <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
             <scope>test</scope>
         </dependency>
 
-        <!-- Testing. Mockito is managed above but not declared here: no module
-             currently uses it (LLM interactions are stubbed with ScriptedLlmClient).
-             Add it per-module, without a version, if a test ever needs it. -->
+        <!--
+        Testing. Mockito is managed above but not declared here: no module
+        currently uses it (LLM interactions are stubbed with ScriptedLlmClient).
+        Add it per-module, without a version, if a test ever needs it.
+        -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
@@ -273,9 +297,9 @@
                         </goals>
                         <configuration>
                             <rules>
-                                <requireUpperBoundDeps/>
-                                <dependencyConvergence/>
-                                <banDuplicatePomDependencyVersions/>
+                                <requireUpperBoundDeps />
+                                <dependencyConvergence />
+                                <banDuplicatePomDependencyVersions />
                             </rules>
                         </configuration>
                     </execution>
@@ -324,25 +348,31 @@
                 </configuration>
             </plugin>
 
-            <!-- Uploads to the Maven Central Portal (central.sonatype.com), which
-                 replaced the legacy OSSRH/nexus-staging path. extensions=true makes
-                 this plugin take over the `deploy` phase for every module that
-                 inherits it, so `mvn deploy` publishes here instead of trying to
-                 reach a <distributionManagement> repository that does not exist. -->
+            <!--
+            Uploads to the Maven Central Portal (central.sonatype.com), which
+            replaced the legacy OSSRH/nexus-staging path. extensions=true makes
+            this plugin take over the `deploy` phase for every module that
+            inherits it, so `mvn deploy` publishes here instead of trying to
+            reach a <distributionManagement> repository that does not exist.
+            -->
             <plugin>
                 <groupId>org.sonatype.central</groupId>
                 <artifactId>central-publishing-maven-plugin</artifactId>
                 <version>${central-publishing-plugin.version}</version>
                 <extensions>true</extensions>
                 <configuration>
-                    <!-- Matches the <id> of the <server> entry in settings.xml that
-                         holds the Central Portal user token. -->
+                    <!--
+                    Matches the <id> of the <server> entry in settings.xml that
+                    holds the Central Portal user token.
+                    -->
                     <publishingServerId>central</publishingServerId>
-                    <!-- false = the upload is validated and then parked as a draft in
-                         the Portal UI, waiting for a human to press Publish. Release to
-                         Central is irreversible — a published version can never be
-                         replaced or withdrawn — so the manual gate stays until the
-                         process has proven itself. Flip to true for hands-off releases. -->
+                    <!--
+                    false = the upload is validated and then parked as a draft in
+                    the Portal UI, waiting for a human to press Publish. Release to
+                    Central is irreversible — a published version can never be
+                    replaced or withdrawn — so the manual gate stays until the
+                    process has proven itself. Flip to true for hands-off releases.
+                    -->
                     <autoPublish>false</autoPublish>
                     <skipPublishing>${ara.publish.skip}</skipPublishing>
                 </configuration>
@@ -351,14 +381,16 @@
     </build>
 
     <profiles>
-        <!-- Everything Maven Central requires but that would only slow down ordinary
-             development builds: the javadoc jar and the GPG signatures. Release paths
-             (`mvn deploy -Prelease` and the CI workflow) always activate this; a plain
-             `mvn install` never pays for it.
+        <!--
+        Everything Maven Central requires but that would only slow down ordinary
+        development builds: the javadoc jar and the GPG signatures. Release paths
+        (`mvn deploy -Prelease` and the CI workflow) always activate this; a plain
+        `mvn install` never pays for it.
 
-             The sources jar is deliberately NOT here — it is bound unconditionally in
-             the main build above, because it costs almost nothing and is useful to
-             anyone consuming a locally-installed snapshot. -->
+        The sources jar is deliberately NOT here — it is bound unconditionally in
+        the main build above, because it costs almost nothing and is useful to
+        anyone consuming a locally-installed snapshot.
+        -->
         <profile>
             <id>release</id>
             <build>
@@ -374,12 +406,14 @@
                                     <goal>jar</goal>
                                 </goals>
                                 <configuration>
-                                    <!-- Same switch as the signing and upload steps: a
-                                         module that is not published needs no javadoc jar,
-                                         and its doclint errors must not fail a release that
-                                         does not ship it. A module being added to the
-                                         release set has to get its javadoc clean first —
-                                         Central rejects a bundle without a javadoc jar. -->
+                                    <!--
+                                    Same switch as the signing and upload steps: a
+                                    module that is not published needs no javadoc jar,
+                                    and its doclint errors must not fail a release that
+                                    does not ship it. A module being added to the
+                                    release set has to get its javadoc clean first —
+                                    Central rejects a bundle without a javadoc jar.
+                                    -->
                                     <skip>${ara.publish.skip}</skip>
                                 </configuration>
                             </execution>
@@ -398,14 +432,18 @@
                                     <goal>sign</goal>
                                 </goals>
                                 <configuration>
-                                    <!-- Signing a module that is never uploaded is wasted
-                                         work, and on CI it would also fail the build for
-                                         modules excluded from the release. -->
+                                    <!--
+                                    Signing a module that is never uploaded is wasted
+                                    work, and on CI it would also fail the build for
+                                    modules excluded from the release.
+                                    -->
                                     <skip>${ara.publish.skip}</skip>
                                     <gpgArguments>
-                                        <!-- loopback lets gpg take the passphrase from
-                                             Maven instead of trying to open an interactive
-                                             pinentry prompt, which has no TTY on CI. -->
+                                        <!--
+                                        loopback lets gpg take the passphrase from
+                                        Maven instead of trying to open an interactive
+                                        pinentry prompt, which has no TTY on CI.
+                                        -->
                                         <arg>--pinentry-mode</arg>
                                         <arg>loopback</arg>
                                     </gpgArguments>
