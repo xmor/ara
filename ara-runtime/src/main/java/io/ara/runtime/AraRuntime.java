@@ -9,6 +9,7 @@ import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.SessionId;
 import io.ara.core.agent.SessionStore;
 import io.ara.core.common.AgentId;
+import io.ara.core.hitl.ApprovalGate;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmClientFactory;
 import io.ara.core.llm.LlmTransport;
@@ -47,6 +48,7 @@ import io.ara.runtime.strategy.ReflActStrategy;
 import io.ara.runtime.scheduler.AgentScheduler;
 import io.ara.runtime.scheduler.LocalAgentScheduler;
 import io.ara.runtime.stubs.InMemoryMemoryManager;
+import io.ara.runtime.hitl.ApprovalToolRegistry;
 import io.ara.runtime.telemetry.TelemetryToolRegistry;
 import io.ara.runtime.wiring.AggregatingToolRegistry;
 import io.ara.runtime.wiring.DrainPolicy;
@@ -126,6 +128,7 @@ public final class AraRuntime implements AutoCloseable {
     private final AgentProvider    agentProvider;
     private final AgentScheduler   scheduler;
     private final InstanceContextStore instanceContextStore;
+    private final ApprovalGate     approvalGate;
     private final QuiescenceTracker quiescenceTracker = new QuiescenceTracker();
     private final Map<String, LlmClient> llmClients;
     private final ToolRegistry     toolRegistry;
@@ -148,6 +151,7 @@ public final class AraRuntime implements AutoCloseable {
             AgentProvider agentProvider,
             AgentScheduler scheduler,
             InstanceContextStore instanceContextStore,
+            ApprovalGate approvalGate,
             Map<String, LlmClient> llmClients,
             ToolRegistry toolRegistry,
             Map<String, Retriever> retrievers) {
@@ -157,6 +161,7 @@ public final class AraRuntime implements AutoCloseable {
         this.agentProvider = agentProvider;
         this.scheduler     = scheduler;
         this.instanceContextStore = instanceContextStore;
+        this.approvalGate  = approvalGate;
         this.llmClients    = llmClients;
         this.toolRegistry  = toolRegistry;
         this.retrievers    = retrievers;
@@ -627,6 +632,17 @@ public final class AraRuntime implements AutoCloseable {
     public InstanceContextStore instanceContextStore() { return instanceContextStore; }
 
     /**
+     * Returns the {@link ApprovalGate} configured on this runtime, or {@code null} if
+     * no gate was supplied via {@link Builder#approvalGate(ApprovalGate)}.
+     *
+     * <p>When non-null, agents whose {@link AgentConfig#humanApprovalRequired()} is
+     * {@code true} will route every tool call through this gate before dispatch. External
+     * surfaces (e.g. an HTTP gateway) can list and resolve pending requests via
+     * {@link ApprovalGate#getPendingRequests()} and {@link ApprovalGate#submit}.
+     */
+    public ApprovalGate approvalGate() { return approvalGate; }
+
+    /**
      * Submits a task for asynchronous execution on the runtime's shared
      * virtual-thread executor, returning immediately with an {@link AgentFuture}.
      *
@@ -744,6 +760,7 @@ public final class AraRuntime implements AutoCloseable {
         private AraTelemetry telemetry = AraTelemetry.noop();
         private SessionStore sessionStore = SessionStore.noop();
         private MediaStore   mediaStore   = MediaStore.noop();
+        private ApprovalGate approvalGate;
         private Duration delegationTimeout = Duration.ofSeconds(AgentDelegationTool.DEFAULT_TIMEOUT_SEC);
         private AgentProvider agentProvider;
         private AraRuntimeConfig runtimeConfig;
@@ -941,6 +958,27 @@ public final class AraRuntime implements AutoCloseable {
         }
 
         /**
+         * Sets the {@link ApprovalGate} used to route sensitive tool calls through a
+         * human-in-the-loop approval flow. Optional — if not set, the HITL feature is
+         * disabled entirely (even when {@link AgentConfig#humanApprovalRequired()} is
+         * {@code true} on individual agents).
+         *
+         * <p>When set, agents with {@code humanApprovalRequired(true)} will block on the
+         * gate's {@link ApprovalGate#requestApproval} before every tool dispatch, parking
+         * cheaply on a virtual thread until a decision arrives or the request times out.
+         *
+         * <p>The same gate instance should be shared with any external surface (HTTP
+         * gateway, CLI, webhook) that lists and resolves pending approvals.
+         *
+         * @param approvalGate the gate; never {@code null}
+         * @see ApprovalGate
+         */
+        public Builder approvalGate(ApprovalGate approvalGate) {
+            this.approvalGate = Objects.requireNonNull(approvalGate, "approvalGate must not be null");
+            return this;
+        }
+
+        /**
          * Sets how long {@code delegate_task} waits for the target agent's reply before
          * failing the delegation, for every agent this runtime creates. Defaults to
          * {@value AgentDelegationTool#DEFAULT_TIMEOUT_SEC} seconds ({@link
@@ -1015,6 +1053,7 @@ public final class AraRuntime implements AutoCloseable {
 
             AgentScheduler scheduler = new LocalAgentScheduler(registry);
             return new AraRuntime(cfg, agentFactory, registry, agentProvider, scheduler, ctxStore,
+                    approvalGate,
                     Map.copyOf(instrumentedClients), discoveryRegistry(perAgentRegistries),
                     Map.copyOf(namedRetrievers));
         }
@@ -1135,11 +1174,15 @@ public final class AraRuntime implements AutoCloseable {
                     factoryBuilder.mcpServer(id, binding.connector(), binding.toolsAdapter()));
 
             return factoryBuilder
-                    .toolRegistryFactory(agentCfg -> new TelemetryToolRegistry(
-                            new DelegatingToolRegistry(
-                                    perAgentToolRegistry.apply(agentCfg), messageBus, agentCfg.agentId().value(),
-                                    delegationTimeout, agentCfg.delegateStateAccess(), sessionStore),
-                            telemetry))
+                    .toolRegistryFactory(agentCfg -> {
+                        ToolRegistry base = new DelegatingToolRegistry(
+                                perAgentToolRegistry.apply(agentCfg), messageBus, agentCfg.agentId().value(),
+                                delegationTimeout, agentCfg.delegateStateAccess(), sessionStore);
+                        ToolRegistry withApproval = approvalGate != null && agentCfg.humanApprovalRequired()
+                                ? new ApprovalToolRegistry(base, approvalGate, agentCfg)
+                                : base;
+                        return new TelemetryToolRegistry(withApproval, telemetry);
+                    })
                     .memoryManagerFactory(memFactory)
                     .executionPlanner(planner)
                     .telemetry(telemetry)

@@ -37,6 +37,7 @@ no framework lock-in.
 - [Agent Instance Context](#agent-instance-context--private-per-agent-data-adr-036)
 - [Runnable examples](#runnable-examples)
 - [Architecture](#architecture)
+- [Human-in-the-loop (HITL)](#human-in-the-loop-hitl--approval-gate)
 - [Advanced usage](docs/ADVANCED_README.md)
 - [Contributing](#contributing)
 - [License](#license)
@@ -51,6 +52,7 @@ no framework lock-in.
 | `ara-runtime`   | Implementations: `AraRuntime`, the execution strategies (`ReactStrategy`, `ReSpActStrategy`, `ReflActStrategy`, `PlanExecuteStrategy`, `ReflexionStrategy`), `ContractEnforcer`, `AgentPipeline`, `ScriptedLlmClient` stub, built-in processors |
 | `ara-adapters`  | LangChain4j-backed `LlmClient` adapters for OpenAI, Anthropic, Ollama and Mistral. No Kotlin, no OkHttp, no Spring. Declares its own LangChain4j BOM.                   |
 | `ara-examples`  | Runnable examples for offline (stub) and live (real LLM) scenarios                                                                                                       |
+| `ara-gateway`   | Optional HTTP layer (Javalin/Jetty) — surfaces for agent runs, control, session data, HITL approvals, and Agno AgentOS compatibility. Only needed when external callers reach the runtime over HTTP. |
 
 ---
 
@@ -689,7 +691,7 @@ the shorthand) carries the per-model settings:
 | `maxIterations(int)` | `10` | Max reasoning-loop iterations (LLM calls) per task before aborting |
 | `executionTimeout(Duration)` | 5 minutes | Wall-clock limit for a single task execution |
 | `maxTokensPerStep(int)` | `4096` | Token cap requested per LLM call |
-| `humanApprovalRequired(boolean)` | `false` | Route sensitive actions through the HITL approval gate (`AgentState.WAITING`) |
+| `humanApprovalRequired(boolean)` | `false` | When `true` and an `ApprovalGate` is configured on the runtime, every tool call is routed through the gate before dispatch — the virtual thread parks until a human decision arrives or the request times out |
 | `knowledgeBaseId(String)` | `null` | Knowledge base to use for RAG retrieval / `search_documents` |
 | `sessionBusyPolicy(SessionBusyPolicy)` | `REJECT` | Same-session concurrency: `REJECT` fails fast with `"Session busy"`, `ENQUEUE` queues FIFO (see [Same-session policy](#same-session-policy--reject-vs-queue)) |
 
@@ -877,9 +879,12 @@ Elapsed        : 1417ms
   `ara-adapters`, so you get LangChain4j's provider coverage *plus* the runtime on top.
 
 ### Capabilities that rarely come as one piece
-- **Human-in-the-loop as a runtime primitive** — `AgentState.WAITING`, an approval gate and
-  pluggable notifiers. `ApprovalDecision` is a sealed interface, so handling approve /
-  reject / modify exhaustively is enforced by the compiler, not by convention.
+- **Human-in-the-loop as a runtime primitive** — an `ApprovalGate` wired into the tool
+  dispatch chain via `AraRuntime.Builder.approvalGate(gate)`, with pluggable notifiers
+  (`LoggingApprovalNotifier`, `WebhookApprovalNotifier`). `ApprovalDecision` is a sealed
+  interface, so handling approve / reject / modify exhaustively is enforced by the compiler,
+  not by convention. The `ara-gateway` module exposes pending approvals via HTTP
+  (`GET /approvals`, `POST /approvals/{requestId}/decision`).
 - **Private per-agent data**  —
   `AgentInstanceContext` holds API keys or tenant ids that **both** prompt shaping and tool
   execution can read, and that never reach the LLM: not in the prompt text, not in a tool's
@@ -918,6 +923,95 @@ AraRuntime runtime = AraRuntime.builder()
 
 Enable RAG retrieval by setting `plannerStrategy("rag+react")` on the `AgentConfig` and
 registering the `search_documents` tool.
+
+### Human-in-the-loop (HITL) — approval gate
+
+Agents with `humanApprovalRequired(true)` route every tool call through an `ApprovalGate`
+before dispatch. The calling virtual thread parks cheaply (Project Loom) until a human
+decision arrives or the request times out.
+
+**Setup:**
+
+```java
+ApprovalGate gate = new InMemoryApprovalGate();
+
+AraRuntime runtime = AraRuntime.builder()
+        .llmClient(llmClient)
+        .approvalGate(gate)
+        .build();
+
+AraAgent agent = runtime.createAgent(AgentConfig.builder()
+        .agentId("payment-agent")
+        .agentType("finance")
+        .humanApprovalRequired(true)
+        .enabledTools(List.of("process_payment", "refund"))
+        .build());
+```
+
+When the agent calls a tool, `ApprovalToolRegistry` intercepts and:
+1. Creates an `ApprovalRequest` (UUID, agentId, toolId, arguments, expiry).
+2. Calls `gate.requestApproval(request)` — returns a `CompletableFuture<ApprovalDecision>`.
+3. The virtual thread parks on `.join()` until the future resolves.
+4. On `Approved` → dispatches the tool normally.
+5. On `Rejected` → returns a failed `ToolResult` (the agent sees "Human rejected action: …").
+6. On `Modified` → dispatches with the revised payload.
+7. On timeout → returns a failed `ToolResult`.
+
+**Resolving approvals programmatically:**
+
+```java
+// List pending requests
+List<ApprovalRequest> pending = gate.getPendingRequests();
+
+// Submit a decision
+gate.submit(requestId, new ApprovalDecision.Approved());
+gate.submit(requestId, new ApprovalDecision.Rejected("Too expensive"));
+gate.submit(requestId, new ApprovalDecision.Modified(newArgumentJson));
+```
+
+**Resolving approvals via HTTP (ara-gateway):**
+
+```bash
+# List pending approvals
+curl http://localhost:8080/approvals
+
+# Approve
+curl -X POST http://localhost:8080/approvals/{requestId}/decision \
+  -H "Content-Type: application/json" \
+  -d '{"decision": "approved"}'
+
+# Reject with reason
+curl -X POST http://localhost:8080/approvals/{requestId}/decision \
+  -H "Content-Type: application/json" \
+  -d '{"decision": "rejected", "reason": "Amount exceeds limit"}'
+
+# Modify payload
+curl -X POST http://localhost:8080/approvals/{requestId}/decision \
+  -H "Content-Type: application/json" \
+  -d '{"decision": "modified", "newPayload": {"amount": 50.00}}'
+```
+
+Enable the `APPROVALS` surface in the gateway config (`ara.yml`):
+```yaml
+ara:
+  gateway:
+    enabled: true
+    surfaces: [system, discovery, runs, control, sessions, approvals]
+```
+
+**Notifications:** Wire a notifier to alert operators when a request is pending:
+
+```java
+WebhookApprovalNotifier notifier = WebhookApprovalNotifier.builder()
+        .url("https://slack-hook.example.com/hitl")
+        .header("Authorization", "Bearer " + slackToken)
+        .build();
+```
+
+> **Design note:** The approval gate is opt-in at two levels — `AraRuntime.Builder.approvalGate(gate)`
+> enables the feature globally, and `AgentConfig.humanApprovalRequired(true)` enables it per
+> agent. If no gate is configured, the flag is inert (no error, no approval). If the gate is
+> configured but `humanApprovalRequired` is `false`, tool calls bypass the gate entirely.
 
 ### Agent scheduling
 `LocalAgentScheduler` is created by the runtime but agent schedules must be registered explicitly

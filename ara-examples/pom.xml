@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
 
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
     <groupId>io.github.xmor</groupId>
     <artifactId>ara</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1-SNAPSHOT</version>
   </parent>
 
   <artifactId>ara-examples</artifactId>
@@ -36,15 +36,10 @@
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
     </dependency>
-    <!-- Compile scope (non test): JUnitRunnerTool esegue in-process i test JUnit del progetto
-         generato dal Ralph loop a runtime, non solo nel test-phase di ara-examples stesso.
-         La versione arriva da junit-bom, gestito nel pom root. -->
     <dependency>
       <groupId>org.junit.platform</groupId>
       <artifactId>junit-platform-launcher</artifactId>
     </dependency>
-    <!-- Questo è il modulo applicativo: è qui che vive logback.xml, quindi è qui
-         che il binding SLF4J viene scelto. Le librerie non lo impongono ai consumer. -->
     <dependency>
       <groupId>ch.qos.logback</groupId>
       <artifactId>logback-classic</artifactId>
@@ -67,5 +62,4 @@
       </plugin>
     </plugins>
   </build>
-
 </project>
