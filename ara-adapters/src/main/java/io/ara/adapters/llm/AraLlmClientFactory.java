@@ -1,6 +1,7 @@
 package io.ara.adapters.llm;
 
 import io.ara.adapters.llm.anthropic.AnthropicLlmClient;
+import io.ara.adapters.llm.chatjimmy.ChatJimmyLlmClient;
 import io.ara.adapters.llm.mistral.MistralLlmClient;
 import io.ara.adapters.llm.ollama.OllamaLlmClient;
 import io.ara.adapters.llm.openai.OpenAiLlmClient;
@@ -33,6 +34,10 @@ import io.ara.core.llm.LlmClient;
  *     .model(MistralLlmClient.Models.MISTRAL_MEDIUM_LATEST)
  *     .build();
  *
+ * LlmClient jimmy = AraLlmClientFactory.chatJimmy()
+ *     .modelName("llama3.1-8B")
+ *     .build();
+ *
  * AraRuntime runtime = AraRuntime.builder()
  *     .llmClient("gpt-4o",  gpt4o)
  *     .llmClient("claude",  claude)
@@ -47,6 +52,7 @@ import io.ara.core.llm.LlmClient;
  * @see AnthropicLlmClient
  * @see OllamaLlmClient
  * @see MistralLlmClient
+ * @see ChatJimmyLlmClient
  * @see LlmClient
  */
 public final class AraLlmClientFactory {
@@ -94,5 +100,16 @@ public final class AraLlmClientFactory {
      */
     public static MistralLlmClient.Builder mistral() {
         return MistralLlmClient.builder();
+    }
+
+    /**
+     * Returns a builder for a <a href="https://chatjimmy.ai/">chatjimmy.ai</a>
+     * {@link LlmClient}. Unlike the other adapters this one is not LangChain4j-backed — see
+     * {@link ChatJimmyLlmClient} for why and for what was deliberately left out.
+     *
+     * @return {@link ChatJimmyLlmClient.Builder}
+     */
+    public static ChatJimmyLlmClient.Builder chatJimmy() {
+        return ChatJimmyLlmClient.builder();
     }
 }
