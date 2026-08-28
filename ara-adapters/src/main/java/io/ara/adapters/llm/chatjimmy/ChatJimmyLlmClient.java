@@ -2,6 +2,10 @@ package io.ara.adapters.llm.chatjimmy;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.Authenticator;
+import java.net.InetSocketAddress;
+import java.net.PasswordAuthentication;
+import java.net.ProxySelector;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -75,6 +79,15 @@ import io.ara.core.tool.AraTool;
  *     .build();
  * }</pre>
  *
+ * <h2>Outbound proxy</h2>
+ * <p>{@link Builder#proxy(String, int)}/{@link Builder#proxy(String, int, String, String)}
+ * route every outbound request through an HTTP/HTTPS proxy, with or without Basic credentials:
+ * <pre>{@code
+ * LlmClient jimmy = ChatJimmyLlmClient.builder()
+ *     .proxy("proxy.example.com", 8080, "user", "secret")
+ *     .build();
+ * }</pre>
+ *
  * @see LlmClient
  */
 public class ChatJimmyLlmClient implements LlmClient {
@@ -128,9 +141,25 @@ public class ChatJimmyLlmClient implements LlmClient {
         this.defaultMaxTokens = builder.maxTokens;
         this.topK = builder.topK;
         this.timeout = builder.timeout;
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(builder.timeout)
-                .build();
+
+        HttpClient.Builder httpBuilder = HttpClient.newBuilder()
+                .connectTimeout(builder.timeout);
+        if (builder.proxyHost != null) {
+            httpBuilder.proxy(ProxySelector.of(new InetSocketAddress(builder.proxyHost, builder.proxyPort)));
+            if (builder.proxyUsername != null) {
+                String user = builder.proxyUsername;
+                char[] password = builder.proxyPassword != null ? builder.proxyPassword.toCharArray() : new char[0];
+                httpBuilder.authenticator(new Authenticator() {
+                    @Override
+                    protected PasswordAuthentication getPasswordAuthentication() {
+                        return getRequestorType() == RequestorType.PROXY
+                                ? new PasswordAuthentication(user, password)
+                                : null;
+                    }
+                });
+            }
+        }
+        this.httpClient = httpBuilder.build();
     }
 
     public static Builder builder() {
@@ -613,6 +642,10 @@ public class ChatJimmyLlmClient implements LlmClient {
         private Integer maxTokens = 1024;
         private int topK = DEFAULT_TOP_K;
         private Duration timeout = Duration.ofSeconds(30);
+        private String proxyHost;
+        private int proxyPort;
+        private String proxyUsername;
+        private String proxyPassword;
 
         /** Overrides the default {@code https://chatjimmy.ai} base URL (useful for testing). */
         public Builder baseUrl(String baseUrl) { this.baseUrl = baseUrl; return this; }
@@ -634,6 +667,39 @@ public class ChatJimmyLlmClient implements LlmClient {
 
         /** HTTP request timeout. Defaults to {@code 30s}, matching the reference implementation. */
         public Builder timeout(Duration timeout) { this.timeout = timeout; return this; }
+
+        /**
+         * Routes every outbound request through an HTTP/HTTPS proxy at {@code host}:{@code port},
+         * with no proxy credentials. Not set by default — requests go direct.
+         */
+        public Builder proxy(String host, int port) {
+            this.proxyHost = host;
+            this.proxyPort = port;
+            this.proxyUsername = null;
+            this.proxyPassword = null;
+            return this;
+        }
+
+        /**
+         * Routes every outbound request through an HTTP/HTTPS proxy at {@code host}:{@code port},
+         * authenticating with HTTP Basic credentials.
+         *
+         * <p><b>HTTPS through the proxy.</b> {@link #baseUrl(String)} defaults to
+         * {@code https://chatjimmy.ai}, so the proxy is reached via an HTTP {@code CONNECT}
+         * tunnel. The JDK disables the {@code Basic} auth scheme for {@code CONNECT} tunnel
+         * proxies by default (a fix for CVE-2016-5462) — if the proxy rejects the tunnel with
+         * 407 despite correct credentials, the JVM needs
+         * {@code -Djdk.http.auth.tunneling.disabledSchemes=} (empty) to allow it. This client
+         * does not set that system property itself: it is JVM-wide, and a library changing it
+         * silently would affect every other HTTP client in the process.
+         */
+        public Builder proxy(String host, int port, String username, String password) {
+            this.proxyHost = host;
+            this.proxyPort = port;
+            this.proxyUsername = username;
+            this.proxyPassword = password;
+            return this;
+        }
 
         public ChatJimmyLlmClient build() {
             return new ChatJimmyLlmClient(this);
