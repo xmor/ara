@@ -204,6 +204,42 @@ class ChatJimmyLlmClientTest {
     }
 
     @Test
+    void complete_maps_upstream_404_to_invalid_request_not_model_not_found() throws Exception {
+        // A 404 on POST /api/chat means the request never reached chatjimmy.ai's endpoint at
+        // all (wrong baseUrl, misconfigured proxy, a gateway 404ing a blocked host) — chatjimmy
+        // never validates the model name, so this must not be reported as "model not found",
+        // and the real body must survive into the message for diagnosis.
+        try (StubLlmProvider provider = StubLlmProvider.failingWith(404, "no route to host")) {
+            LlmException ex = assertThrows(LlmException.class, () ->
+                    clientPointedAt(provider).complete(
+                            List.of(LlmMessage.user("hi")),
+                            new LlmCallContext.Builder().agentType("test").build()));
+
+            assertEquals(LlmException.ErrorType.INVALID_REQUEST, ex.errorType());
+            assertFalse(ex.isRetryable());
+            assertTrue(ex.getMessage().contains("no route to host"));
+        }
+    }
+
+    @Test
+    void complete_maps_407_to_an_actionable_proxy_auth_message() throws Exception {
+        // A bare 407 with no body is what a CONNECT tunnel proxy returns when the JDK never
+        // offered Basic credentials in the first place (its CVE-2016-5462 mitigation) — the
+        // message must point at the JVM flag, not read as "your password is wrong".
+        try (StubLlmProvider provider = StubLlmProvider.failingWith(407, "")) {
+            LlmException ex = assertThrows(LlmException.class, () ->
+                    clientPointedAt(provider).complete(
+                            List.of(LlmMessage.user("hi")),
+                            new LlmCallContext.Builder().agentType("test").build()));
+
+            assertEquals(LlmException.ErrorType.AUTHENTICATION, ex.errorType());
+            assertEquals(407, ex.statusCode());
+            assertFalse(ex.isRetryable());
+            assertTrue(ex.getMessage().contains("jdk.http.auth.tunneling.disabledSchemes"));
+        }
+    }
+
+    @Test
     void complete_maps_upstream_429_to_a_retryable_rate_limit() throws Exception {
         try (StubLlmProvider provider = StubLlmProvider.failingWith(429, "slow down")) {
             LlmException ex = assertThrows(LlmException.class, () ->

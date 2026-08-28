@@ -416,13 +416,43 @@ public class ChatJimmyLlmClient implements LlmClient {
         }
     }
 
+    /**
+     * Maps an HTTP failure from either the proxy or the upstream to a typed {@link
+     * LlmException}, always keeping the real status and body in the message.
+     *
+     * <p>404 is deliberately <em>not</em> treated as "model not found" the way the OpenAI
+     * adapter treats it: chatjimmy.ai's {@code /api/chat} passes {@code selectedModel} straight
+     * through with no existence check (see the class javadoc's reference to the upstream
+     * translation logic), so a 404 here almost always means the request never reached that
+     * endpoint at all — a stale {@link Builder#baseUrl(String)}, a misconfigured {@link
+     * Builder#proxy(String, int)}, or a proxy/gateway returning its own 404 for a blocked or
+     * unroutable host. Substituting a "model not found" message for that would send whoever
+     * reads it looking for a typo in {@link Builder#modelName(String)} instead of at the actual
+     * cause, which is exactly backwards.
+     *
+     * <p>407 gets its own message rather than falling through to a generic network error: it
+     * almost never means the credentials passed to {@link Builder#proxy(String, int, String,
+     * String)} are wrong. With the default HTTPS {@link Builder#baseUrl(String)}, the proxy is
+     * reached through an HTTP {@code CONNECT} tunnel, and the JDK disables the {@code Basic}
+     * auth scheme for tunnel proxies by default (a CVE-2016-5462 mitigation) — so {@code
+     * HttpClient} never even offers the credentials, and the 407 (usually with an empty body,
+     * hence the unhelpful {@code "HTTP 407: null"} a caller would otherwise see) is the proxy
+     * rejecting an unauthenticated {@code CONNECT}, not rejecting real credentials.
+     */
     private LlmException mapHttpError(int status, String body) {
         String msg = "HTTP " + status + ": " + body;
+        if (status == 407) {
+            return new LlmException(
+                    "Proxy authentication failed (HTTP 407). If baseUrl is HTTPS (the default), "
+                    + "the JDK disables Basic auth on CONNECT tunnels by default — pass "
+                    + "-Djdk.http.auth.tunneling.disabledSchemes= (empty) as a JVM argument to "
+                    + "allow it. Raw response: " + msg,
+                    null, LlmException.ErrorType.AUTHENTICATION, PROVIDER, 407, false);
+        }
         return switch (status) {
             case 401, 403 -> LlmException.authenticationError(PROVIDER, msg);
-            case 404 -> LlmException.modelNotFound(PROVIDER, modelName);
             case 429 -> LlmException.rateLimit(PROVIDER, msg);
-            case 400, 413, 422 -> LlmException.invalidRequest(PROVIDER, msg);
+            case 400, 404, 413, 422 -> LlmException.invalidRequest(PROVIDER, msg);
             default -> status >= 500
                     ? LlmException.serverError(PROVIDER, msg, status)
                     : LlmException.networkError(PROVIDER, msg, null);
