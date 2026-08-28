@@ -12,10 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.Flow;
 import java.util.concurrent.SubmissionPublisher;
 import java.util.regex.Matcher;
@@ -26,6 +23,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import com.sun.net.httpserver.HttpServer;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
@@ -705,4 +703,36 @@ public class ChatJimmyLlmClient implements LlmClient {
             return new ChatJimmyLlmClient(this);
         }
     }
+
+    private static final String PROXY_USER = "user";
+    private static final String PROXY_PASS = "password";
+    private static final String PROXY_URL= "proxy";
+    private static final int PROXY_PORT= 8012;
+
+    public static void main(String[] args) throws Exception {
+
+        System.setProperty("jdk.http.auth.tunneling.disabledSchemes", "");
+
+        LlmClient jimmy = ChatJimmyLlmClient.builder()
+                .baseUrl("https://chatjimmy.ai")
+                .modelName("llama3.1-8B")
+                .proxy(PROXY_URL, PROXY_PORT, PROXY_USER, PROXY_PASS)
+                .build();
+
+        LlmCompletion completion = jimmy.complete(
+                List.of(LlmMessage.user("What is the capital of Italy?")),
+                new LlmCallContext.Builder().agentType("demo").build());
+
+        System.out.println();
+        System.out.println("=== LlmCompletion ===");
+        System.out.println("text:          " + completion.text());
+        System.out.println("finishReason:  " + completion.finishReason());
+        System.out.println("promptTokens:  " + completion.promptTokens());
+        System.out.println("outputTokens:  " + completion.outputTokens());
+        System.out.println();
+        System.out.println("The request reached this text ONLY by going through the");
+        System.out.println("authenticated proxy — baseUrl itself does not resolve.");
+
+    }
+
 }
