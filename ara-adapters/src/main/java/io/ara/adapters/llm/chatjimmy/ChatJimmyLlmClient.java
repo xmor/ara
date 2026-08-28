@@ -418,13 +418,26 @@ public class ChatJimmyLlmClient implements LlmClient {
         }
     }
 
+    /**
+     * Maps an HTTP failure from either the proxy or the upstream to a typed {@link
+     * LlmException}, always keeping the real status and body in the message.
+     *
+     * <p>404 is deliberately <em>not</em> treated as "model not found" the way the OpenAI
+     * adapter treats it: chatjimmy.ai's {@code /api/chat} passes {@code selectedModel} straight
+     * through with no existence check (see the class javadoc's reference to the upstream
+     * translation logic), so a 404 here almost always means the request never reached that
+     * endpoint at all — a stale {@link Builder#baseUrl(String)}, a misconfigured {@link
+     * Builder#proxy(String, int)}, or a proxy/gateway returning its own 404 for a blocked or
+     * unroutable host. Substituting a "model not found" message for that would send whoever
+     * reads it looking for a typo in {@link Builder#modelName(String)} instead of at the actual
+     * cause, which is exactly backwards.
+     */
     private LlmException mapHttpError(int status, String body) {
         String msg = "HTTP " + status + ": " + body;
         return switch (status) {
             case 401, 403 -> LlmException.authenticationError(PROVIDER, msg);
-            case 404 -> LlmException.modelNotFound(PROVIDER, modelName);
             case 429 -> LlmException.rateLimit(PROVIDER, msg);
-            case 400, 413, 422 -> LlmException.invalidRequest(PROVIDER, msg);
+            case 400, 404, 413, 422 -> LlmException.invalidRequest(PROVIDER, msg);
             default -> status >= 500
                     ? LlmException.serverError(PROVIDER, msg, status)
                     : LlmException.networkError(PROVIDER, msg, null);

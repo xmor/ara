@@ -204,6 +204,24 @@ class ChatJimmyLlmClientTest {
     }
 
     @Test
+    void complete_maps_upstream_404_to_invalid_request_not_model_not_found() throws Exception {
+        // A 404 on POST /api/chat means the request never reached chatjimmy.ai's endpoint at
+        // all (wrong baseUrl, misconfigured proxy, a gateway 404ing a blocked host) — chatjimmy
+        // never validates the model name, so this must not be reported as "model not found",
+        // and the real body must survive into the message for diagnosis.
+        try (StubLlmProvider provider = StubLlmProvider.failingWith(404, "no route to host")) {
+            LlmException ex = assertThrows(LlmException.class, () ->
+                    clientPointedAt(provider).complete(
+                            List.of(LlmMessage.user("hi")),
+                            new LlmCallContext.Builder().agentType("test").build()));
+
+            assertEquals(LlmException.ErrorType.INVALID_REQUEST, ex.errorType());
+            assertFalse(ex.isRetryable());
+            assertTrue(ex.getMessage().contains("no route to host"));
+        }
+    }
+
+    @Test
     void complete_maps_upstream_429_to_a_retryable_rate_limit() throws Exception {
         try (StubLlmProvider provider = StubLlmProvider.failingWith(429, "slow down")) {
             LlmException ex = assertThrows(LlmException.class, () ->
