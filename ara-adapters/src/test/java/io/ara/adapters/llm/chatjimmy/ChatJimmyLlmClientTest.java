@@ -1,6 +1,7 @@
 package io.ara.adapters.llm.chatjimmy;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.sun.net.httpserver.HttpServer;
 import io.ara.adapters.llm.StubLlmProvider;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmCompletion;
@@ -12,12 +13,17 @@ import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolResult;
 import org.junit.jupiter.api.Test;
 
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -237,6 +243,69 @@ class ChatJimmyLlmClientTest {
             assertTrue(done.await(10, TimeUnit.SECONDS), "stream never completed");
             String all = String.join("", received);
             assertEquals("Hello, world!", all);
+        }
+    }
+
+    @Test
+    void requests_are_routed_through_the_configured_http_proxy() throws Exception {
+        // The "proxy" here is StubLlmProvider answering unconditionally, which is enough to
+        // prove the client actually dialled it: baseUrl below resolves to nothing on its own,
+        // so a direct (non-proxied) request would never reach this reply.
+        try (StubLlmProvider proxy = StubLlmProvider.answering("proxied reply")) {
+            URI proxyUri = URI.create(proxy.baseUrl());
+            ChatJimmyLlmClient client = ChatJimmyLlmClient.builder()
+                    .baseUrl("http://chatjimmy-proxy-test.invalid:9999")
+                    .proxy(proxyUri.getHost(), proxyUri.getPort())
+                    .timeout(Duration.ofSeconds(10))
+                    .build();
+
+            LlmCompletion completion = client.complete(
+                    List.of(LlmMessage.user("hi")),
+                    new LlmCallContext.Builder().agentType("test").build());
+
+            assertEquals("proxied reply", completion.text());
+        }
+    }
+
+    @Test
+    void proxy_credentials_are_sent_as_basic_auth_after_the_407_challenge() throws Exception {
+        AtomicInteger requestCount = new AtomicInteger();
+        HttpServer proxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        proxy.createContext("/", exchange -> {
+            requestCount.incrementAndGet();
+            String authHeader = exchange.getRequestHeaders().getFirst("Proxy-Authorization");
+            if (authHeader == null) {
+                exchange.getResponseHeaders().add("Proxy-Authenticate", "Basic realm=\"test\"");
+                exchange.sendResponseHeaders(407, -1);
+                exchange.close();
+                return;
+            }
+            String expected = "Basic " + Base64.getEncoder()
+                    .encodeToString("proxyuser:proxypass".getBytes(StandardCharsets.UTF_8));
+            assertEquals(expected, authHeader);
+            byte[] out = "authenticated reply".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, out.length);
+            exchange.getResponseBody().write(out);
+            exchange.close();
+        });
+        proxy.start();
+        try {
+            ChatJimmyLlmClient client = ChatJimmyLlmClient.builder()
+                    .baseUrl("http://chatjimmy-proxy-test.invalid:9999")
+                    .proxy("127.0.0.1", proxy.getAddress().getPort(), "proxyuser", "proxypass")
+                    .timeout(Duration.ofSeconds(10))
+                    .build();
+
+            LlmCompletion completion = client.complete(
+                    List.of(LlmMessage.user("hi")),
+                    new LlmCallContext.Builder().agentType("test").build());
+
+            assertEquals("authenticated reply", completion.text());
+            assertTrue(requestCount.get() >= 2,
+                    "expected a 407 challenge followed by an authenticated retry");
+        } finally {
+            proxy.stop(0);
         }
     }
 }
