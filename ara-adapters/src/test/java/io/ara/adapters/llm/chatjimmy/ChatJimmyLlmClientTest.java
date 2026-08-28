@@ -222,6 +222,24 @@ class ChatJimmyLlmClientTest {
     }
 
     @Test
+    void complete_maps_407_to_an_actionable_proxy_auth_message() throws Exception {
+        // A bare 407 with no body is what a CONNECT tunnel proxy returns when the JDK never
+        // offered Basic credentials in the first place (its CVE-2016-5462 mitigation) — the
+        // message must point at the JVM flag, not read as "your password is wrong".
+        try (StubLlmProvider provider = StubLlmProvider.failingWith(407, "")) {
+            LlmException ex = assertThrows(LlmException.class, () ->
+                    clientPointedAt(provider).complete(
+                            List.of(LlmMessage.user("hi")),
+                            new LlmCallContext.Builder().agentType("test").build()));
+
+            assertEquals(LlmException.ErrorType.AUTHENTICATION, ex.errorType());
+            assertEquals(407, ex.statusCode());
+            assertFalse(ex.isRetryable());
+            assertTrue(ex.getMessage().contains("jdk.http.auth.tunneling.disabledSchemes"));
+        }
+    }
+
+    @Test
     void complete_maps_upstream_429_to_a_retryable_rate_limit() throws Exception {
         try (StubLlmProvider provider = StubLlmProvider.failingWith(429, "slow down")) {
             LlmException ex = assertThrows(LlmException.class, () ->

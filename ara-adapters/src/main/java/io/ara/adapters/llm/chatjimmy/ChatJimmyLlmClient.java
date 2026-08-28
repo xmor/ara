@@ -431,9 +431,26 @@ public class ChatJimmyLlmClient implements LlmClient {
      * unroutable host. Substituting a "model not found" message for that would send whoever
      * reads it looking for a typo in {@link Builder#modelName(String)} instead of at the actual
      * cause, which is exactly backwards.
+     *
+     * <p>407 gets its own message rather than falling through to a generic network error: it
+     * almost never means the credentials passed to {@link Builder#proxy(String, int, String,
+     * String)} are wrong. With the default HTTPS {@link Builder#baseUrl(String)}, the proxy is
+     * reached through an HTTP {@code CONNECT} tunnel, and the JDK disables the {@code Basic}
+     * auth scheme for tunnel proxies by default (a CVE-2016-5462 mitigation) — so {@code
+     * HttpClient} never even offers the credentials, and the 407 (usually with an empty body,
+     * hence the unhelpful {@code "HTTP 407: null"} a caller would otherwise see) is the proxy
+     * rejecting an unauthenticated {@code CONNECT}, not rejecting real credentials.
      */
     private LlmException mapHttpError(int status, String body) {
         String msg = "HTTP " + status + ": " + body;
+        if (status == 407) {
+            return new LlmException(
+                    "Proxy authentication failed (HTTP 407). If baseUrl is HTTPS (the default), "
+                    + "the JDK disables Basic auth on CONNECT tunnels by default — pass "
+                    + "-Djdk.http.auth.tunneling.disabledSchemes= (empty) as a JVM argument to "
+                    + "allow it. Raw response: " + msg,
+                    null, LlmException.ErrorType.AUTHENTICATION, PROVIDER, 407, false);
+        }
         return switch (status) {
             case 401, 403 -> LlmException.authenticationError(PROVIDER, msg);
             case 429 -> LlmException.rateLimit(PROVIDER, msg);
