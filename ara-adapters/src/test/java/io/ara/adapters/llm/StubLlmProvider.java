@@ -101,6 +101,29 @@ public final class StubLlmProvider implements AutoCloseable {
         });
     }
 
+    /**
+     * Starts a stub that streams {@code chunks} as raw text, pausing between each — the shape
+     * chatjimmy.ai's {@code /api/chat} uses: one incrementally-delivered text body carrying its
+     * own inline markers, not SSE and not newline-delimited JSON.
+     */
+    public static StubLlmProvider streamingText(List<String> chunks, Duration betweenChunks) throws Exception {
+        return new StubLlmProvider(exchange -> {
+            exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=utf-8");
+            exchange.sendResponseHeaders(200, 0);   // 0 = chunked, length unknown up front
+            try (OutputStream out = exchange.getResponseBody()) {
+                for (String chunk : chunks) {
+                    out.write(chunk.getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                    Thread.sleep(betweenChunks.toMillis());
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                // The client hung up mid-stream. Expected in cancellation tests.
+            }
+        });
+    }
+
     /** Base URL to point an adapter at. */
     public String baseUrl() {
         return "http://127.0.0.1:" + server.getAddress().getPort();
