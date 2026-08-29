@@ -403,6 +403,10 @@ Both snippets above route on a raw string comparison against `lastOutput()`, whi
 fine when the classifier is trusted and the branches are few. `IntentRouter` +
 `classify(...)` + `worker(...)` cover the same shape when it becomes a real dispatch:
 
+> Runnable: `ClassifyAndActExample` in `ara-examples` is the minimal form — one
+> classifier, one router, four workers. `TicketTriageCascadeExample` in the same package
+> is the rules → model → human cascade described in the rest of this section.
+
 ```java
 IntentRouter router = IntentRouter.onField("intent")
         .route("TECH",    "tech")
