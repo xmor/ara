@@ -16,6 +16,10 @@ host pipelines inside a real `AgentInstance`, makes that unit of work a first-cl
 | `PipelineStrategy` | Package-private `ExecutionStrategy` that adapts an `AgentPipeline` to run inside an `AgentInstance`. |
 | `PipelineAgents` | Public factory: `PipelineAgents.of(pipeline)` → an `AraAgent` backed by a real `AgentInstance` hosting a `PipelineStrategy`. The only class most callers ever touch directly besides `AgentPipeline` itself. |
 | `ParallelAgent` | Public `AraAgent` that fans a task out to N member agents concurrently and merges their responses — see "Fan-out within a step" below. |
+| `IntentRouter` | Public `Function<PipelineExecution, String>` for classify-and-act: reads a label (and optional confidence) out of a classifier step's output, writes it to `RunState`, emits the `pipeline.classify` span, and returns the one worker that handles it — with a mandatory else-arc. See "Classify-and-act" below. |
+| `RuleClassifier` | Public builder producing a **deterministic** classifier agent — keyword/regex/predicate rules over the task text, first match wins — that emits the same JSON an LLM classifier would. Built on `AraAgents.deterministic`: no LLM, no tokens, no round trip. |
+| `ApprovalClassifier` | Public builder producing a classifier agent that asks a **human**: registers an `ApprovalRequest` on an `ApprovalGate`, parks until an operator decides, emits the label in the same JSON shape. The escalation target for `IntentRouter.escalateBelow(...)`. |
+| `ClassifyAndActSpec` | The whole pattern as data: tiers, rules, label→worker table, thresholds. Parses from a `JsonNode` (JSON out of the box) and builds the pipeline, resolving agents by name through an `AgentResolver`. Adding a category becomes a document edit. |
 
 `PipelineAgents` is deliberately plural, not `PipelineAgent` — a near-mirror of
 `AgentPipeline` (same two words, swapped) reads as an easy mix-up, and this class is a
@@ -387,11 +391,249 @@ AgentPipeline pipeline = AgentPipeline.fsmBuilder()
         .build();
 ```
 
-Using the free-form `builder()` for the same shape requires an explicit `route(...) ->
-null` on each of `billing`/`technical`/`general` — without it, the default "advance to
-the next declared step" behavior would run `technical` right after `billing`. The FSM
-builder's `terminal(...)` does this for you, which is why it — not the free-form
-builder — is the natural fit for "classify, then stop in exactly one branch".
+Written by hand on the free-form `builder()`, the same shape needs an explicit
+`route(...) -> null` on each of `billing`/`technical`/`general` — without it, the default
+"advance to the next declared step" behavior would run `technical` right after `billing`.
+`terminal(...)` on the FSM builder does that for you; `worker(...)` on the free-form
+builder does it too, and also fixes the input side. See the next section.
+
+### Classify-and-act
+
+Both snippets above route on a raw string comparison against `lastOutput()`, which is
+fine when the classifier is trusted and the branches are few. `IntentRouter` +
+`classify(...)` + `worker(...)` cover the same shape when it becomes a real dispatch:
+
+```java
+IntentRouter router = IntentRouter.onField("intent")
+        .route("TECH",    "tech")
+        .route("SALES",   "sales")
+        .route("BILLING", "billing")
+        .writeLabelTo("intent")
+        .confidenceField("confidence")
+        .escalateBelow(0.7, "human")
+        .telemetry(telemetry)
+        .orElse("fallback");
+
+AgentPipeline triage = AgentPipeline.builder()
+        .classify("classify", classifierAgent, router)
+        .worker("tech",     techAgent)
+        .worker("sales",    salesAgent)
+        .worker("billing",  billingAgent)
+        .worker("human",    humanReviewAgent)
+        .worker("fallback", fallbackAgent)
+        .build();
+```
+
+What the three pieces buy over the hand-written lambda:
+
+- **The else-arc cannot be forgotten.** `orElse(...)` is the terminal build method, so a
+  router that returns `null` for a label the model invented — ending the run with the
+  classifier's own JSON as the final answer — is unrepresentable. Every non-matching
+  case (unknown label, missing field, unparseable output) lands there with a `Reason`
+  attached rather than falling off the end.
+- **`worker(...)` fixes both wrong defaults at once.** Its task carries
+  `execution.initialInput()`, not the classifier's label — otherwise the support agent is
+  asked to answer `{"intent":"TECH"}` instead of the ticket. And it ends the run, so five
+  sibling workers declared in a row don't execute one after another with the
+  classification silently ignored past the first hop.
+- **The state write is not a side effect in a lambda.** `writeLabelTo` / `writeConfidenceTo`
+  put the classification in `RunState`, where a worker reads it through
+  `RunContext.state()` — the sanctioned channel — instead of having it spliced into its
+  input. A router is called for its return value; mutating shared state from inside one
+  is exactly the kind of thing that stops being obvious six months later.
+- **The decision is observable.** Every call emits a `pipeline.classify` span carrying
+  `routing.label`, `routing.target`, `routing.confidence`, `routing.matched`, and
+  `routing.reason` — the last one being *why* that target was chosen (`MATCHED`,
+  `UNKNOWN_LABEL`, `MISSING_LABEL`, `UNPARSEABLE_OUTPUT`, `LOW_CONFIDENCE`,
+  `MISSING_CONFIDENCE`). For a triage system that distribution *is* the quality metric,
+  and a lambda returning a bare string cannot report it.
+- **Targets are checked at build time.** `classify(...)` registers the router's declared
+  targets, and `build()` fails if any of them is not a declared step — instead of the
+  run aborting with "Unknown step" only for the inputs that happen to carry that label.
+
+`escalateBelow(threshold, step)` is checked *before* the route lookup: a label the model
+is unsure of goes to the escalation step even when it names a real worker, and a missing
+confidence counts as below the threshold rather than as certainty. Pair it with an
+`ApprovalGate`-backed agent for a human-in-the-loop triage.
+
+Constraining the classifier's vocabulary is a complementary, separate concern that
+belongs in its `AgentContract` — `JsonFieldValueValidator.oneOf("intent", "TECH", …)`
+rejects an out-of-vocabulary label before it reaches the router, for zero tokens.
+`IntentRouter` still handles the unknown label rather than assuming that validator is
+wired: a rejected contract fails the step, an unroutable label takes the else-arc, and
+those are different outcomes.
+
+Both `classify(...)` and `worker(...)` feed their step `execution.initialInput()`. For a
+single classifier in first position that is invisible — it *is* `lastOutput()` there —
+and it becomes load-bearing as soon as a second classifier is reached by escalation, or a
+worker follows the first one. To classify a *transformed* input (normalised, enriched),
+use `step(name, agent, shaper)` with an explicit `route(...)` instead.
+
+#### A deterministic classifier, and the cascade
+
+`RuleClassifier` builds the classify step out of rules instead of a model. A large share
+of real tickets are decided by a word — "rimborso", "stack trace", "preventivo" — and
+paying an LLM round trip to learn that costs latency and money on the easy cases while
+adding a way to be wrong about them:
+
+```java
+AraAgent rules = RuleClassifier.builder(AgentId.of("triage-rules"))
+        .when("BILLING", "fattura", "rimborso", "pagamento")
+        .when("TECH",    "crash", "stack trace", "non si avvia")
+        .whenMatches("SALES", Pattern.compile("preventiv|listin", Pattern.CASE_INSENSITIVE))
+        .orElse("UNKNOWN");
+```
+
+Rules are evaluated **in declaration order, first match wins** — so a `TECH_URGENT` rule
+must be declared before the `TECH` one that would also match it. That priority-ordered,
+mutually exclusive evaluation is precisely what a set of graph edge conditions cannot
+express. `when(...)` is plain case-insensitive substring matching, so `crash` fires inside
+`crashaggio`; use `whenMatches(...)` with `\b` when a whole word is meant.
+
+It emits the same shape a prompted classifier would, with `confidence` at `1.0` when a
+rule fired and `0.0` when none did. Those two values are what make the **cascade** work:
+
+```java
+AgentPipeline triage = AgentPipeline.builder()
+        .classify("rules", rules, IntentRouter.onField("intent")
+                .route("BILLING", "billing").route("TECH", "tech").route("SALES", "sales")
+                .confidenceField("confidence")
+                .escalateBelow(0.5, "llmClassify")   // no rule fired → ask the model
+                .orElse("fallback"))
+        .classify("llmClassify", llmClassifier, IntentRouter.onField("intent")
+                .route("BILLING", "billing").route("TECH", "tech").route("SALES", "sales")
+                .orElse("fallback"))
+        .worker("billing", billingAgent)
+        .worker("tech",    techAgent)
+        .worker("sales",   salesAgent)
+        .worker("fallback", fallbackAgent)
+        .maxSteps(3)
+        .build();
+```
+
+The rules answer what they know at zero cost; everything else reaches the model, which
+sees the **original ticket** — not the rules' verdict — because `classify(...)` feeds
+`initialInput()`.
+
+`RuleClassifier` is an ordinary `AraAgent` built through `AraAgents.deterministic(...)`,
+so the router, the workers and the pipeline cannot tell it apart from a prompted one. Its
+response reports zero tokens and `plannerStrategy() == "deterministic"`, so it does not
+advertise a reasoning loop it does not have.
+
+#### The third tier: a human
+
+`escalateBelow(threshold, step)` names a step, and `ApprovalClassifier` is what that step
+should usually be. It registers an `ApprovalRequest` carrying the ticket, the label the
+previous classifier proposed, and the vocabulary the operator may choose from; it parks
+until someone decides; and it emits the answer in the same shape as the other two. Rules,
+model and human are three implementations of one slot.
+
+```java
+AraAgent human = ApprovalClassifier.builder(AgentId.of("triage-human"), gate)
+        .labels("BILLING", "TECH", "SALES")
+        .proposedLabelFrom("intent")          // written by the escalating router's writeLabelTo(...)
+        .timeout(Duration.ofMinutes(15))
+        .notifier(notifier)
+        .recordOutcomeAs("approval.outcome")
+        .orElse("UNKNOWN");
+```
+
+The decision becomes a label like this: `Approved` confirms the proposed one, `Modified`
+replaces it with the operator's choice, `Rejected` and a timeout leave the task
+unresolved at confidence `0.0` so the router's own else-arc carries it to the default
+queue. A `Modified` payload outside the declared vocabulary is refused — an operator must
+not invent a category the pipeline has no worker for.
+
+A rejection and a timeout produce the same label, so they are indistinguishable
+downstream; `recordOutcomeAs(...)` puts the `Outcome` enum in `RunState` for a later step,
+and every non-approval is logged. An unanswered escalation reaching the default queue —
+rather than falling back to the guess the model was unsure of — is the point of the whole
+arrangement, and is covered by a test.
+
+Two things to know before wiring it:
+
+- **The step blocks** for up to the timeout. Parking a virtual thread is cheap, but the
+  pipeline has no notion of suspending and resuming a run: the run holds its thread for
+  the whole window, and a pipeline hosted through `PipelineAgents.of(...)` holds its
+  session lock too, so concurrent calls on that session meet the configured
+  `SessionBusyPolicy` until an operator decides. Budget minutes, not hours.
+- **The proposed label is *read* from `RunState`.** Under `RunState.noop()` — what a bare
+  `AgentTask.of("...")` carries — nothing is ever found, so every `Approved` decision
+  becomes unusable. The classifier logs one warning per instance saying so.
+
+#### The whole thing as data
+
+Everything above is a dispatch table with a few thresholds, and a dispatch table has no
+business being Java: adding a category should not be a recompile and a redeploy.
+`ClassifyAndActSpec` is the same pipeline written as a document.
+
+```java
+AgentPipeline triage = ClassifyAndActSpec.fromJson(document)
+        .build(ClassifyAndActSpec.Bindings
+                .of(ClassifyAndActSpec.AgentResolver.byId(runtime.registry()))
+                .withApprovalGate(gate)
+                .withTelemetry(telemetry));
+```
+
+```json
+{
+  "classifiers": [
+    { "name": "rules", "type": "rules",
+      "rules": [ { "label": "BILLING", "keywords": ["fattura", "rimborso"] },
+                 { "label": "SALES",   "regex": "preventiv|listin" } ],
+      "unmatchedLabel": "UNKNOWN",
+      "routes": { "BILLING": "billing", "SALES": "sales" },
+      "writeLabelTo": "intent", "confidenceField": "confidence",
+      "escalateBelow": 0.5, "escalateTo": "model",
+      "orElse": "fallback" },
+
+    { "name": "model", "type": "agent", "agent": "triage-llm",
+      "routes": { "BILLING": "billing", "SALES": "sales" },
+      "writeLabelTo": "intent", "confidenceField": "confidence",
+      "escalateBelow": 0.7, "escalateTo": "human",
+      "orElse": "fallback" },
+
+    { "name": "human", "type": "approval",
+      "labels": ["BILLING", "SALES"], "proposedLabelFrom": "intent",
+      "timeoutSeconds": 900, "recordOutcomeAs": "approval.outcome",
+      "unmatchedLabel": "UNKNOWN",
+      "routes": { "BILLING": "billing", "SALES": "sales" },
+      "orElse": "fallback" }
+  ],
+  "workers": { "billing": "billing-agent", "sales": "sales-agent", "fallback": "triage-queue" }
+}
+```
+
+The first declared classifier is the entry point; the others are reachable only as
+someone's `escalateTo`. Workers are terminal. `maxSteps` defaults to one hop per tier plus
+one worker — the tightest bound the shape can run under — and can be overridden.
+
+**What is data and what is not.** The tiers, their order, the rules, the label→worker
+table, the thresholds and the field names are data. The *agents* are not: they are named,
+and resolved at bind time through an `AgentResolver` (`of(Map)`, or `byId(registry)`).
+A triage's categories change weekly; the agents serving them do not, and describing an
+LLM agent's prompt, model and contract is a different and far larger problem than
+describing a dispatch table.
+
+**Everything checkable is checked at load time.** A route to an undeclared worker, an
+`escalateBelow` with no `escalateTo` or no `confidenceField`, a rule with both `keywords`
+and `regex` or neither, a regex that does not compile, a duplicate tier name, a name used
+for both a tier and a worker, an unresolvable agent reference, an `approval` tier with no
+bound gate — each is refused when the spec is loaded, naming the classifier and the label,
+instead of surfacing on the first ticket that happens to exercise it. This includes the one
+coupling nothing else in the API checks: if a tier's `escalateTo` names an `approval` tier,
+that tier's `writeLabelTo` must name the same `RunState` key the approval tier's
+`proposedLabelFrom` reads (or the shared default, `"intent"`, when neither is declared) —
+get them out of sync by hand-writing `IntentRouter`/`ApprovalClassifier` directly instead
+of through a spec, and every human decision silently becomes `UNUSABLE_DECISION` with no
+error at all, because `ApprovalClassifier` finds nothing to confirm.
+
+**On the format.** This reads a `JsonNode`. `fromJson(String)` handles JSON with the
+Jackson this module already depends on; for YAML, hand `from(JsonNode)` a node from
+whatever YAML mapper you already have. `ara-runtime` does not grow a YAML dependency for
+this: `jackson-dataformat-yaml` is deliberately *excluded* elsewhere in this build, and
+the hand-rolled `AraYamlLoader` cannot serve — it does not support lists, and this schema
+is largely made of them.
 
 ### Inspecting `PipelineResult` after a failure
 
@@ -432,12 +674,25 @@ return result.finalOutput();
   another piece of task data flowing through `withInput(...)` — the step agent's own
   `AgentInstance.sessionManager` is keyed by that same id, independent of the pipeline
   agent's own session bookkeeping.
-- **`RunState` writes inside a pipeline step are immediate and visible to every later
+- **`RunState` writes inside a `step()` are immediate and visible to every later
   step**, with no delay and no policy — see "`RunState` is shared across every step"
   above. If a step's own agent is later reused *outside* this pipeline (e.g. delegated to
   directly via `AgentDelegationTool`), that call site's `DelegateStateAccess` policy
   applies instead — the unconditional sharing described here is specific to running
-  inside an `AgentPipeline`, not a property of the step agent itself.
+  inside an `AgentPipeline`, not a property of the step agent itself. **`worker()` is the
+  one exception**: it runs against `RunState.overlay(...)` instead, so it still *reads*
+  everything earlier steps wrote but its own writes are private to that call — see
+  `worker()`'s own javadoc.
+- **`IntentRouter`'s state writes are discarded under `RunState.noop()`** — which is
+  what a bare `AgentTask.of("...")` carries (`RunContext.empty()`). Routing still works;
+  only `writeLabelTo`/`writeConfidenceTo` go nowhere, and the router logs a single
+  warning per instance saying so rather than letting it look like a classifier bug. Run
+  the pipeline through a session, or seed the task with
+  `.withRunContext(new RunContext(Map.of(), Map.of(), RunState.inMemory()))`.
+  `ApprovalClassifier` hits the same condition harder — it *reads* the proposed label
+  from state, so every `Approved` decision becomes `UNUSABLE_DECISION`, silently
+  overruling the operator on every single call, not just once — which is why it logs at
+  `ERROR`, not `WARN`.
 - **An input shaper that calls `execution.resultOf(name).orElseThrow()` for a step that
   hasn't run yet** (e.g. a typo'd name, or a step later in `stepOrder`) throws
   `NoSuchElementException` at the moment that step's task is built — there is no

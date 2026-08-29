@@ -4,6 +4,7 @@ import io.ara.core.agent.AgentChain;
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
+import io.ara.core.agent.RunState;
 import io.ara.core.common.AgentId;
 import io.ara.runtime.pipeline.PipelineExecution.StepResult;
 import org.slf4j.Logger;
@@ -180,8 +181,9 @@ public final class AgentPipeline {
 
     public static final class Builder {
 
-        private final List<String>              stepOrder = new ArrayList<>();
-        private final Map<String, PipelineStep> steps     = new LinkedHashMap<>();
+        private final List<String>              stepOrder   = new ArrayList<>();
+        private final Map<String, PipelineStep> steps       = new LinkedHashMap<>();
+        private final Map<String, IntentRouter> classifiers = new LinkedHashMap<>();
         private int maxSteps = DEFAULT_MAX_STEPS;
 
         private Builder() {}
@@ -258,6 +260,81 @@ public final class AgentPipeline {
             return this;
         }
 
+        /**
+         * Declares a terminal step that receives the pipeline's <em>original</em> input —
+         * the worker end of a classify-and-act pipeline, where a classifier picked which
+         * one of several mutually exclusive workers handles the task.
+         *
+         * <p>Three defaults are wrong for that shape, and all three fail silently rather
+         * than loudly:
+         * <ul>
+         *   <li><b>Input.</b> The default is the previous step's output, which here is the
+         *       classifier's label: a support agent asked to answer {@code
+         *       {"intent":"TECH"}} instead of the ticket. This step gets {@code
+         *       execution.initialInput()} instead — the label reaches the worker through
+         *       {@code RunContext.state()} (see {@code IntentRouter.writeLabelTo}), not
+         *       spliced into its task.</li>
+         *   <li><b>Routing.</b> A step with no router advances to the next <em>declared</em>
+         *       step, so five sibling workers declared in a row would run one after another
+         *       — the classification silently ignored past the first hop. This step ends the
+         *       pipeline, which is what "exactly one worker handles it" means.</li>
+         *   <li><b>Isolation.</b> A plain {@link #step} shares one mutable {@code RunState}
+         *       across the whole run, so a worker could overwrite the classification
+         *       bookkeeping a later step (or the caller) still needs — the opposite of the
+         *       pattern's "workers operate in isolation." This step runs the worker against
+         *       {@link RunState#overlay(RunState, RunState)}: it still <em>reads</em> every
+         *       key the classifier tiers wrote (the label, the confidence, anything else),
+         *       but its own writes land in a private, run-scoped store that is discarded the
+         *       moment {@link AgentPipeline#run} returns — never visible to the caller, to a
+         *       sibling worker, or to a later {@code PipelineResult}.</li>
+         * </ul>
+         *
+         * <p>A worker that must publish something back to the caller — an escalation
+         * acknowledgement, a decision the pipeline's own result should carry — has to do it
+         * through its {@link AgentResponse} content, not {@code RunState}: that channel
+         * survives the overlay by design; state writes no longer do.
+         *
+         * <p>For a worker that should hand off to a further shared step (a formatter, an
+         * audit sink) rather than end the run, use {@link #step(String, AraAgent, Function)}
+         * with the same input shaper and give it an explicit {@link #route} — {@code step}
+         * keeps the single shared {@code RunState} this class deliberately opts out of.
+         */
+        public Builder worker(String name, AraAgent agent) {
+            step(name, agent, execution -> {
+                AgentTask task = execution.task().withInput(execution.initialInput());
+                RunState isolated = RunState.overlay(execution.state(), RunState.inMemory());
+                return task.withRunContext(task.runContext().withState(isolated));
+            });
+            return route(name, execution -> null);
+        }
+
+        /**
+         * Adds a classifier step and attaches {@code router} to it in one call —
+         * {@code step(name, classifier).route(name, router)}, named for the pattern.
+         *
+         * <p>Unlike a bare {@link #route}, the router's declared targets are checked
+         * against the pipeline's steps in {@link #build()}: a label mapped to a step that
+         * was never declared fails at wiring time rather than mid-run, where the pipeline
+         * would abort with "Unknown step" only for the inputs that happen to carry that
+         * label.
+         *
+         * <p>Like {@link #worker}, the step is fed {@code execution.initialInput()}. What
+         * gets classified is the task that came in, never an intermediate — which is
+         * invisible for a single classifier in first position, where the two are the same
+         * string, and load-bearing for a second one reached by {@code escalateBelow(...)}:
+         * with the default input rule it would classify the first classifier's verdict
+         * ({@code {"intent":"UNKNOWN","confidence":0.0}}) instead of the ticket, and answer
+         * confidently about the wrong text. To classify something other than the original
+         * input — a normalised or enriched form — use {@link #step(String, AraAgent,
+         * Function)} with an explicit shaper and {@link #route}.
+         */
+        public Builder classify(String name, AraAgent classifier, IntentRouter router) {
+            Objects.requireNonNull(router, "router must not be null");
+            step(name, classifier, execution -> execution.task().withInput(execution.initialInput()));
+            classifiers.put(name, router);
+            return route(name, router);
+        }
+
         /** Sets the hard cap on total step executions (including retries). Default: 20. */
         public Builder maxSteps(int max) {
             if (max <= 0) throw new IllegalArgumentException("maxSteps must be > 0");
@@ -269,6 +346,14 @@ public final class AgentPipeline {
             if (stepOrder.isEmpty()) {
                 throw new IllegalStateException("AgentPipeline must have at least one step");
             }
+            classifiers.forEach((stepName, router) -> router.targets().stream()
+                    .filter(target -> !steps.containsKey(target))
+                    .findFirst()
+                    .ifPresent(target -> {
+                        throw new IllegalStateException(
+                                "classify('" + stepName + "') routes to undeclared step '" + target
+                                        + "' — declared steps: " + String.join(", ", stepOrder));
+                    }));
             return new AgentPipeline(this);
         }
     }
