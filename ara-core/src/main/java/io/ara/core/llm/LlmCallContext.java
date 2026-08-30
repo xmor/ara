@@ -36,6 +36,16 @@ public final class LlmCallContext {
 
     // ── Parameters derived from AgentConfig ───────────────────────────────────
 
+    /**
+     * The calling agent's id ({@code AgentId.value()}), or {@code null} when the context was
+     * built without an {@link AgentConfig}. Like {@link #sessionId()} it is carried for
+     * identification only and is never a sampling parameter: no adapter should branch on it.
+     *
+     * <p>It exists because {@link #agentType()} does not identify anything — its default is the
+     * constant {@code "generic"} — so a test double that must answer differently per agent (a
+     * workflow with several nodes in flight) has no other way to tell the callers apart.
+     */
+    private final String       agentId;      // nullable
     private final String       agentType;
     private final int          maxOutputTokens;
     private final Double       temperature;   // nullable — see class javadoc
@@ -106,6 +116,7 @@ public final class LlmCallContext {
     private final String sessionId;   // nullable
 
     private LlmCallContext(Builder b) {
+        this.agentId             = b.agentId;
         this.agentType           = b.agentType;
         this.maxOutputTokens     = b.maxOutputTokens;
         this.temperature         = b.temperature;
@@ -131,6 +142,7 @@ public final class LlmCallContext {
      */
     public static LlmCallContext from(AgentConfig config) {
         return new Builder()
+                .agentId(config.agentId() != null ? config.agentId().value() : null)
                 .agentType(config.agentType())
                 .maxOutputTokens(config.maxTokensPerStep())
                 .temperature(config.temperature())
@@ -180,6 +192,7 @@ public final class LlmCallContext {
 
     // ── Accessors ──────────────────────────────────────────────────────────────
 
+    public String       agentId()             { return agentId; }
     public String       agentType()           { return agentType; }
     public int          maxOutputTokens()     { return maxOutputTokens; }
     /**
@@ -251,6 +264,7 @@ public final class LlmCallContext {
 
     private Builder toBuilder() {
         Builder b = new Builder();
+        b.agentId             = this.agentId;
         b.agentType           = this.agentType;
         b.maxOutputTokens     = this.maxOutputTokens;
         b.temperature         = this.temperature;
@@ -272,6 +286,7 @@ public final class LlmCallContext {
     }
 
     public static final class Builder {
+        private String       agentId;
         private String       agentType;
         private int          maxOutputTokens  = 2048;
         private Double        temperature;   // nullable — see class javadoc
@@ -290,6 +305,7 @@ public final class LlmCallContext {
         private MediaResolver mediaResolver;
         private String       sessionId;
 
+        public Builder agentId(String v)             { this.agentId = v;             return this; }
         public Builder agentType(String v)           { this.agentType = v;           return this; }
         public Builder maxOutputTokens(int v)        { this.maxOutputTokens = v;    return this; }
         public Builder temperature(Double v)         { this.temperature = v;         return this; }
