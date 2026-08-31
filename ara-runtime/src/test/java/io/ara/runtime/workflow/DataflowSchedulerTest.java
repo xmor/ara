@@ -13,14 +13,17 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * ADR-052 D1's gate of Fase 1, ported from the standalone spike
  * ({@code docs/analysis/spike-adr-052-dataflow/} in ara-private) to production code: same
  * 19 assertions, now exercising {@link DataflowScheduler} instead of the spike's copy of
- * it. No facade, no build-time checks, no {@code AraAgent} — those are later increments;
- * this only has to prove the activation rule holds.
+ * it, plus the second half of D1 the spike deliberately left untested — {@code
+ * onUncertainResume} and the {@link NodeOutcome.Failed}/{@link NodeOutcome.Suspended}
+ * outcomes the two-phase journal exists to make resumable-or-not, on purpose. No facade,
+ * no build-time checks, no {@code AraAgent} — those are later increments.
  */
 class DataflowSchedulerTest {
 
@@ -135,16 +138,7 @@ class DataflowSchedulerTest {
     @Test
     void resume_replaysTheJournalWithoutReexecutingCompletedNodes() {
         WorkflowResult full = run(unevenBranchesGraph());
-
-        // "Crash": keep only the journal entries up to and including 'a'.
-        int cutoff = 0;
-        for (JournalEntry entry : full.journal()) {
-            cutoff++;
-            if (entry.nodeId().equals("a")) {
-                break;
-            }
-        }
-        List<JournalEntry> truncated = full.journal().subList(0, cutoff);
+        List<JournalEntry> truncated = truncateAfterFinished(full, "a");
 
         // A fresh graph/counter map so these counts reflect ONLY what the resume itself
         // executes — reusing the graph from the full run would double-count nodes that
@@ -161,8 +155,80 @@ class DataflowSchedulerTest {
                 "split and a were already completed and must not run again during resume: " + resumeCalls);
         assertEquals(full.firstOf("join").input(), resumed.firstOf("join").input(),
                 "resume must produce the same result as the uninterrupted run");
-        assertEquals(resumed.journal().size(), resumed.order().stream().distinct().count(),
-                "every node occurrence must have exactly one journal entry: " + resumed.order());
+        List<String> finishedKeys = resumed.journal().stream()
+                .filter(JournalEntry.Finished.class::isInstance)
+                .map(e -> e.nodeId() + "#" + e.occurrence())
+                .toList();
+        assertEquals(finishedKeys.size(), finishedKeys.stream().distinct().count(),
+                "no node occurrence should finish twice: " + resumed.order());
+    }
+
+    @Test
+    void uncertainResume_retryPolicy_reexecutesTheNodeThatWasInFlightAtCrashTime() {
+        WorkflowResult full = run(linearGraph(UncertainResumePolicy.RETRY, null));
+        List<JournalEntry> truncated = truncateAfterStarted(full, "slow");
+
+        Map<String, AtomicInteger> resumeCalls = new ConcurrentHashMap<>();
+        WorkflowGraph freshGraph = linearGraph(UncertainResumePolicy.RETRY, resumeCalls);
+        WorkflowResult resumed = new DataflowScheduler(freshGraph, 10).run("start", pool, truncated);
+
+        assertTrue(resumed.ok(), "RETRY should let the resume complete: " + resumed.failureReason());
+        assertEquals(1, resumed.firedTimes("done"));
+        assertTrue(resumeCalls.getOrDefault("slow", new AtomicInteger()).get() >= 1,
+                "RETRY must re-execute the node that was only 'started' when the prior run stopped");
+    }
+
+    @Test
+    void uncertainResume_failPolicy_stopsTheResumeInstead_ofGuessingWhatHappened() {
+        WorkflowGraph graph = linearGraph(UncertainResumePolicy.FAIL, null);
+        WorkflowResult full = run(graph);
+        List<JournalEntry> truncated = truncateAfterStarted(full, "slow");
+
+        WorkflowResult resumed = new DataflowScheduler(graph, 10).run("start", pool, truncated);
+
+        assertFalse(resumed.ok(), "FAIL must not silently retry a node with an unknown outcome");
+        assertTrue(resumed.failureReason().contains("slow") && resumed.failureReason().contains("FAIL"),
+                "failureReason should name the node and its policy: " + resumed.failureReason());
+        assertEquals(0, resumed.firedTimes("done"), "the run must not proceed past the uncertain node");
+    }
+
+    @Test
+    void uncertainResume_suspendPolicy_stopsTheResumeAwaitingADecision() {
+        WorkflowGraph graph = linearGraph(UncertainResumePolicy.SUSPEND, null);
+        WorkflowResult full = run(graph);
+        List<JournalEntry> truncated = truncateAfterStarted(full, "slow");
+
+        WorkflowResult resumed = new DataflowScheduler(graph, 10).run("start", pool, truncated);
+
+        assertFalse(resumed.ok());
+        assertTrue(resumed.failureReason().contains("SUSPEND"), resumed.failureReason());
+        assertEquals(0, resumed.firedTimes("done"));
+    }
+
+    @Test
+    void nodeThrows_isRecordedAsFailed_andStopsTheRun() {
+        WorkflowGraph graph = new WorkflowGraph(
+                List.of(echo("start", "S"), WorkflowNode.of("boom", in -> { throw new RuntimeException("kaboom"); })),
+                List.of(WorkflowEdge.of("start", "boom")));
+
+        WorkflowResult result = run(graph);
+
+        assertFalse(result.ok());
+        assertTrue(result.failureReason().contains("kaboom"), result.failureReason());
+    }
+
+    @Test
+    void nodeThrowsSuspended_isRecordedAsSuspended_notAsAFailure() {
+        WorkflowGraph graph = new WorkflowGraph(
+                List.of(echo("start", "S"),
+                        WorkflowNode.of("gate", in -> { throw new WorkflowNodeSuspendedException("awaiting approval"); })),
+                List.of(WorkflowEdge.of("start", "gate")));
+
+        WorkflowResult result = run(graph);
+
+        assertFalse(result.ok());
+        assertTrue(result.failureReason().contains("suspended") && result.failureReason().contains("awaiting approval"),
+                result.failureReason());
     }
 
     // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -193,6 +259,40 @@ class DataflowSchedulerTest {
                 List.of(WorkflowEdge.of("split", "a"), WorkflowEdge.of("split", "b"),
                         WorkflowEdge.of("a", "c"), WorkflowEdge.of("a", "d"),
                         WorkflowEdge.of("c", "join"), WorkflowEdge.of("d", "join"), WorkflowEdge.of("b", "join")));
+    }
+
+    /** {@code start -> slow -> done}, where {@code slow}'s resume policy is the parameter under test. */
+    private WorkflowGraph linearGraph(UncertainResumePolicy policy, Map<String, AtomicInteger> callCounts) {
+        WorkflowNode slow = delayedEcho("slow", "SLOW", 30, callCounts).withOnUncertainResume(policy);
+        return new WorkflowGraph(
+                List.of(echo("start", "S"), slow, WorkflowNode.of("done", in -> "DONE[" + in + "]")),
+                List.of(WorkflowEdge.of("start", "slow"), WorkflowEdge.of("slow", "done")));
+    }
+
+    /** The journal prefix ending right after {@code nodeId}'s {@link JournalEntry.Finished} entry. */
+    private static List<JournalEntry> truncateAfterFinished(WorkflowResult result, String nodeId) {
+        List<JournalEntry> journal = result.journal();
+        for (int i = 0; i < journal.size(); i++) {
+            if (journal.get(i) instanceof JournalEntry.Finished finished && finished.nodeId().equals(nodeId)) {
+                return journal.subList(0, i + 1);
+            }
+        }
+        throw new IllegalStateException(nodeId + " never finished in this journal: " + result.order());
+    }
+
+    /**
+     * The journal prefix ending right after {@code nodeId}'s {@link JournalEntry.Started}
+     * entry, dropping its {@code Finished} entry (and anything after) — simulating a crash
+     * while that node was in flight.
+     */
+    private static List<JournalEntry> truncateAfterStarted(WorkflowResult result, String nodeId) {
+        List<JournalEntry> journal = result.journal();
+        for (int i = 0; i < journal.size(); i++) {
+            if (journal.get(i) instanceof JournalEntry.Started started && started.nodeId().equals(nodeId)) {
+                return journal.subList(0, i + 1);
+            }
+        }
+        throw new IllegalStateException(nodeId + " never started in this journal: " + result.order());
     }
 
     private static WorkflowNode echo(String id, String output) {

@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
@@ -68,21 +69,33 @@ public final class DataflowScheduler {
     }
 
     /**
-     * Resumes from a prior journal: its entries are replayed — tokens deposited on the
-     * edges they selected, the rest marked dead, occurrences restored — without
-     * re-executing the nodes they belong to. The run then proceeds normally from
-     * wherever that leaves the graph.
+     * Resumes from a prior journal: {@link JournalEntry.Started} entries restore
+     * occurrence counters and consume the tokens that enabled them; a matching {@link
+     * JournalEntry.Finished} beyond that deposits tokens on the edges it selected (or
+     * marks the rest dead) without re-executing the node. The run then proceeds normally
+     * from wherever that leaves the graph.
      *
-     * <p>A node that was in flight when the prior run stopped has no journal entry, so
-     * it fires again here: replay can't tell "in flight when we stopped" apart from
-     * "never started". That's the one uncomfortable point of D1's resume story per
-     * ADR-052, and it's deliberately not papered over here — the fix is a declared
-     * {@code onUncertainResume} policy per node, which is the next increment's job, not
-     * this one's.
+     * <p>A {@code Started} entry with no matching {@code Finished} is a node that was in
+     * flight when the prior run stopped — replay cannot tell that apart from "crashed one
+     * instruction before writing its own outcome", which is exactly why it isn't asked
+     * to: it defers to that node's declared {@link WorkflowNode#onUncertainResume()}.
+     * {@link UncertainResumePolicy#RETRY} re-fires it with its recorded input;
+     * {@link UncertainResumePolicy#FAIL} and {@link UncertainResumePolicy#SUSPEND} stop
+     * the resume rather than guess, naming the node in {@link WorkflowResult#failureReason()}.
+     *
+     * <p>A prior journal ending on a {@link NodeOutcome.Failed} or {@link
+     * NodeOutcome.Suspended} entry stops the resume the same way — replaying past a
+     * recorded failure, or a suspension nothing has decided on, would fabricate progress
+     * that never happened.
      */
     public WorkflowResult run(String initialInput, ExecutorService pool, List<JournalEntry> priorJournal) {
         graph.edges().forEach(e -> tokens.put(e, new ArrayDeque<>()));
-        replay(priorJournal);
+
+        Map<String, String> pendingSeed = new LinkedHashMap<>();
+        Optional<WorkflowResult> stoppedDuringReplay = replay(priorJournal, pendingSeed);
+        if (stoppedDuringReplay.isPresent()) {
+            return stoppedDuringReplay.get();
+        }
 
         List<String> entryNodes = graph.nodes().stream()
                 .map(WorkflowNode::id)
@@ -91,8 +104,6 @@ public final class DataflowScheduler {
         if (entryNodes.isEmpty()) {
             return new WorkflowResult(journal, false, "no entry node (every node has an incoming edge)");
         }
-
-        Map<String, String> pendingSeed = new LinkedHashMap<>();
         entryNodes.stream()
                 .filter(id -> occurrence.getOrDefault(id, 0) == 0)
                 .forEach(id -> pendingSeed.put(id, initialInput));
@@ -100,19 +111,81 @@ public final class DataflowScheduler {
         return drive(pendingSeed, pool);
     }
 
-    private void replay(List<JournalEntry> priorJournal) {
+    /**
+     * @return the resume's final result if something in the prior journal (an uncertain
+     *         node's policy, or an already-failed/suspended entry) means the run must
+     *         stop here instead of proceeding to {@link #drive}
+     */
+    private Optional<WorkflowResult> replay(List<JournalEntry> priorJournal, Map<String, String> pendingSeed) {
+        Set<String> finishedKeys = new HashSet<>();
+        for (JournalEntry entry : priorJournal) {
+            if (entry instanceof JournalEntry.Finished) {
+                finishedKeys.add(entry.nodeId() + "#" + entry.occurrence());
+            }
+        }
+
+        List<JournalEntry.Started> uncertain = new ArrayList<>();
         for (JournalEntry entry : priorJournal) {
             journal.add(entry);
-            occurrence.merge(entry.nodeId(), 1, Integer::sum);
-            for (WorkflowEdge edge : graph.out(entry.nodeId())) {
-                if (entry.selectedTargets().contains(edge.to())) {
-                    tokens.get(edge).addLast(entry.output());
-                } else {
-                    markDead(edge);
+            if (entry instanceof JournalEntry.Started started) {
+                occurrence.merge(started.nodeId(), 1, Integer::sum);
+                consumeTokens(started.nodeId());
+                if (!finishedKeys.contains(started.nodeId() + "#" + started.occurrence())) {
+                    uncertain.add(started);
+                }
+            } else if (entry instanceof JournalEntry.Finished finished) {
+                Optional<WorkflowResult> stopped = applyReplayedOutcome(finished);
+                if (stopped.isPresent()) {
+                    return stopped;
                 }
             }
-            consumeTokens(entry.nodeId());
         }
+
+        for (JournalEntry.Started started : uncertain) {
+            Optional<WorkflowResult> stopped = handleUncertain(started, pendingSeed);
+            if (stopped.isPresent()) {
+                return stopped;
+            }
+        }
+        return Optional.empty();
+    }
+
+    private Optional<WorkflowResult> applyReplayedOutcome(JournalEntry.Finished finished) {
+        return switch (finished.outcome()) {
+            case NodeOutcome.Completed completed -> {
+                for (WorkflowEdge edge : graph.out(finished.nodeId())) {
+                    if (completed.selectedTargets().contains(edge.to())) {
+                        tokens.get(edge).addLast(completed.content());
+                    } else {
+                        markDead(edge);
+                    }
+                }
+                yield Optional.empty();
+            }
+            case NodeOutcome.Failed failed -> Optional.of(new WorkflowResult(journal, false,
+                    entryLabel(finished) + " had already failed in the prior run: " + failed.reason()));
+            case NodeOutcome.Suspended suspended -> Optional.of(new WorkflowResult(journal, false,
+                    entryLabel(finished) + " is suspended awaiting a decision — resuming past a suspension "
+                            + "isn't supported until ADR-052 D6: " + suspended.reason()));
+        };
+    }
+
+    private Optional<WorkflowResult> handleUncertain(JournalEntry.Started started, Map<String, String> pendingSeed) {
+        UncertainResumePolicy policy = graph.node(started.nodeId()).onUncertainResume();
+        return switch (policy) {
+            case RETRY -> {
+                pendingSeed.put(started.nodeId(), started.input());
+                yield Optional.empty();
+            }
+            case FAIL -> Optional.of(new WorkflowResult(journal, false,
+                    entryLabel(started) + " was in flight when the prior run stopped; its onUncertainResume policy is FAIL"));
+            case SUSPEND -> Optional.of(new WorkflowResult(journal, false,
+                    entryLabel(started) + " was in flight when the prior run stopped; its onUncertainResume policy is SUSPEND"));
+        };
+    }
+
+    private static String entryLabel(JournalEntry entry) {
+        return "node " + entry.nodeId() + "#" + entry.occurrence();
     }
 
     private WorkflowResult drive(Map<String, String> pendingSeed, ExecutorService pool) {
@@ -140,6 +213,7 @@ public final class DataflowScheduler {
                     return new WorkflowResult(journal, false, "maxOccurrences exceeded on " + id);
                 }
                 consumeTokens(id);
+                journal.add(new JournalEntry.Started(id, occ, input));
                 running.add(id);
                 inFlight++;
                 String firingInput = input;
@@ -159,27 +233,49 @@ public final class DataflowScheduler {
             }
             inFlight--;
             running.remove(fired.nodeId());
+            journal.add(new JournalEntry.Finished(fired.nodeId(), fired.occurrence(), fired.input(), fired.outcome()));
 
-            journal.add(new JournalEntry(fired.nodeId(), fired.occurrence(), fired.input(), fired.output(), fired.selectedTargets()));
-            for (WorkflowEdge edge : graph.out(fired.nodeId())) {
-                if (fired.selectedTargets().contains(edge.to())) {
-                    tokens.get(edge).addLast(fired.output());
-                } else {
-                    markDead(edge);
+            // Fail-fast: the first Failed or Suspended outcome stops the run immediately,
+            // even with other nodes still in flight. Deciding whether a workflow should
+            // instead tolerate partial failure is ADR-052 D4's job (AgentChain.FailurePolicy,
+            // reused rather than reinvented) — D1 only has to behave safely, not flexibly.
+            switch (fired.outcome()) {
+                case NodeOutcome.Completed completed -> {
+                    for (WorkflowEdge edge : graph.out(fired.nodeId())) {
+                        if (completed.selectedTargets().contains(edge.to())) {
+                            tokens.get(edge).addLast(completed.content());
+                        } else {
+                            markDead(edge);
+                        }
+                    }
+                }
+                case NodeOutcome.Failed failed -> {
+                    return new WorkflowResult(journal, false,
+                            "node " + fired.nodeId() + "#" + fired.occurrence() + " failed: " + failed.reason());
+                }
+                case NodeOutcome.Suspended suspended -> {
+                    return new WorkflowResult(journal, false,
+                            "node " + fired.nodeId() + "#" + fired.occurrence() + " suspended: " + suspended.reason());
                 }
             }
         }
     }
 
-    private record Fired(String nodeId, int occurrence, String input, String output, List<String> selectedTargets) {}
+    private record Fired(String nodeId, int occurrence, String input, NodeOutcome outcome) {}
 
     private Fired fire(WorkflowNode node, int occurrence, String input) {
-        String output = node.body().apply(input);
-        List<String> selected = node.selector() == null
-                ? graph.out(node.id()).stream().map(WorkflowEdge::to).toList()
-                : graph.out(node.id()).stream().map(WorkflowEdge::to)
-                        .filter(node.selector().apply(output)::contains).toList();
-        return new Fired(node.id(), occurrence, input, output, selected);
+        try {
+            String output = node.body().apply(input);
+            List<String> selected = node.selector() == null
+                    ? graph.out(node.id()).stream().map(WorkflowEdge::to).toList()
+                    : graph.out(node.id()).stream().map(WorkflowEdge::to)
+                            .filter(node.selector().apply(output)::contains).toList();
+            return new Fired(node.id(), occurrence, input, new NodeOutcome.Completed(output, selected));
+        } catch (WorkflowNodeSuspendedException e) {
+            return new Fired(node.id(), occurrence, input, new NodeOutcome.Suspended(e.getMessage()));
+        } catch (RuntimeException e) {
+            return new Fired(node.id(), occurrence, input, new NodeOutcome.Failed(String.valueOf(e.getMessage())));
+        }
     }
 
     /**

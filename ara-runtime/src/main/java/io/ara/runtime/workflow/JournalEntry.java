@@ -4,30 +4,48 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * One append-only journal entry, written when a node occurrence finishes. The pair
- * {@code (nodeId, occurrence)} is its key.
+ * The journal, in two phases per ADR-052 D1: a {@link Started} entry written the moment
+ * a node occurrence is submitted, a {@link Finished} entry written when it completes.
  *
- * <p>This is deliberately narrower than the entry shape ADR-052 describes for the
- * finished system — no {@code Failed}/{@code Suspended} outcome, no state writes, no
- * elapsed/tokens/cost. Those belong to the increment that introduces the {@code
- * onUncertainResume} policy and the {@code RunState} reducers that need them; adding
- * unused fields here now, before anything populates them, would be exactly the kind of
- * abstraction the coding guidelines ask to avoid until there's a real consumer.
- *
- * @param selectedTargets the outgoing edges this occurrence activated — used to deposit
- *                         tokens on those edges and mark the rest dead, see
- *                         {@link DataflowScheduler}
+ * <p>One phase would be simpler, and Step 1 of this port had exactly that: an entry
+ * written only on completion. It has one hole — a node in flight when the process
+ * crashes leaves no trace, so resume cannot tell "this never started" apart from
+ * "this started and we don't know how it ended". For an idempotent node that's harmless;
+ * for one with an external effect (an email sent, a charge made), silently re-running it
+ * is a bug. Splitting the write in two closes the hole: a {@code Started} entry with no
+ * matching {@code Finished} on resume is exactly that node's declared {@link
+ * WorkflowNode#onUncertainResume()} to react to, instead of the scheduler guessing.
  */
-public record JournalEntry(String nodeId, int occurrence, String input, String output, List<String> selectedTargets) {
+public sealed interface JournalEntry permits JournalEntry.Started, JournalEntry.Finished {
 
-    public JournalEntry {
-        Objects.requireNonNull(nodeId, "nodeId must not be null");
-        Objects.requireNonNull(selectedTargets, "selectedTargets must not be null");
-        selectedTargets = List.copyOf(selectedTargets);
+    String nodeId();
+
+    int occurrence();
+
+    String input();
+
+    record Started(String nodeId, int occurrence, String input) implements JournalEntry {
+        public Started {
+            Objects.requireNonNull(nodeId, "nodeId must not be null");
+            Objects.requireNonNull(input, "input must not be null");
+        }
+
+        @Override
+        public String toString() {
+            return nodeId + "#" + occurrence + " (started)";
+        }
     }
 
-    @Override
-    public String toString() {
-        return nodeId + "#" + occurrence;
+    record Finished(String nodeId, int occurrence, String input, NodeOutcome outcome) implements JournalEntry {
+        public Finished {
+            Objects.requireNonNull(nodeId, "nodeId must not be null");
+            Objects.requireNonNull(input, "input must not be null");
+            Objects.requireNonNull(outcome, "outcome must not be null");
+        }
+
+        @Override
+        public String toString() {
+            return nodeId + "#" + occurrence;
+        }
     }
 }

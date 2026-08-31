@@ -41,31 +41,32 @@ final class SuperstepScheduler {
 
         for (int step = 0; step < 20 && !frontier.isEmpty(); step++) {
             Map<String, String> next = new LinkedHashMap<>();
-            List<Future<JournalEntry>> firing = new ArrayList<>();
+            List<Future<JournalEntry.Finished>> firing = new ArrayList<>();
             for (Map.Entry<String, String> ready : frontier.entrySet()) {
                 String id = ready.getKey();
                 String input = ready.getValue();
                 int occ = occurrence.merge(id, 1, Integer::sum) - 1;
                 firing.add(pool.submit(() -> fire(id, occ, input)));
             }
-            for (Future<JournalEntry> future : firing) {
-                JournalEntry entry = future.get();
+            for (Future<JournalEntry.Finished> future : firing) {
+                JournalEntry.Finished entry = future.get();
                 journal.add(entry);
                 // Edge-triggered: whoever receives a write starts on the NEXT step.
-                entry.selectedTargets().forEach(target ->
-                        next.merge(target, entry.output(), (a, b) -> a + " | " + b));
+                NodeOutcome.Completed completed = (NodeOutcome.Completed) entry.outcome();
+                completed.selectedTargets().forEach(target ->
+                        next.merge(target, completed.content(), (a, b) -> a + " | " + b));
             }
             frontier = next;
         }
         return new WorkflowResult(journal, true, null);
     }
 
-    private JournalEntry fire(String id, int occurrence, String input) {
+    private JournalEntry.Finished fire(String id, int occurrence, String input) {
         WorkflowNode node = graph.node(id);
         String output = node.body().apply(input);
         List<String> selected = node.selector() == null
                 ? graph.out(id).stream().map(WorkflowEdge::to).toList()
                 : graph.out(id).stream().map(WorkflowEdge::to).filter(node.selector().apply(output)::contains).toList();
-        return new JournalEntry(id, occurrence, input, output, selected);
+        return new JournalEntry.Finished(id, occurrence, input, new NodeOutcome.Completed(output, selected));
     }
 }
