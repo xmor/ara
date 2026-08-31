@@ -844,9 +844,10 @@ public final class AraRuntime implements AutoCloseable {
          * this method) overrides it.
          *
          * <p>When at least one retriever is registered, the planner automatically registers
-         * {@code "rag+react"} and {@code "rag+plan-execute"} strategies backed by a {@code
-         * RetrieverRouter} over all registered retrievers (ADR-030 pattern applied to
-         * retrieval) — each agent selects which one to use via {@code AgentConfig.retrieverId()}.
+         * the {@code "rag+react"}, {@code "rag+respact"}, {@code "rag+plan_execute"} and
+         * {@code "rag+reflact"} strategies, backed by a {@code RetrieverRouter} over all
+         * registered retrievers (ADR-030 pattern applied to retrieval) — each agent selects
+         * which retriever to use via {@code AgentConfig.retrieverId()}.
          */
         public Builder retriever(Retriever retriever) {
             return retriever("default", retriever);
