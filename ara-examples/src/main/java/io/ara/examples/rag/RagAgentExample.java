@@ -32,9 +32,10 @@ import java.util.List;
  * </ul>
  *
  * <p>Registering a {@link io.ara.core.retriever.Retriever} on the runtime builder
- * (via {@code .retriever(kb)}) is enough to auto-register both {@code "rag+react"}
- * and {@code "rag+plan-execute"} strategies (see {@code AraRuntime.Builder.build()}) —
- * no extra wiring is required to make RAG available to any agent in the system.
+ * (via {@code .retriever(kb)}) is enough to auto-register the {@code "rag+react"},
+ * {@code "rag+respact"}, {@code "rag+plan_execute"} and {@code "rag+reflact"} strategies
+ * (see {@code AraRuntime.Builder.build()}) — no extra wiring is required to make RAG
+ * available to any agent in the system.
  *
  * <p>Both LLM calls are scripted (no API key / network access needed), so the demo
  * is deterministic and runs offline. To use this for real:

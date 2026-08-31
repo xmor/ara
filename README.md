@@ -31,6 +31,7 @@ no framework lock-in.
 - [AgentContract — deterministic I/O](#agentcontract--deterministic-io)
 - [PromptShaper — dynamic system prompt](#promptshaper--dynamic-system-prompt)
 - [Multi-agent pipeline](#multi-agent-pipeline) <!-- - [Agent graph](#agent-graph--parallel-branches-and-feedback-loops) -->
+- [Classify-and-act](#classify-and-act)
 - [Execution strategies](#execution-strategies)
 - [AgentConfig — configurable agent values](#agentconfig--configurable-agent-values)
 - [Sessions & concurrency](#sessions--concurrency)
@@ -49,10 +50,14 @@ no framework lock-in.
 | Module          | Description                                                                                                                                                               |
 |-----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `ara-core`      | Pure interfaces and domain model: `AraAgent`, `LlmClient`, `LlmException`, `MemoryManager`, `ToolRegistry`, `AgentContract`, `ExecutionStrategy`, …                     |
-| `ara-runtime`   | Implementations: `AraRuntime`, the execution strategies (`ReactStrategy`, `ReSpActStrategy`, `ReflActStrategy`, `PlanExecuteStrategy`, `ReflexionStrategy`), `ContractEnforcer`, `AgentPipeline`, `ScriptedLlmClient` stub, built-in processors |
-| `ara-adapters`  | LangChain4j-backed `LlmClient` adapters for OpenAI, Anthropic, Ollama and Mistral. No Kotlin, no OkHttp, no Spring. Declares its own LangChain4j BOM.                   |
+| `ara-runtime`   | Implementations: `AraRuntime`, the execution strategies (`ReactStrategy`, `ReSpActStrategy`, `ReflActStrategy`, `PlanExecuteStrategy`, `ReflexionStrategy`), `ContractEnforcer`, `AgentPipeline` and the classify-and-act building blocks, `ScriptedLlmClient`/`AssociativeLlmClient` stubs, built-in processors |
+| `ara-adapters`  | LangChain4j-backed `LlmClient` adapters for OpenAI, Anthropic, Ollama, Mistral and ChatJimmy. No Kotlin, no OkHttp, no Spring. Declares its own LangChain4j BOM.        |
 | `ara-examples`  | Runnable examples for offline (stub) and live (real LLM) scenarios                                                                                                       |
-| `ara-gateway`   | Optional HTTP layer (Javalin/Jetty) — surfaces for agent runs, control, session data, HITL approvals, and Agno AgentOS compatibility. Only needed when external callers reach the runtime over HTTP. |
+
+Those four are what this repository builds — see `<modules>` in the root `pom.xml`.
+`ara-gateway`, referenced further down for HTTP-side HITL approvals, is an optional HTTP
+layer (Javalin/Jetty) that ships **separately** and is not part of this build; nothing in
+the four modules above depends on it.
 
 ---
 
@@ -61,12 +66,17 @@ no framework lock-in.
 - Single agents with any LLM (OpenAI, Anthropic, Ollama, Mistral, LM Studio, Groq, …)
 - Deterministic I/O contracts: sanitize input, validate output, strip markdown fences — zero tokens consumed
 - Multi-agent pipelines with conditional routing and FSM-style state machines
+- Classify-and-act triage: one classification decides the single worker that handles the
+  task, escalating from keyword rules to a model to a human as confidence drops — the
+  whole dispatch table loadable as a JSON document
 <!-- - Agent graphs with parallel branches and feedback loops -->
 - Tool calling from LLM responses, including parallel dispatch on virtual threads (Java 21)
 - Conversational agents that ask clarifying questions mid-task (`"respact"`) and self-correcting ones that recover from failed tool calls without restarting (`"reflact"`)
 - Multimodal input: attach images and PDFs to a task and have the model read them natively — layout, tables and scans included, no text extraction upstream
 - RAG as a strategy decorator — retrieval before every LLM call, no tool configuration needed
-- Fully offline testing with `ScriptedLlmClient`
+- Fully offline testing with `ScriptedLlmClient` (one script, popped per call) and
+  `AssociativeLlmClient` (one script per agent id, so several agents in flight stay
+  deterministic)
 
 ---
 
@@ -312,8 +322,11 @@ AgentConfig config = AgentConfig.defaults()
         .build();
 ```
 
-Ready-made tools (file, code, git, shell, …) live in the `ara-tools` module — see
-[Built-in code and shell tools](#built-in-code-and-shell-tools).
+Tools are always supplied by the caller: ARA ships the `ToolRegistry` port and the
+decorators around it (approval gating, telemetry, delegation), not a catalogue of
+ready-made tools. The one tool the runtime registers on its own is `delegate_task`
+(`AgentDelegationTool`), which lets a supervisor agent hand work to another registered
+agent.
 
 ### Parallel tool dispatch (Java 21 virtual threads)
 
@@ -552,6 +565,81 @@ AgentPipeline pipeline = AgentPipeline.fsmBuilder()
         .build();
 ```
 
+A pipeline is not an `AraAgent` by itself — `PipelineAgents.of(pipeline)` hosts it inside a
+real `AgentInstance`, so it gains session isolation, cancellation and telemetry and can be
+registered, delegated to, or nested as a step of another pipeline. `ParallelAgent` (or the
+`.parallel(...)` builder shortcut) fans one step out to N agents on virtual threads and
+merges their responses. Details and gotchas:
+[`io/ara/runtime/pipeline/README.md`](ara-runtime/src/main/java/io/ara/runtime/pipeline/README.md).
+
+---
+
+## Classify-and-act
+
+The triage shape: classify the incoming task once, then let **exactly one** worker handle
+it. `IntentRouter` reads the label out of a classifier step's output and turns it into a
+worker name; `classify(...)` and `worker(...)` declare the two kinds of step.
+
+```java
+IntentRouter router = IntentRouter.onField("intent")
+        .route("BILLING", "billing")
+        .route("TECH",    "tech")
+        .writeLabelTo("intent")            // → RunState, where a worker can read it
+        .confidenceField("confidence")
+        .escalateBelow(0.7, "human")       // low confidence → escalate, not guess
+        .orElse("fallback");               // terminal builder method: the else-arc is mandatory
+
+AgentPipeline triage = AgentPipeline.builder()
+        .classify("classify", classifierAgent, router)
+        .worker("billing",  billingAgent)
+        .worker("tech",     techAgent)
+        .worker("human",    humanReviewAgent)
+        .worker("fallback", fallbackAgent)
+        .build();
+```
+
+`worker(...)` feeds the step the **original** input rather than the classifier's label, and
+ends the run — the two defaults that a hand-written `route(...)` lambda gets wrong. Every
+routing decision emits a `pipeline.classify` span carrying the label, the target, the
+confidence and *why* that target was chosen (`MATCHED`, `UNKNOWN_LABEL`, `LOW_CONFIDENCE`,
+`UNPARSEABLE_OUTPUT`, …), and `build()` rejects a route naming a step that was never
+declared.
+
+**Three interchangeable classifiers** fill the same slot, emitting the same
+`{"intent": …, "confidence": …}` shape:
+
+| Classifier | What decides the label | Cost |
+|---|---|---|
+| `RuleClassifier` | keyword/regex rules over the task text, first match wins in declaration order | zero tokens, no round trip |
+| any `AraAgent` | a prompted model | one LLM call |
+| `ApprovalClassifier` | a human, through an `ApprovalGate` | blocks until a decision or the timeout |
+
+Chaining them with `escalateBelow(...)` gives the cascade: rules answer what they know at
+no cost, the model sees the original ticket when no rule fired, and a human decides what
+the model was unsure of. `RuleClassifier` is built on `AraAgents.deterministic(...)`
+(`FunctionAgent`) — an agent whose signature has nowhere to put an `LlmClient`, so it
+provably never reasons and reports zero tokens.
+
+The whole arrangement is also loadable as a document — tiers, rules, label→worker table
+and thresholds are data; the agents are named and resolved at bind time:
+
+```java
+AgentPipeline triage = ClassifyAndActSpec.fromJson(document)
+        .build(ClassifyAndActSpec.Bindings
+                .of(ClassifyAndActSpec.AgentResolver.byId(runtime.registry()))
+                .withApprovalGate(gate)
+                .withTelemetry(telemetry));
+```
+
+Adding a category becomes a document edit, and everything checkable — a route to an
+undeclared worker, an `escalateBelow` with no `escalateTo`, a regex that does not compile —
+is refused when the spec is loaded rather than on the first ticket that exercises it.
+
+Runnable: `pipeline/ClassifyAndActExample` (the minimal form, offline) and
+`pipeline/TicketTriageCascadeExample` (the three-tier cascade). The JSON schema, the
+`RunState` caveats and the rest live in
+[`io/ara/runtime/pipeline/README.md`](ara-runtime/src/main/java/io/ara/runtime/pipeline/README.md).
+
 ---
 
 <!--
@@ -692,7 +780,8 @@ the shorthand) carries the per-model settings:
 | `executionTimeout(Duration)` | 5 minutes | Wall-clock limit for a single task execution |
 | `maxTokensPerStep(int)` | `4096` | Token cap requested per LLM call |
 | `humanApprovalRequired(boolean)` | `false` | When `true` and an `ApprovalGate` is configured on the runtime, every tool call is routed through the gate before dispatch — the virtual thread parks until a human decision arrives or the request times out |
-| `knowledgeBaseId(String)` | `null` | Knowledge base to use for RAG retrieval / `search_documents` |
+| `retrieverId(String)` | `null` | Which registered `Retriever` a `"rag+…"` strategy uses; `null` = the runtime's default retriever. Setting it with a non-`rag+` strategy is rejected at construction |
+| `knowledgeBaseId(String)` | `null` | Knowledge base the agent searches *as a tool*: combined with `search_documents` in `enabledTools`, it attaches a `KnowledgeBasePromptShaper` (see [Knowledge base / RAG retrieval](#knowledge-base--rag-retrieval-in-memory-or-qdrant)) |
 | `sessionBusyPolicy(SessionBusyPolicy)` | `REJECT` | Same-session concurrency: `REJECT` fails fast with `"Session busy"`, `ENQUEUE` queues FIFO (see [Same-session policy](#same-session-policy--reject-vs-queue)) |
 
 ### Memory — working memory and conversation
@@ -824,6 +913,11 @@ All examples are in `ara-examples`.
 |---|---|---|
 | `basics/AraSimpleExample` | stub | End-to-end: ReAct loop, tool call, interceptor, agent reuse |
 | `basics/AraSimpleExampleLive` | **live** | Same as above but with a real LLM via `OpenAiLlmClient` |
+| `basics/InterceptorEventsExample` | stub | Every `AgentInterceptor` event in order, around one run |
+| `pipeline/ClassifyAndActExample` | none | Classify-and-act at its smallest: a `RuleClassifier`, an `IntentRouter`, four workers — no model, no API key |
+| `pipeline/TicketTriageCascadeExample` | stub | The three-tier cascade: rules → model → human, with confidence-driven escalation and an `ApprovalGate` |
+| `hitl/HumanInTheLoopExample` | stub | A tool call parked on an `ApprovalGate` until an operator approves, rejects or modifies it |
+| `rag/RagAgentExample` | stub | `rag+react` over an `InMemoryDocumentStore`, plus an orchestrator delegating to it via `delegate_task` |
 | `multimodal/MultimodalInputExample` | **live** | A PDF to Mistral and an image to Ollama, through one provider-agnostic method |
 
 ### Running `AraSimpleExampleLive`
@@ -863,12 +957,12 @@ Elapsed        : 1417ms
 ## Why ARA
 - **Plain Java, no magic.** Pure interfaces — zero annotations, zero reflection, no Kotlin
   runtime, no Spring. The call stack you debug is the call stack you wrote. True of
-  `ara-core`, `ara-runtime` and `ara-adapters`; the optional `ara-gateway` module (Javalin,
-  for its native path-param routing and first-class SSE) is the one exception — it pulls in
-  Jetty and a Kotlin runtime, but only for whoever explicitly adds it.
+  `ara-core`, `ara-runtime` and `ara-adapters` — every module in this build. The separately
+  shipped `ara-gateway` (Javalin, for its native path-param routing and first-class SSE) is
+  the one exception — it pulls in Jetty and a Kotlin runtime, but only for whoever
+  explicitly adds it.
 - **Deterministic I/O contracts.** `AgentContract` validates, sanitises and transforms in
-  plain Java before and after every call, spending **zero tokens**. No other framework in
-  the table below ships an equivalent.
+  plain Java before and after every call, spending **zero tokens**.
 - **Java 21 by design.** Virtual threads are the concurrency model, not an option: when the
   LLM asks for several tools at once they are dispatched in parallel automatically, with no
   executor to wire up or thread pool to tune.
@@ -883,7 +977,8 @@ Elapsed        : 1417ms
   dispatch chain via `AraRuntime.Builder.approvalGate(gate)`, with pluggable notifiers
   (`LoggingApprovalNotifier`, `WebhookApprovalNotifier`). `ApprovalDecision` is a sealed
   interface, so handling approve / reject / modify exhaustively is enforced by the compiler,
-  not by convention. The `ara-gateway` module exposes pending approvals via HTTP
+  not by convention. `gate.getPendingRequests()` / `gate.submit(...)` are the API any
+  operator surface builds on; the separately shipped `ara-gateway` puts them behind HTTP
   (`GET /approvals`, `POST /approvals/{requestId}/decision`).
 - **Private per-agent data**  —
   `AgentInstanceContext` holds API keys or tenant ids that **both** prompt shaping and tool
@@ -901,9 +996,27 @@ Elapsed        : 1417ms
   failed tool call without discarding what the run already accomplished. Most frameworks
   make you restart the episode.
   
-### Knowledge base / RAG retrieval (Qdrant or in-memory)
-`KnowledgeBaseService` provides semantic search over documents. The default store is `InMemoryDocumentStore`
-(no external dependency). For persistent vector search add a Qdrant config:
+### Knowledge base / RAG retrieval (in-memory or Qdrant)
+
+Retrieval enters the runtime through one port, `Retriever`. `InMemoryDocumentStore` needs
+no external infrastructure (brute-force cosine over the indexed chunks — fine up to ~10k
+chunks); `DocumentStore` is the Qdrant-backed equivalent, behind the same contract. Both
+also implement `KbStore`, which adds indexing and document management on top of `retrieve`.
+
+```java
+EmbeddingClient embeddings = /* your embedding model */;
+
+InMemoryDocumentStore kb = new InMemoryDocumentStore("ara-docs", embeddings);
+kb.ensureCollection();
+kb.indexDocument("adr-016", "Session isolation", "…");
+
+AraRuntime runtime = AraRuntime.builder()
+        .llmClient("live", gpt4o)
+        .retriever(kb)                 // or .retriever("docs", kb) to name it
+        .build();
+```
+
+For persistent vector search, swap the store — nothing else changes:
 
 ```java
 QdrantConfig qdrant = QdrantConfig.builder()
@@ -911,18 +1024,34 @@ QdrantConfig qdrant = QdrantConfig.builder()
         .collectionName("my-docs")
         .build();
 
-KnowledgeBaseService kb = KnowledgeBaseService.builder()
-        .documentStore(new QdrantSemanticStore(qdrant))
-        .build();
+DocumentStore kb = new DocumentStore(qdrant, embeddings);
+```
 
-AraRuntime runtime = AraRuntime.builder()
-        .llmClient("live", gpt4o)
-        .knowledgeBase(kb)
+(`QdrantSemanticStore` is a different thing — agent *episodic memory*, a separate
+collection — and is not a `Retriever`.)
+
+Registering at least one retriever makes `AraRuntime` auto-register the RAG-wrapped
+strategies — `"rag+react"`, `"rag+respact"`, `"rag+plan_execute"` and `"rag+reflact"` —
+each backed by a `RetrieverRouter` over everything registered. An agent opts in by naming
+one:
+
+```java
+AgentConfig config = AgentConfig.defaults()
+        .agentType("kb-agent")
+        .plannerStrategy("rag+react")   // retrieval before every LLM call
+        .retrieverId("docs")            // optional; the default retriever otherwise
         .build();
 ```
 
-Enable RAG retrieval by setting `plannerStrategy("rag+react")` on the `AgentConfig` and
-registering the `search_documents` tool.
+`retrieverId` without a `rag+…` strategy is rejected at construction rather than silently
+ignored.
+
+**RAG-as-a-strategy vs. a search tool.** The above retrieves *before every LLM call*, with
+no tool involved and nothing for the model to decide. The alternative is letting the agent
+search on its own: set `knowledgeBaseId(...)` and enable a `search_documents` tool, and the
+runtime attaches a `KnowledgeBasePromptShaper` that tells the model how to call it. The
+tool implementation itself is yours — ARA ships the prompt shaping and the stores, not the
+tool.
 
 ### Human-in-the-loop (HITL) — approval gate
 
@@ -969,7 +1098,8 @@ gate.submit(requestId, new ApprovalDecision.Rejected("Too expensive"));
 gate.submit(requestId, new ApprovalDecision.Modified(newArgumentJson));
 ```
 
-**Resolving approvals via HTTP (ara-gateway):**
+**Resolving approvals via HTTP** — with `ara-gateway`, the optional HTTP layer that ships
+separately from this build:
 
 ```bash
 # List pending approvals
