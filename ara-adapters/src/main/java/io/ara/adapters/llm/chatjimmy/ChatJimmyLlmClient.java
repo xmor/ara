@@ -187,6 +187,45 @@ public class ChatJimmyLlmClient implements LlmClient {
         return toLlmCompletion(parsed);
     }
 
+    /**
+     * chatjimmy.ai's own timing/throughput numbers from the trailing {@code <|stats|>} block,
+     * which {@link LlmCompletion} has no field to carry. Field meanings mirror
+     * {@code chatjimmy-reverse-api}'s {@code buildUsage}. Any value the upstream omits is
+     * reported as {@code 0}.
+     *
+     * @param promptTokensPerSecond  {@code prefill_rate} — prompt-processing speed
+     * @param outputTokensPerSecond  {@code decode_rate} — generation speed (tokens/second)
+     * @param timeToFirstTokenSeconds {@code ttft}
+     * @param totalGenerationSeconds {@code total_duration}
+     */
+    public record UpstreamSpeed(
+            double promptTokensPerSecond,
+            double outputTokensPerSecond,
+            double timeToFirstTokenSeconds,
+            double totalGenerationSeconds) {}
+
+    /** {@link #complete} result paired with {@link UpstreamSpeed} parsed from the same response. */
+    public record CompletionWithSpeed(LlmCompletion completion, UpstreamSpeed speed) {}
+
+    /**
+     * Like {@link #complete}, but also returns chatjimmy.ai's self-reported speed metrics
+     * ({@code decode_rate} etc.) from the {@code <|stats|>} block — the real generation
+     * tokens/second, as opposed to a wall-clock estimate that also includes network and proxy
+     * latency.
+     */
+    public CompletionWithSpeed completeWithSpeed(List<LlmMessage> messages, LlmCallContext context)
+            throws LlmException {
+        ObjectNode body = buildRequestBody(messages, context);
+        HttpResponse<String> response = send(body);
+        ParsedResponse parsed = parseUpstreamText(response.body());
+        JsonNode s = parsed.stats();
+        return new CompletionWithSpeed(toLlmCompletion(parsed), new UpstreamSpeed(
+                doubleField(s, "prefill_rate"),
+                doubleField(s, "decode_rate"),
+                doubleField(s, "ttft"),
+                doubleField(s, "total_duration")));
+    }
+
     @Override
     public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
         ObjectNode body = buildRequestBody(messages, context);
@@ -656,6 +695,10 @@ public class ChatJimmyLlmClient implements LlmClient {
         return stats != null && stats.has(field) ? stats.get(field).asInt(0) : 0;
     }
 
+    private double doubleField(JsonNode stats, String field) {
+        return stats != null && stats.has(field) ? stats.get(field).asDouble(0.0) : 0.0;
+    }
+
     // ── Builder ───────────────────────────────────────────────────────────────
 
     /**
@@ -743,15 +786,22 @@ public class ChatJimmyLlmClient implements LlmClient {
 
         System.setProperty("jdk.http.auth.tunneling.disabledSchemes", "");
 
-        LlmClient jimmy = ChatJimmyLlmClient.builder()
+        ChatJimmyLlmClient jimmy = ChatJimmyLlmClient.builder()
                 .baseUrl("https://chatjimmy.ai")
                 .modelName("llama3.1-8B")
-                .proxy(PROXY_URL, PROXY_PORT, PROXY_USER, PROXY_PASS)
+                // .proxy(PROXY_URL, PROXY_PORT, PROXY_USER, PROXY_PASS)
                 .build();
 
-        LlmCompletion completion = jimmy.complete(
+        long startNanos = System.nanoTime();
+        CompletionWithSpeed result = jimmy.completeWithSpeed(
                 List.of(LlmMessage.user("What is the capital of Italy?")),
                 new LlmCallContext.Builder().agentType("demo").build());
+        double elapsedSeconds = (System.nanoTime() - startNanos) / 1_000_000_000.0;
+
+        LlmCompletion completion = result.completion();
+        UpstreamSpeed speed = result.speed();
+        double wallClockTokensPerSecond =
+                elapsedSeconds > 0 ? completion.outputTokens() / elapsedSeconds : 0.0;
 
         System.out.println();
         System.out.println("=== LlmCompletion ===");
@@ -759,6 +809,12 @@ public class ChatJimmyLlmClient implements LlmClient {
         System.out.println("finishReason:  " + completion.finishReason());
         System.out.println("promptTokens:  " + completion.promptTokens());
         System.out.println("outputTokens:  " + completion.outputTokens());
+        System.out.printf("prompt tok/s:  %.1f (upstream prefill_rate)%n", speed.promptTokensPerSecond());
+        System.out.printf("output tok/s:  %.1f (upstream decode_rate)%n", speed.outputTokensPerSecond());
+        System.out.printf("TTFT:          %.2f s (upstream ttft)%n", speed.timeToFirstTokenSeconds());
+        System.out.printf("gen time:      %.2f s (upstream total_duration)%n", speed.totalGenerationSeconds());
+        System.out.printf("elapsed:       %.2f s (client wall-clock, incl. network/proxy)%n", elapsedSeconds);
+        System.out.printf("output tok/s:  %.1f (client wall-clock)%n", wallClockTokensPerSecond);
         System.out.println();
         System.out.println("The request reached this text ONLY by going through the");
         System.out.println("authenticated proxy — baseUrl itself does not resolve.");
