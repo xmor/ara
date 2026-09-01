@@ -9,6 +9,7 @@ import io.ara.core.llm.LlmMessage;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -46,6 +47,22 @@ final class RoundRobinLlmClient implements LlmClient {
         LlmCompletion result = chosen.complete(messages, context);
         lastUsedProviderId = chosen.providerId();
         return result;
+    }
+
+    /**
+     * Streams from whichever client the round-robin counter lands on for this call,
+     * advancing the counter exactly as {@link #complete} does so the two share one rotation.
+     *
+     * <p>The chosen client's own {@code stream} is returned directly — its incremental
+     * tokens reach the subscriber untouched. No cross-client fallback: round-robin has no
+     * fallback semantics, and re-issuing a partly delivered stream on another client would
+     * duplicate the tokens already sent.
+     */
+    @Override
+    public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
+        LlmClient chosen = clients.get(Math.floorMod(index.getAndIncrement(), clients.size()));
+        lastUsedProviderId = chosen.providerId();
+        return chosen.stream(messages, context);
     }
 
     @Override

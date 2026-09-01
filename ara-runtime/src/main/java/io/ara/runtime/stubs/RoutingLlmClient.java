@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.Flow;
 import java.util.stream.Collectors;
 
 /**
@@ -54,6 +55,14 @@ public final class RoutingLlmClient implements LlmClient {
         String type = context.agentType();
         LlmClient client = (type != null) ? routes.getOrDefault(type, defaultClient) : defaultClient;
         return client.complete(messages, context);
+    }
+
+    /** Streams from the same route {@link #complete(List, LlmCallContext)} would pick. */
+    @Override
+    public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
+        String type = context.agentType();
+        LlmClient client = (type != null) ? routes.getOrDefault(type, defaultClient) : defaultClient;
+        return client.stream(messages, context);
     }
 
     @Override
