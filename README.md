@@ -99,7 +99,7 @@ Add `ara-runtime` to your `pom.xml` (it depends on `ara-core` transitively):
 <dependency>
     <groupId>io.github.xmor</groupId>
     <artifactId>ara-runtime</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
