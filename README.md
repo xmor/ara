@@ -914,6 +914,7 @@ All examples are in `ara-examples`.
 | `basics/AraSimpleExample` | stub | End-to-end: ReAct loop, tool call, interceptor, agent reuse |
 | `basics/AraSimpleExampleLive` | **live** | Same as above but with a real LLM via `OpenAiLlmClient` |
 | `basics/InterceptorEventsExample` | stub | Every `AgentInterceptor` event in order, around one run |
+| `basics/SimpleStreamingExample` | stub | The smallest streaming agent: `streamingEnabled(true)` + `AgentTask.ofStreaming`, one turn, tokens printed as they arrive |
 | `basics/StreamingWithToolExample` | stub / **live** | Token streaming through a ReAct loop that calls a tool: `streamingEnabled` + `AgentTask.ofStreaming`, Think turns streamed, blocking path for contrast. Pass `live` (or `-Dara.example.live=true`) to stream from a real OpenAI-compatible endpoint |
 | `pipeline/ClassifyAndActExample` | none | Classify-and-act at its smallest: a `RuleClassifier`, an `IntentRouter`, four workers — no model, no API key |
 | `pipeline/TicketTriageCascadeExample` | stub | The three-tier cascade: rules → model → human, with confidence-driven escalation and an `ApprovalGate` |
