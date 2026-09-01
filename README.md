@@ -919,6 +919,7 @@ All examples are in `ara-examples`.
 | `hitl/HumanInTheLoopExample` | stub | A tool call parked on an `ApprovalGate` until an operator approves, rejects or modifies it |
 | `rag/RagAgentExample` | stub | `rag+react` over an `InMemoryDocumentStore`, plus an orchestrator delegating to it via `delegate_task` |
 | `multimodal/MultimodalInputExample` | **live** | A PDF to Mistral and an image to Ollama, through one provider-agnostic method |
+| `scheduler/AgentSchedulerExample` | none | Recurring execution: an interval schedule firing every second, plus `list` / `triggerNow` / `pause` / `resume` / `cancel` and a cron registration — no model, no API key |
 
 ### Running `AraSimpleExampleLive`
 
