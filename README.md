@@ -136,7 +136,7 @@ Add `ara-adapters` to your `pom.xml`:
 <dependency>
     <groupId>io.github.xmor</groupId>
     <artifactId>ara-adapters</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
