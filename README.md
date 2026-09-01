@@ -35,10 +35,10 @@ no framework lock-in.
 - [Execution strategies](#execution-strategies)
 - [AgentConfig — configurable agent values](#agentconfig--configurable-agent-values)
 - [Sessions & concurrency](#sessions--concurrency)
-- [Agent Instance Context](#agent-instance-context--private-per-agent-data-adr-036)
+- [Agent Instance Context](#agent-instance-context--private-per-agent-data)
 - [Runnable examples](#runnable-examples)
-- [Architecture](#architecture)
 - [Human-in-the-loop (HITL)](#human-in-the-loop-hitl--approval-gate)
+- [Agent scheduling](#agent-scheduling)
 - [Advanced usage](docs/ADVANCED_README.md)
 - [Contributing](#contributing)
 - [License](#license)
@@ -1144,7 +1144,7 @@ WebhookApprovalNotifier notifier = WebhookApprovalNotifier.builder()
 > agent. If no gate is configured, the flag is inert (no error, no approval). If the gate is
 > configured but `humanApprovalRequired` is `false`, tool calls bypass the gate entirely.
 
-### Agent scheduling
+## Agent scheduling
 `LocalAgentScheduler` is created by the runtime but agent schedules must be registered explicitly
 via `AraRuntime.scheduler()`. A schedule fires either on a fixed interval or on a cron expression:
 
