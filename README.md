@@ -922,6 +922,7 @@ All examples are in `ara-examples`.
 | `rag/RagAgentExample` | stub | `rag+react` over an `InMemoryDocumentStore`, plus an orchestrator delegating to it via `delegate_task` |
 | `multimodal/MultimodalInputExample` | **live** | A PDF to Mistral and an image to Ollama, through one provider-agnostic method |
 | `scheduler/AgentSchedulerExample` | none | Recurring execution: an interval schedule firing every second, plus `list` / `triggerNow` / `pause` / `resume` / `cancel` and a cron registration — no model, no API key |
+| `web/StreamingChatWebExample` | stub / **live** | An ARA-styled chat page served by a JDK `HttpServer`: each request runs a one-turn streaming agent and pushes every `tokenCallback` token to the browser over SSE. `main()` → open `http://localhost:8080`; pass `live` for a real model |
 
 ### Running `AraSimpleExampleLive`
 

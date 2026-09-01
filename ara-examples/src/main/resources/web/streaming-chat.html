@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="it" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ARA — chat in streaming</title>
+  <meta name="theme-color" content="#0B0D13" />
+  <script>
+    // Set the theme before first paint to avoid a flash of the wrong one.
+    (function () {
+      try {
+        var saved = localStorage.getItem("ara-theme");
+        document.documentElement.setAttribute("data-theme", saved === "light" ? "light" : "dark");
+      } catch (e) { document.documentElement.setAttribute("data-theme", "dark"); }
+    })();
+  </script>
+  <style>
+    /* stili identici alla versione precedente */
+    :root, html[data-theme="dark"] {
+      --bg:#0B0D13; --bg2:#12151D; --surface:#161A24;
+      --ink:#EEF0F6; --ink-soft:#B7BDCC; --muted:#8790A3;
+      --line:rgba(255,255,255,.08); --line-strong:rgba(255,255,255,.16);
+      --link:#8FB0FF; --link-soft:rgba(90,125,220,.16); --link-line:rgba(143,176,255,.3);
+      --ok:#6FCE9F;
+      --header-bg:rgba(11,13,19,.75);
+      --invert-bg:#EDEFF3; --invert-ink:#12151D;
+      --user-bg:rgba(143,176,255,.14); --user-line:rgba(143,176,255,.28);
+      --code-bg:#1B2030; --code-line:rgba(255,255,255,.08);
+      --radius:12px;
+      --mono:ui-monospace,"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;
+      --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Inter,"Helvetica Neue",Arial,sans-serif;
+      --danger:#E88;
+      --danger-bg:rgba(220,80,80,.10);
+      --danger-line:rgba(220,80,80,.35);
+    }
+    html[data-theme="light"] {
+      --bg:#FFFFFF; --bg2:#F7F8FA; --surface:#FFFFFF;
+      --ink:#1C2233; --ink-soft:#4A5164; --muted:#6B7283;
+      --line:#E6E8EE; --line-strong:#D6D9E2;
+      --link:#3557D6; --link-soft:#EDF1FC; --link-line:#C6D1F5;
+      --ok:#2F8F6F;
+      --header-bg:rgba(255,255,255,.86);
+      --invert-bg:#2C3242; --invert-ink:#FFFFFF;
+      --user-bg:#EDF1FC; --user-line:#C6D1F5;
+      --code-bg:#F2F3F7; --code-line:#E0E3EA;
+      --danger:#C33;
+      --danger-bg:#FDECEC;
+      --danger-line:#F5C2C2;
+    }
+
+    * , *::before, *::after { box-sizing:border-box; }
+    html, body { height:100%; }
+    body {
+      margin:0; background:var(--bg); color:var(--ink-soft);
+      font-family:var(--sans); font-size:15.5px; line-height:1.6;
+      -webkit-font-smoothing:antialiased;
+      display:flex; flex-direction:column;
+    }
+    ::selection { background:var(--link-soft); color:var(--link); }
+
+    header {
+      position:sticky; top:0; z-index:10;
+      background:var(--header-bg); backdrop-filter:blur(10px);
+      border-bottom:1px solid var(--line);
+    }
+    .nav {
+      max-width:900px; margin:0 auto; padding:0 20px;
+      height:60px; display:flex; align-items:center; gap:14px;
+    }
+    .brand { display:flex; align-items:center; gap:9px; font-weight:700; color:var(--ink); letter-spacing:.02em; }
+    .brand .mark {
+      font-family:var(--mono); font-weight:700; font-size:17px; letter-spacing:.12em;
+      color:var(--ink);
+    }
+    .brand small {
+      font-family:var(--mono); font-size:10px; color:var(--muted);
+      border:1px solid var(--line-strong); border-radius:5px; padding:1px 5px;
+      letter-spacing:.06em; text-transform:uppercase;
+    }
+    .nav .status {
+      margin-left:auto; font-family:var(--mono); font-size:12px; color:var(--muted);
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+    .nav .status.live { color:var(--ok); }
+    .theme-toggle {
+      display:inline-flex; align-items:center; justify-content:center;
+      width:28px; height:28px; padding:0; cursor:pointer;
+      background:transparent; border:1px solid var(--line-strong); border-radius:7px; color:var(--muted);
+      transition:color .15s ease, border-color .15s ease;
+    }
+    .theme-toggle:hover { color:var(--ink); border-color:var(--ink-soft); }
+    .theme-toggle svg { width:14px; height:14px; }
+    .theme-toggle svg[hidden] { display:none; }
+
+    main {
+      flex:1; width:100%; max-width:900px; margin:0 auto; padding:22px 20px;
+      display:flex; flex-direction:column; min-height:0;
+    }
+    .card {
+      position:relative;
+      flex:1; display:flex; flex-direction:column; min-height:0;
+      background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+      box-shadow:0 20px 44px -28px rgba(0,0,0,.45); overflow:hidden;
+    }
+    .card-bar {
+      display:flex; align-items:center; gap:10px;
+      padding:12px 16px; border-bottom:1px solid var(--line); background:var(--bg2);
+    }
+    .dots { display:flex; gap:6px; }
+    .dots i { width:10px; height:10px; border-radius:50%; background:var(--line-strong); display:block; }
+    .card-title { font-family:var(--mono); font-size:12px; color:var(--muted); flex:1; }
+
+    .bar-actions { display:flex; gap:6px; }
+    .bar-btn {
+      display:inline-flex; align-items:center; justify-content:center;
+      padding:4px 10px; font-family:var(--mono); font-size:11px; cursor:pointer;
+      background:transparent; border:1px solid var(--line-strong); border-radius:6px; color:var(--muted);
+      transition:color .15s ease, border-color .15s ease;
+    }
+    .bar-btn:hover { color:var(--ink); border-color:var(--ink-soft); }
+    .bar-btn:disabled { opacity:.4; cursor:not-allowed; }
+
+    .log { flex:1; overflow-y:auto; padding:20px 18px; display:flex; flex-direction:column; gap:14px; }
+    .log::-webkit-scrollbar { width:9px; }
+    .log::-webkit-scrollbar-thumb { background:var(--line-strong); border-radius:9px; }
+
+    .intro { color:var(--ink-soft); font-size:14.5px; }
+    .intro p { margin:0 0 12px; }
+    .sugg { display:flex; flex-wrap:wrap; gap:8px; }
+    .sugg button {
+      font-family:var(--mono); font-size:12px; color:var(--ink-soft); cursor:pointer;
+      background:var(--bg2); border:1px solid var(--line); border-radius:9px; padding:7px 11px;
+    }
+    .sugg button:hover { color:var(--ink); border-color:var(--line-strong); }
+
+    .msg { max-width:82%; padding:11px 14px; border-radius:12px; white-space:pre-wrap; word-wrap:break-word; }
+    .msg.user { align-self:flex-end; background:var(--user-bg); border:1px solid var(--user-line); color:var(--ink); }
+    .msg.bot { align-self:flex-start; background:var(--bg2); border:1px solid var(--line); color:var(--ink-soft); }
+    .msg.err {
+      align-self:flex-start; background:var(--danger-bg); border:1px solid var(--danger-line); color:var(--danger);
+      display:flex; flex-direction:column; gap:8px;
+    }
+    .msg.err .retry-btn {
+      align-self:flex-start; font-family:var(--mono); font-size:12px; cursor:pointer;
+      background:transparent; border:1px solid var(--danger-line); border-radius:6px;
+      padding:4px 10px; color:var(--danger);
+    }
+    .msg.err .retry-btn:hover { background:var(--danger-bg); }
+    .msg.note {
+      align-self:flex-start; background:var(--bg2); border:1px dashed var(--line-strong); color:var(--muted);
+      display:flex; flex-direction:column; gap:8px; font-size:13px;
+    }
+    .msg.note .retry-btn {
+      align-self:flex-start; font-family:var(--mono); font-size:12px; cursor:pointer;
+      background:transparent; border:1px solid var(--line-strong); border-radius:6px;
+      padding:4px 10px; color:var(--ink-soft);
+    }
+    .msg.note .retry-btn:hover { color:var(--ink); border-color:var(--ink-soft); }
+    .msg.bot.streaming::after {
+      content:"▋"; margin-left:1px; color:var(--link);
+      animation:blink 1s steps(1) infinite;
+    }
+    @keyframes blink { 50% { opacity:0; } }
+
+    /* "sta scrivendo" — mostrato nella bolla bot finché non arriva il primo token */
+    .msg.bot.awaiting.streaming::after { content:none; }
+    .typing { display:inline-flex; gap:5px; align-items:center; padding:3px 0; }
+    .typing i {
+      width:6px; height:6px; border-radius:50%; background:var(--muted);
+      animation:typing 1.2s infinite ease-in-out;
+    }
+    .typing i:nth-child(2) { animation-delay:.15s; }
+    .typing i:nth-child(3) { animation-delay:.3s; }
+    @keyframes typing { 0%,60%,100%{ opacity:.35; transform:translateY(0); } 30%{ opacity:1; transform:translateY(-3px); } }
+    @media (prefers-reduced-motion:reduce) {
+      .msg.bot.streaming::after, .typing i { animation:none; }
+    }
+
+    form { padding:12px 14px; border-top:1px solid var(--line); background:var(--bg2); }
+
+    /* textarea + send fusi in un unico campo: un bordo, un raggio, un focus ring */
+    .composer {
+      display:flex; align-items:flex-end; gap:6px;
+      padding:5px 5px 5px 12px;
+      background:var(--surface);
+      border:1px solid var(--line-strong); border-radius:12px;
+      transition:border-color .15s ease, box-shadow .15s ease;
+    }
+    .composer:focus-within { border-color:var(--link); box-shadow:0 0 0 3px var(--link-soft); }
+    .composer textarea {
+      flex:1; resize:none; max-height:140px; min-height:24px;
+      background:transparent; color:var(--ink); border:0; padding:8px 0;
+      font-family:var(--sans); font-size:15px; line-height:1.5;
+    }
+    .composer textarea:focus { outline:none; }
+    .composer textarea::placeholder { color:var(--muted); }
+    .send {
+      flex:none; width:34px; height:34px; border-radius:9px; cursor:pointer;
+      display:inline-flex; align-items:center; justify-content:center;
+      background:var(--invert-bg); color:var(--invert-ink); border:1px solid transparent;
+      transition:opacity .15s ease;
+    }
+    .send:hover:not(:disabled) { opacity:.88; }
+    .send:disabled { opacity:.4; cursor:not-allowed; }
+    .send svg { width:17px; height:17px; }
+    /* mentre lo stream è in corso il pulsante invio diventa il pulsante stop */
+    .send .icon-stop { display:none; }
+    .send.is-stop { background:var(--danger-bg); color:var(--danger); border-color:var(--danger-line); }
+    .send.is-stop .icon-send { display:none; }
+    .send.is-stop .icon-stop { display:inline-block; }
+
+    /* "↓ nuovi messaggi" — appare se ti allontani dal fondo durante lo streaming */
+    .jump {
+      position:absolute; right:16px; bottom:80px; z-index:3;
+      display:inline-flex; align-items:center; gap:6px;
+      padding:6px 12px; font-family:var(--mono); font-size:11px; cursor:pointer;
+      background:var(--surface); color:var(--ink-soft);
+      border:1px solid var(--line-strong); border-radius:999px;
+      box-shadow:0 10px 24px -10px rgba(0,0,0,.6);
+      transition:color .15s ease, border-color .15s ease;
+    }
+    .jump[hidden] { display:none; }
+    .jump:hover { color:var(--ink); border-color:var(--ink-soft); }
+    .jump svg { width:12px; height:12px; }
+
+    .foot { text-align:center; font-family:var(--mono); font-size:11px; color:var(--muted); margin:10px 0 0; }
+    @media (max-width:560px){ .msg{max-width:90%;} main{padding:14px 12px;} }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="nav">
+    <span class="brand"><span class="mark">ARA</span> <small>Java&nbsp;21</small></span>
+    <span class="status" id="status">sessione non avviata</span>
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false" aria-label="Passa al tema chiaro">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+    <div class="card-bar">
+      <span class="dots"><i></i><i></i><i></i></span>
+      <span class="card-title">assistente documentazione — risposta in streaming (SSE)</span>
+      <div class="bar-actions">
+        <button class="bar-btn" id="clear-btn" type="button">pulisci</button>
+      </div>
+    </div>
+
+    <div class="log" id="log" role="log" aria-live="polite">
+      <div class="intro" id="intro">
+        <p>Ciao. Ogni risposta arriva token per token dal <code>tokenCallback</code> di un agente ARA
+          (<code>streamingEnabled(true)</code> + <code>AgentTask.ofStreaming</code>), inoltrato via
+          Server-Sent-Events.</p>
+        <div class="sugg">
+          <button type="button">Cos'è un contratto I/O a costo zero?</button>
+          <button type="button">Quali strategie di esecuzione esistono?</button>
+          <button type="button">Come funziona lo streaming in ARA?</button>
+          <button type="button">Come definisco un tool?</button>
+        </div>
+      </div>
+    </div>
+
+    <button class="jump" id="jump" type="button" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      nuovi messaggi
+    </button>
+
+    <form id="form">
+      <div class="composer">
+        <textarea id="input" rows="1" placeholder="Scrivi una domanda…" autocomplete="off"></textarea>
+        <button class="send" id="send" type="submit" aria-label="Invia">
+          <svg class="icon-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12 20 4l-8 16-2-6-6-2Z"/></svg>
+          <svg class="icon-stop" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+        </button>
+      </div>
+    </form>
+  </div>
+  <p class="foot">ARA streaming demo · un turno per richiesta · l'agente viene creato e distrutto per ogni domanda</p>
+</main>
+
+<script>
+  (function () {
+    "use strict";
+    var log        = document.getElementById("log");
+    var intro      = document.getElementById("intro");
+    var form       = document.getElementById("form");
+    var input      = document.getElementById("input");
+    var send       = document.getElementById("send");
+    var status     = document.getElementById("status");
+    var clearBtn   = document.getElementById("clear-btn");
+    var jumpBtn    = document.getElementById("jump");
+    var busy       = false;
+    var es         = null;
+    var timeoutId  = null;
+    var lastQuestion = "";
+
+    // Creiamo un clone dell'introduzione da ripristinare
+    var introTemplate = intro.cloneNode(true);
+    // Rimuoviamo il riferimento all'elemento originale una volta clonato
+    intro = null;
+
+    function nearBottom() {
+      return log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+    }
+    function forceScroll() {
+      log.scrollTop = log.scrollHeight;
+      jumpBtn.hidden = true;
+    }
+    // Segue lo stream solo se sei già in fondo; altrimenti mostra il pulsante "↓".
+    function autoScroll() {
+      if (nearBottom()) log.scrollTop = log.scrollHeight;
+      else jumpBtn.hidden = false;
+    }
+
+    function bubble(cls, text) {
+      var el = document.createElement("div");
+      el.className = "msg " + cls;
+      el.textContent = text || "";
+      log.appendChild(el);
+      autoScroll();
+      return el;
+    }
+
+    function addRetryButton(parent) {
+      // Il click è gestito per delegazione sul log, riparte da lastQuestion.
+      var btn = document.createElement("button");
+      btn.className = "retry-btn";
+      btn.textContent = "Riprova";
+      parent.appendChild(btn);
+    }
+
+    function setBusy(on) {
+      busy = on;
+      input.disabled = on;
+      clearBtn.disabled = on;                          // niente "pulisci" durante lo stream
+      send.classList.toggle("is-stop", on);            // invio ⇄ stop
+      send.setAttribute("aria-label", on ? "Interrompi" : "Invia");
+      if (on) {
+        status.textContent = "sto scrivendo…";
+        status.classList.add("live");
+      } else {
+        status.classList.remove("live");
+      }
+    }
+
+    // Teardown puro dello stream — condiviso da done / timeout / stop manuale.
+    function stop() {
+      if (es) {
+        es.close();
+        es = null;
+      }
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      var streaming = log.querySelector(".msg.bot.streaming");
+      if (streaming) streaming.classList.remove("streaming");
+      setBusy(false);
+      input.focus();
+    }
+
+    // Stop dal pulsante: oltre al teardown, segnala l'interruzione e offre "Riprova".
+    function onStopClick() {
+      if (!busy) return;
+      var partial = log.querySelector(".msg.bot.streaming");
+      var hadText = partial && partial.textContent.trim() !== "";
+      stop();
+      if (partial && !hadText) partial.remove();   // bolla vuota: via
+      status.textContent = "interrotto";
+      var note = document.createElement("div");
+      note.className = "msg note";
+      note.textContent = hadText ? "Risposta interrotta." : "Interrotta prima della risposta.";
+      addRetryButton(note);
+      log.appendChild(note);
+      autoScroll();
+    }
+
+    function clearChat() {
+      if (busy) return; // non pulire durante lo streaming
+      log.innerHTML = "";
+      log.appendChild(introTemplate.cloneNode(true));
+      forceScroll();
+      status.textContent = "sessione non avviata";
+      status.classList.remove("live");
+      lastQuestion = "";
+    }
+
+    function ask(q) {
+      if (busy || !q) return;
+      // Rimuovi l'introduzione (se presente)
+      var introEl = log.querySelector(".intro");
+      if (introEl) introEl.remove();
+      bubble("user", q);
+      forceScroll();                          // la tua domanda: sempre portata in vista
+      var bot = bubble("bot", "");
+      bot.className = "msg bot streaming awaiting";
+      bot.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
+      lastQuestion = q;
+      setBusy(true);
+
+      var done = false;
+      es = new EventSource("chat?q=" + encodeURIComponent(q));
+
+      timeoutId = setTimeout(function () {
+        if (!done) {
+          es.close();
+          es = null;
+          bot.classList.remove("streaming", "awaiting");
+          if (bot.textContent.trim() === "") bot.remove();
+          var errMsg = bubble("err", "Tempo scaduto: il server non ha risposto.");
+          addRetryButton(errMsg);
+          status.textContent = "timeout";
+          status.classList.remove("live");
+          stop();
+        }
+      }, 30000);
+
+      es.addEventListener("token", function (e) {
+        var t = "";
+        try { t = JSON.parse(e.data).t; } catch (x) { return; }
+        if (bot.classList.contains("awaiting")) {   // primo token: via i puntini
+          bot.classList.remove("awaiting");
+          bot.textContent = "";
+        }
+        bot.textContent += t;
+        autoScroll();
+      });
+
+      es.addEventListener("done", function (e) {
+        done = true;
+        var d = {};
+        try { d = JSON.parse(e.data); } catch (x) {}
+        bot.classList.remove("awaiting");
+        if (typeof d.answer === "string" && d.answer.length > bot.textContent.length) {
+          bot.textContent = d.answer;
+        }
+        bot.classList.remove("streaming");
+        autoScroll();
+        status.textContent = (d.chunks || 0) + " chunk · " + (d.ms || 0) + " ms · " + (d.tokens || 0) + " tok";
+        status.classList.remove("live");
+        stop();
+      });
+
+      es.addEventListener("error", function (e) {
+        if (done) return;
+        done = true;                 // ignora l'errore generico di chiusura che segue
+        if (es) {
+          es.close();
+          es = null;
+        }
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        bot.classList.remove("streaming", "awaiting");
+        var errMsg;
+        if (e && e.data) {
+          var m = "errore";
+          try { m = JSON.parse(e.data).message || m; } catch (x) {}
+          bot.remove();
+          errMsg = bubble("err", "Errore: " + m);
+        } else if (bot.textContent === "") {
+          bot.remove();
+          errMsg = bubble("err", "Connessione allo stream non riuscita.");
+        } else {
+          errMsg = bubble("err", "Connessione interrotta durante lo streaming.");
+        }
+        if (errMsg) addRetryButton(errMsg);
+        status.textContent = "errore";
+        status.classList.remove("live");
+        setBusy(false);
+        input.focus();
+      });
+    }
+
+    // --- Delegazione degli eventi sul log ---
+    log.addEventListener("click", function (e) {
+      var target = e.target;
+
+      // Gestione click sui pulsanti suggerimento
+      var suggBtn = target.closest(".sugg button");
+      if (suggBtn) {
+        ask(suggBtn.textContent.trim());
+        return;
+      }
+
+      // Gestione click sul pulsante "Riprova"
+      var retryBtn = target.closest(".retry-btn");
+      if (retryBtn) {
+        ask(lastQuestion);
+        return;
+      }
+    });
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var q = input.value.trim();
+      if (!q) return;
+      input.value = "";
+      input.style.height = "";
+      ask(q);
+    });
+
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        form.dispatchEvent(new Event("submit", { cancelable: true }));
+      }
+    });
+    input.addEventListener("input", function () {
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 140) + "px";
+    });
+
+    clearBtn.addEventListener("click", clearChat);
+    jumpBtn.addEventListener("click", forceScroll);
+    log.addEventListener("scroll", function () {
+      if (nearBottom()) jumpBtn.hidden = true;
+    });
+    // Il pulsante invio fa da stop mentre lo stream è in corso.
+    send.addEventListener("click", function (e) {
+      if (busy) { e.preventDefault(); onStopClick(); }
+    });
+
+    // theme toggle
+    var themeBtn = document.getElementById("theme-toggle");
+    var sunIcon  = themeBtn.querySelector(".icon-sun");
+    var moonIcon = themeBtn.querySelector(".icon-moon");
+    function syncThemeButton(theme) {
+      var isLight = theme === "light";
+      sunIcon.hidden = isLight;
+      moonIcon.hidden = !isLight;
+      themeBtn.setAttribute("aria-pressed", String(isLight));
+      themeBtn.setAttribute("aria-label", isLight ? "Passa al tema scuro" : "Passa al tema chiaro");
+    }
+    syncThemeButton(document.documentElement.getAttribute("data-theme"));
+    themeBtn.addEventListener("click", function () {
+      var next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", next);
+      syncThemeButton(next);
+      try { localStorage.setItem("ara-theme", next); } catch (x) {}
+    });
+
+    input.focus();
+  })();
+</script>
+</body>
+</html>
