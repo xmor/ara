@@ -1145,11 +1145,34 @@ WebhookApprovalNotifier notifier = WebhookApprovalNotifier.builder()
 
 ### Agent scheduling
 `LocalAgentScheduler` is created by the runtime but agent schedules must be registered explicitly
-via `AraRuntime.scheduler()`:
+via `AraRuntime.scheduler()`. A schedule fires either on a fixed interval or on a cron expression:
 
 ```java
-runtime.scheduler().schedule(agentId, AgentSchedule.fixedRate(Duration.ofMinutes(10)));
+// fixed interval
+runtime.scheduler().register(AgentSchedule.builder()
+        .scheduleId("heartbeat")
+        .agentId(agentId)
+        .every(Duration.ofMinutes(10))
+        .withInput("ping")
+        .build());
+
+// cron — every weekday at 09:00
+runtime.scheduler().register(AgentSchedule.builder()
+        .scheduleId("morning-report")
+        .agentId(agentId)
+        .cron("0 9 * * MON-FRI")
+        .withInput("Generate the daily report")
+        .build());
 ```
+
+The 5-field cron format is `minute hour day-of-month month day-of-week`. Every field
+supports the standard syntax — `*`, single values, ranges (`1-5`, `MON-FRI`, wrapping
+for day-of-week), steps (`*/15`, `0-30/10`) and comma-separated lists (`1,15,30`,
+`MON,WED,FRI`). Day-of-week accepts symbolic names and both `0` and `7` for Sunday.
+When day-of-month and day-of-week are both restricted, standard cron OR semantics apply
+(fires when either matches). `LocalAgentScheduler` holds schedules in memory — they do
+not survive a process restart.
+
 ## Contributing
 
 Code style is enforced through [`docs/CODING-GUIDELINES.md`](docs/CODING-GUIDELINES.md) —

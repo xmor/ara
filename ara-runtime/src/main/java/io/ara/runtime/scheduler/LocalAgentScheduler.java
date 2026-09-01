@@ -210,10 +210,28 @@ public final class LocalAgentScheduler implements AgentScheduler {
 
     /**
      * Minimal 5-field cron evaluator (minute hour dom month dow).
-     * Handles {@code *}, numeric values, and ranges ({@code MON-FRI}).
-     * Returns seconds until the next matching instant.
+     *
+     * <p>Every field accepts:
+     * <ul>
+     *   <li>{@code *} — any value</li>
+     *   <li>a single value ({@code 5}, or {@code MON} for day-of-week)</li>
+     *   <li>a range ({@code 1-5}, {@code MON-FRI}, wrapping for day-of-week)</li>
+     *   <li>a step over the whole range ({@code *}&#47;{@code 15}) or over a range
+     *       ({@code 0-30}&#47;{@code 10})</li>
+     *   <li>a comma-separated list combining any of the above ({@code 1,15,30},
+     *       {@code MON,WED,FRI})</li>
+     * </ul>
+     *
+     * <p>Returns seconds until the next matching instant. Day-of-month and
+     * day-of-week follow the standard cron OR semantics: when both are restricted
+     * (neither is {@code *}) an instant matches if it satisfies <em>either</em>
+     * field. When only one is restricted, only that one is applied.
      */
     static final class CronEvaluator {
+
+        // A leap-cycle-safe upper bound: scanning minute-by-minute over ~4 years and 1 day
+        // guarantees we reach the next "Feb 29" for expressions like "0 0 29 2 *".
+        private static final int MAX_SCAN_MINUTES = (366 * 4 + 1) * 24 * 60;
 
         private CronEvaluator() {}
 
@@ -223,19 +241,31 @@ public final class LocalAgentScheduler implements AgentScheduler {
                 throw new IllegalArgumentException(
                         "Cron expression must have 5 fields: " + expression);
 
-            int minute    = parseField(fields[0], 0,  59);
-            int hour      = parseField(fields[1], 0,  23);
-            // dom (fields[2]) and month (fields[3]) — wildcard only for now
-            // dow (fields[4]) — handled via day-of-week matching
-            java.util.Set<Integer> dowTargets = parseDow(fields[4]);
+            java.util.Set<Integer> minutes = parseField(fields[0], 0, 59, false);
+            java.util.Set<Integer> hours   = parseField(fields[1], 0, 23, false);
+            java.util.Set<Integer> doms     = parseField(fields[2], 1, 31, false);
+            java.util.Set<Integer> months  = parseField(fields[3], 1, 12, false);
+            java.util.Set<Integer> dows     = parseField(fields[4], 0,  6, true);
+
+            boolean domRestricted = doms != null;
+            boolean dowRestricted = dows != null;
 
             LocalDateTime now  = LocalDateTime.now();
             LocalDateTime next = now.plusMinutes(1).withSecond(0).withNano(0);
 
-            for (int i = 0; i < 10_080; i++) {  // scan up to 1 week ahead
-                if ((minute < 0 || next.getMinute() == minute)
-                        && (hour   < 0 || next.getHour()   == hour)
-                        && (dowTargets == null || dowTargets.contains(next.getDayOfWeek().getValue() % 7))) {
+            for (int i = 0; i < MAX_SCAN_MINUTES; i++) {
+                boolean domMatch = !domRestricted || doms.contains(next.getDayOfMonth());
+                boolean dowMatch = !dowRestricted
+                        || dows.contains(next.getDayOfWeek().getValue() % 7);
+                // Standard cron day matching: OR when both restricted, AND (trivially) otherwise.
+                boolean dayMatch = (domRestricted && dowRestricted)
+                        ? (domMatch || dowMatch)
+                        : (domMatch && dowMatch);
+
+                if ((minutes == null || minutes.contains(next.getMinute()))
+                        && (hours  == null || hours.contains(next.getHour()))
+                        && (months == null || months.contains(next.getMonthValue()))
+                        && dayMatch) {
                     long delay = java.time.temporal.ChronoUnit.SECONDS.between(now, next);
                     return Math.max(1, delay);
                 }
@@ -245,48 +275,87 @@ public final class LocalAgentScheduler implements AgentScheduler {
             throw new IllegalStateException("Could not find next occurrence for cron: " + expression);
         }
 
-        private static int parseField(String field, int min, int max) {
-            if ("*".equals(field)) return -1;
-            int val = Integer.parseInt(field);
+        /**
+         * Parses one cron field into the set of allowed values, or {@code null} for
+         * the wildcard {@code *}. Supports comma-separated lists, ranges, and steps.
+         *
+         * @param dow when {@code true}, symbolic day names ({@code MON}) are accepted
+         *            and {@code 7} is normalised to {@code 0} (Sunday)
+         */
+        private static java.util.Set<Integer> parseField(String field, int min, int max, boolean dow) {
+            if ("*".equals(field)) return null;
+
+            java.util.Set<Integer> values = new java.util.HashSet<>();
+            for (String part : field.split(",")) {
+                if (part.isBlank())
+                    throw new IllegalArgumentException("Empty cron list element in: " + field);
+                parsePart(part.trim(), min, max, dow, values);
+            }
+            return values;
+        }
+
+        /** Parses a single list element: a value, a range, or a step over either. */
+        private static void parsePart(String part, int min, int max, boolean dow,
+                                      java.util.Set<Integer> out) {
+            int step = 1;
+            String rangePart = part;
+            int slash = part.indexOf('/');
+            if (slash >= 0) {
+                rangePart = part.substring(0, slash);
+                step = Integer.parseInt(part.substring(slash + 1));
+                if (step < 1)
+                    throw new IllegalArgumentException("Cron step must be >= 1: " + part);
+            }
+
+            int lo;
+            int hi;
+            if ("*".equals(rangePart)) {
+                lo = min;
+                hi = max;
+            } else if (rangePart.contains("-")) {
+                String[] bounds = rangePart.split("-", 2);
+                lo = value(bounds[0], min, max, dow);
+                hi = value(bounds[1], min, max, dow);
+            } else {
+                lo = value(rangePart, min, max, dow);
+                hi = lo;
+            }
+
+            // day-of-week ranges may wrap around the week (e.g. FRI-MON)
+            if (dow && lo > hi) {
+                int span = max - min + 1;               // 7
+                int length = (hi - lo + span) % span + 1; // inclusive count of days in the wrap
+                for (int i = 0; i < length; i += step) {
+                    out.add(min + (lo - min + i) % span);
+                }
+                return;
+            }
+
+            if (lo > hi)
+                throw new IllegalArgumentException("Cron range start after end: " + part);
+            for (int v = lo; v <= hi; v += step) out.add(v);
+        }
+
+        /** Parses a single numeric or symbolic value and range-checks it. */
+        private static int value(String token, int min, int max, boolean dow) {
+            int val = dow ? dowValue(token) : Integer.parseInt(token.trim());
             if (val < min || val > max)
-                throw new IllegalArgumentException("Cron field out of range [" + min + "," + max + "]: " + field);
+                throw new IllegalArgumentException(
+                        "Cron field out of range [" + min + "," + max + "]: " + token);
             return val;
         }
 
-        /**
-         * Parses a day-of-week field into the set of allowed values (0=SUN..6=SAT),
-         * or {@code null} for the wildcard {@code *}. Supports single values
-         * ({@code MON}, {@code 1}) and ranges ({@code MON-FRI}), wrapping around the
-         * week if needed (e.g. {@code FRI-MON}).
-         */
-        private static java.util.Set<Integer> parseDow(String field) {
-            if ("*".equals(field)) return null;
-            if (field.contains("-")) {
-                String[] parts = field.split("-", 2);
-                int start = dowValue(parts[0]);
-                int end   = dowValue(parts[1]);
-                java.util.Set<Integer> set = new java.util.HashSet<>();
-                int d = start;
-                for (int i = 0; i < 7; i++) {
-                    set.add(d);
-                    if (d == end) break;
-                    d = (d + 1) % 7;
-                }
-                return set;
-            }
-            return java.util.Set.of(dowValue(field));
-        }
-
+        /** Maps a day-of-week token (symbolic or numeric, {@code 7}=Sunday) to 0..6. */
         private static int dowValue(String field) {
-            return switch (field.toUpperCase()) {
-                case "SUN", "0" -> 0;
+            return switch (field.trim().toUpperCase()) {
+                case "SUN", "0", "7" -> 0;
                 case "MON", "1" -> 1;
                 case "TUE", "2" -> 2;
                 case "WED", "3" -> 3;
                 case "THU", "4" -> 4;
                 case "FRI", "5" -> 5;
                 case "SAT", "6" -> 6;
-                default -> Integer.parseInt(field);
+                default -> throw new IllegalArgumentException("Invalid day-of-week: " + field);
             };
         }
     }

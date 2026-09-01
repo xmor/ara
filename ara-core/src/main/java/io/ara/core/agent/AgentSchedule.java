@@ -64,6 +64,26 @@ public record AgentSchedule(
          * Fires according to a standard 5-field cron expression.
          * Format: {@code minute hour day-of-month month day-of-week}
          * Example: {@code "0 9 * * MON-FRI"} — every weekday at 09:00.
+         *
+         * <p>Every field accepts the standard cron syntax:
+         * <ul>
+         *   <li>{@code *} — any value</li>
+         *   <li>a single value ({@code 5}; {@code MON} or {@code 7} for day-of-week,
+         *       where {@code 0} and {@code 7} both mean Sunday)</li>
+         *   <li>a range ({@code 1-5}, {@code MON-FRI}; day-of-week ranges may wrap,
+         *       e.g. {@code FRI-MON})</li>
+         *   <li>a step over the whole range ({@code *}&#47;{@code 15}) or over a
+         *       range ({@code 0-30}&#47;{@code 10})</li>
+         *   <li>a comma-separated list combining any of the above ({@code 1,15,30},
+         *       {@code MON,WED,FRI})</li>
+         * </ul>
+         *
+         * <p>When both day-of-month and day-of-week are restricted, standard cron OR
+         * semantics apply: the schedule fires when <em>either</em> matches.
+         *
+         * <p>Only the single-JVM {@code LocalAgentScheduler} interprets this
+         * expression; the string itself is validated for non-blankness here and
+         * fully parsed when the schedule is registered.
          */
         record Cron(String expression) implements Trigger {
             public Cron {
