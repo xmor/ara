@@ -7,6 +7,8 @@ import java.util.concurrent.Flow;
 
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.http.client.jdk.JdkHttpClient;
+import dev.langchain4j.http.client.jdk.JdkHttpClientBuilder;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.openai.OpenAiChatModel;
@@ -75,6 +77,18 @@ public class OpenAiLlmClient implements LlmClient {
     private final boolean logRequests;
     private final boolean logResponses;
     private final boolean documentSupport;
+    /**
+     * Forces HTTP/1.1 on the streaming model's underlying JDK {@code HttpClient}.
+     *
+     * <p>Some OpenAI-compatible gateways
+     * use HTTP/2 multiplexing that buffers SSE data-frames server-side and delivers them all
+     * at once at the end of the response instead of flushing each token as it arrives. The
+     * fix is the same one LangChain4j already documents for vLLM:
+     * {@code HttpClient.Version.HTTP_1_1} disables multiplexing so each {@code data:} frame
+     * is flushed immediately — making streaming actually visible to the user. See
+     * https://github.com/langchain4j/langchain4j/issues/3682.
+     */
+    private final boolean forceHttp1;
 
     private OpenAiLlmClient(Builder builder) {
         this.modelName = builder.modelName;
@@ -92,6 +106,8 @@ public class OpenAiLlmClient implements LlmClient {
         this.documentSupport = builder.documentSupport != null
                 ? builder.documentSupport
                 : (builder.baseUrl == null || builder.baseUrl.isBlank());
+
+        this.forceHttp1 = builder.forceHttp1;
 
         this.chatModel = OpenAiChatModel.builder()
                 .apiKey(builder.apiKey)
@@ -193,17 +209,30 @@ public class OpenAiLlmClient implements LlmClient {
         if (streamingModel == null) {
             synchronized (this) {
                 if (streamingModel == null) {
-                    streamingModel = OpenAiStreamingChatModel.builder()
-                            .apiKey(apiKey)
-                            .baseUrl(baseUrl)
-                            .modelName(modelName)
-                            .temperature(defaultTemperature)
-                            .topP(defaultTopP)
-                            .maxTokens(defaultMaxTokens)
-                            .timeout(timeout)
-                            .logRequests(logRequests)
-                            .logResponses(logResponses)
-                            .build();
+                    OpenAiStreamingChatModel.OpenAiStreamingChatModelBuilder smBuilder =
+                            OpenAiStreamingChatModel.builder()
+                                    .apiKey(apiKey)
+                                    .baseUrl(baseUrl)
+                                    .modelName(modelName)
+                                    .temperature(defaultTemperature)
+                                    .topP(defaultTopP)
+                                    .maxTokens(defaultMaxTokens)
+                                    .timeout(timeout)
+                                    .logRequests(logRequests)
+                                    .logResponses(logResponses);
+
+                    if (forceHttp1) {
+                        // Force HTTP/1.1 to prevent gateway-side HTTP/2 buffering from batching
+                        // SSE frames — see the forceHttp1 field javadoc.
+                        java.net.http.HttpClient.Builder jdkBuilder =
+                                java.net.http.HttpClient.newBuilder()
+                                        .version(java.net.http.HttpClient.Version.HTTP_1_1);
+                        JdkHttpClientBuilder jdkHttpClientBuilder =
+                                JdkHttpClient.builder().httpClientBuilder(jdkBuilder);
+                        smBuilder.httpClientBuilder(jdkHttpClientBuilder);
+                    }
+
+                    streamingModel = smBuilder.build();
                 }
             }
         }
@@ -300,6 +329,7 @@ public class OpenAiLlmClient implements LlmClient {
         private boolean  logResponses = false;
         /** Nullable on purpose: null means "derive from baseUrl" — see supportedMediaTypes(). */
         private Boolean  documentSupport;
+        private boolean  forceHttp1   = false;
 
         /** Sets the OpenAI API key (required). */
         public Builder apiKey(String apiKey)       { this.apiKey = apiKey; return this; }
@@ -347,6 +377,17 @@ public class OpenAiLlmClient implements LlmClient {
          * worked, saying so clearly.
          */
         public Builder documentSupport(boolean v)  { this.documentSupport = v; return this; }
+
+        /**
+         * Forces HTTP/1.1 on the streaming model to prevent gateway buffering of SSE frames.
+         * Set this to {@code true} when the endpoint is behind a proxy or gateway that uses
+         * HTTP/2 multiplexing.
+         * Has no effect on the blocking {@link #complete} path, which uses the default {@link
+         * OpenAiChatModel} (not affected by HTTP/2 buffering).
+         */
+        public Builder forceHttp1(boolean v) {
+            this.forceHttp1 = v; return this;
+        }
 
         /**
          * Builds the {@link OpenAiLlmClient}.

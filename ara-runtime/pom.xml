@@ -8,7 +8,7 @@
   <parent>
     <groupId>io.github.xmor</groupId>
     <artifactId>ara</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2-SNAPSHOT</version>
   </parent>
 
   <artifactId>ara-runtime</artifactId>

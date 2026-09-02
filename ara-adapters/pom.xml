@@ -8,7 +8,7 @@
   <parent>
     <groupId>io.github.xmor</groupId>
     <artifactId>ara</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2-SNAPSHOT</version>
   </parent>
 
   <artifactId>ara-adapters</artifactId>
@@ -19,9 +19,9 @@
   <url>https://github.com/xmor/ara</url>
 
   <properties>
-    <mcp.sdk.version>1.0.1</mcp.sdk.version>
+    <mcp.sdk.version>1.0.2</mcp.sdk.version>
     <!-- OTel — optional; pull in only when telemetry is needed -->
-    <opentelemetry.version>1.51.0</opentelemetry.version>
+    <opentelemetry.version>1.65.0</opentelemetry.version>
 
     <!-- Above the inherited floor. See the note on jacoco.min.* in the root pom. -->
     <jacoco.min.instruction>0.61</jacoco.min.instruction>
@@ -33,7 +33,7 @@
       <dependency>
         <groupId>dev.langchain4j</groupId>
         <artifactId>langchain4j-bom</artifactId>
-        <version>1.17.0</version>
+        <version>1.19.0</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>
@@ -64,6 +64,14 @@
     <dependency>
       <groupId>dev.langchain4j</groupId>
       <artifactId>langchain4j-open-ai</artifactId>
+    </dependency>
+
+    <!-- JDK HTTP client for LangChain4j — needed to force HTTP/1.1 on the streaming
+         model to prevent gateway-side HTTP/2 buffering of SSE frames.
+         Version is managed by the langchain4j-bom imported above. -->
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j-http-client-jdk</artifactId>
     </dependency>
 
     <!-- Provider: Anthropic -->
