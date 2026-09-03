@@ -18,8 +18,12 @@ import io.ara.core.agent.RunContext;
 import io.ara.core.agent.RunState;
 import io.ara.core.agent.SessionId;
 import io.ara.core.agent.SessionStore;
+import io.ara.core.budget.HierarchicalBudget;
+import io.ara.core.budget.Spend;
 import io.ara.core.bus.AgentMessage;
 import io.ara.core.bus.MessageBus;
+import io.ara.core.common.Budget;
+import io.ara.core.common.Money;
 
 /**
  * Verifies {@link AgentDelegationTool} enforces {@link DelegateStateAccess} on the
@@ -232,5 +236,35 @@ class AgentDelegationStateAccessTest {
         // OVERLAY: readable but not the same reference
         assertEquals("v", sent.get().runContext().state().get("seed", String.class).orElseThrow());
         assertNotSame(parentState, sent.get().runContext().state());
+    }
+
+    // ── ADR-0069 D3: the hierarchical budget node rides the opaque channel through the hop ──
+
+    private static HierarchicalBudget budget() {
+        return HierarchicalBudget.root(Budget.limited(Money.of("10.00", "EUR")), 5000, null, null);
+    }
+
+    private static void assertBudgetPropagates(DelegateStateAccess mode) {
+        AtomicReference<AgentMessage> sent = new AtomicReference<>();
+        AgentDelegationTool tool = new AgentDelegationTool(
+                capturingBus(sent), "caller", Duration.ofSeconds(5), mode);
+        HierarchicalBudget callerBudget = budget();
+        AgentTask task = AgentTask.of("parent task").withRunContext(
+                callerBudget.attachTo(RunContext.empty().withState(RunState.inMemory())));
+
+        tool.execute("{\"agent_id\":\"worker\",\"task\":\"do it\"}", task);
+
+        HierarchicalBudget onMessage = HierarchicalBudget.from(sent.get().runContext()).orElseThrow();
+        assertSame(callerBudget, onMessage, mode + ": the delegate gets the same budget node");
+        onMessage.record(Spend.of(Money.of("1.00", "EUR"), 100, 1));
+        assertEquals(Money.of("1.00", "EUR"), callerBudget.spent().money(),
+                mode + ": the delegate's spend lands on the caller's node");
+    }
+
+    @Test
+    void budgetNode_propagatesForSharedOverlayAndIsolated() {
+        assertBudgetPropagates(DelegateStateAccess.SHARED);
+        assertBudgetPropagates(DelegateStateAccess.OVERLAY);
+        assertBudgetPropagates(DelegateStateAccess.ISOLATED);
     }
 }

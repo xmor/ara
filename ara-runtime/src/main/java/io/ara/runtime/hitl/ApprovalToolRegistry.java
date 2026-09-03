@@ -9,6 +9,7 @@ import io.ara.core.hitl.ApprovalTimeoutException;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
+import io.ara.core.tool.ToolSpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,9 +22,12 @@ import java.util.Optional;
  * {@link ToolRegistry} decorator that routes every tool dispatch through an
  * {@link ApprovalGate} before calling the delegate.
  *
- * <p>When an agent has {@link AgentConfig#humanApprovalRequired()} set to {@code true}
- * and a gate is configured on the runtime, this decorator is inserted into the registry
- * chain. For every {@link #execute} call it:
+ * <p>Inserted into the registry chain whenever an {@link ApprovalGate} is configured on
+ * the runtime. A call is gated when <em>either</em> the agent's
+ * {@link AgentConfig#humanApprovalRequired()} is {@code true} <em>or</em> the tool's
+ * {@link ToolSpec#approvalRequired()} is (ADR-0067 D6) — the agent flag can only add a
+ * gate, never remove one the tool's own classification already requires. When neither
+ * asks for a gate the call is dispatched straight to the delegate. When gated, it:
  * <ol>
  *   <li>Creates an {@link ApprovalRequest} describing the tool call.</li>
  *   <li>Calls {@link ApprovalGate#requestApproval(ApprovalRequest)} and blocks on the
@@ -49,6 +53,7 @@ public final class ApprovalToolRegistry implements ToolRegistry {
     private final ToolRegistry delegate;
     private final ApprovalGate gate;
     private final String agentId;
+    private final boolean agentForcesApproval;
     private final Duration approvalTimeout;
 
     public ApprovalToolRegistry(ToolRegistry delegate, ApprovalGate gate, AgentConfig config) {
@@ -57,10 +62,12 @@ public final class ApprovalToolRegistry implements ToolRegistry {
 
     public ApprovalToolRegistry(ToolRegistry delegate, ApprovalGate gate, AgentConfig config,
                                 Duration approvalTimeout) {
-        this.delegate        = Objects.requireNonNull(delegate, "delegate must not be null");
-        this.gate            = Objects.requireNonNull(gate, "gate must not be null");
-        this.agentId         = Objects.requireNonNull(config, "config must not be null").agentId().value();
-        this.approvalTimeout = Objects.requireNonNull(approvalTimeout, "approvalTimeout must not be null");
+        this.delegate            = Objects.requireNonNull(delegate, "delegate must not be null");
+        this.gate                = Objects.requireNonNull(gate, "gate must not be null");
+        Objects.requireNonNull(config, "config must not be null");
+        this.agentId             = config.agentId().value();
+        this.agentForcesApproval = config.humanApprovalRequired();
+        this.approvalTimeout     = Objects.requireNonNull(approvalTimeout, "approvalTimeout must not be null");
     }
 
     @Override
@@ -71,6 +78,11 @@ public final class ApprovalToolRegistry implements ToolRegistry {
     @Override
     public Optional<AraTool> findById(String toolId) {
         return delegate.findById(toolId);
+    }
+
+    @Override
+    public Optional<ToolSpec> specFor(String toolId) {
+        return delegate.specFor(toolId);
     }
 
     @Override
@@ -97,6 +109,14 @@ public final class ApprovalToolRegistry implements ToolRegistry {
 
     private ToolResult executeWithApproval(String toolId, String argumentJson,
                                            ToolExecutor executor) {
+        // ADR-0067 D6: gate when the agent forces it OR the tool's own classification
+        // requires it — never a condition the agent flag alone can switch off.
+        boolean needsGate = agentForcesApproval
+                || delegate.specFor(toolId).map(ToolSpec::approvalRequired).orElse(false);
+        if (!needsGate) {
+            return executor.execute(toolId, argumentJson);
+        }
+
         ApprovalRequest request = ApprovalRequest.of(agentId, toolId, argumentJson, approvalTimeout);
 
         log.debug("Requesting approval for tool [{}] on agent [{}], requestId={}",

@@ -500,6 +500,17 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
     }
 
     /**
+     * Cancels the in-flight task on every session of this agent, keeping the agent alive
+     * (ADR-0069 D4). Same loop as {@link #terminate()} without {@link SessionManager#shutdown()}.
+     */
+    @Override
+    public void cancelAllSessions() {
+        for (AgentSession s : sessionManager.activeSessions()) {
+            s.requestCancel();
+        }
+    }
+
+    /**
      * Returns how many sessions are currently held open for this agent (ADR-016) — O(1),
      * with no intermediate collection. Neither {@link #activeSessions()} (which builds a
      * {@code Map} per session: turn count, last-accessed time, TTL remaining) nor {@code

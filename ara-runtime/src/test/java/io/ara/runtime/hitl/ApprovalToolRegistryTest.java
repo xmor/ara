@@ -8,8 +8,11 @@ import io.ara.core.hitl.ApprovalGate;
 import io.ara.core.hitl.ApprovalRequest;
 import io.ara.core.hitl.ApprovalTimeoutException;
 import io.ara.core.tool.AraTool;
+import io.ara.core.tool.Reversibility;
+import io.ara.core.tool.SideEffects;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
+import io.ara.core.tool.ToolSpec;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -45,6 +48,7 @@ class ApprovalToolRegistryTest {
         record Call(String toolId, String args, boolean withTask) {}
 
         final List<Call> calls = new CopyOnWriteArrayList<>();
+        volatile ToolSpec spec;   // ADR-0067: the classification specFor(...) reports, if any
         private final AraTool tool = new AraTool() {
             @Override public String toolId() { return "delete_record"; }
             @Override public String description() { return "deletes a record"; }
@@ -58,6 +62,10 @@ class ApprovalToolRegistryTest {
         @Override public List<AraTool> all() { return List.of(tool); }
         @Override public Optional<AraTool> findById(String id) {
             return tool.toolId().equals(id) ? Optional.of(tool) : Optional.empty();
+        }
+
+        @Override public Optional<ToolSpec> specFor(String toolId) {
+            return Optional.ofNullable(spec != null && spec.toolId().equals(toolId) ? spec : null);
         }
 
         @Override public ToolResult execute(String toolId, String argumentJson) {
@@ -100,7 +108,17 @@ class ApprovalToolRegistryTest {
         @Override public List<ApprovalRequest> getPendingRequests() { return List.copyOf(seen); }
     }
 
+    /** An agent that forces approval on every tool call (the pre-ADR-0067 "in the chain = gate all" behaviour). */
     private static AgentConfig config() {
+        return AgentConfig.defaults()
+                .agentId(AgentId.of("hitl-agent"))
+                .agentType("t")
+                .humanApprovalRequired(true)
+                .build();
+    }
+
+    /** An agent that does NOT force approval — gating is then decided per tool by its ToolSpec (ADR-0067 D6). */
+    private static AgentConfig configNoAgentGate() {
         return AgentConfig.defaults()
                 .agentId(AgentId.of("hitl-agent"))
                 .agentType("t")
@@ -261,6 +279,59 @@ class ApprovalToolRegistryTest {
 
         assertTrue(gate.seen.isEmpty(),
                 "listing tools is not an action — only dispatch needs a human");
+    }
+
+    // ── ADR-0067 D6: per-tool gating, independent of the agent's own flag ─────
+
+    @Test
+    void agentWithoutTheFlag_stillGatesAToolClassifiedIrreversibleHighImpact() {
+        RecordingRegistry delegate = new RecordingRegistry();
+        delegate.spec = ToolSpec.builtin("delete_record", SideEffects.EXTERNAL_WRITE,
+                new Reversibility.IrreversibleHighImpact());
+        ScriptedGate gate = new ScriptedGate(new ApprovalDecision.Rejected("no"));
+
+        ToolResult result = new ApprovalToolRegistry(delegate, gate, configNoAgentGate())
+                .execute("delete_record", ARGS);
+
+        assertEquals(1, gate.seen.size(), "the tool's own classification forces the gate");
+        assertTrue(result.isFailed());
+        assertTrue(delegate.calls.isEmpty(), "rejected → the delete never runs");
+    }
+
+    @Test
+    void agentWithoutTheFlag_andNoClassification_dispatchesStraightThrough() {
+        RecordingRegistry delegate = new RecordingRegistry();
+        ScriptedGate gate = new ScriptedGate(new ApprovalDecision.Rejected("should never be consulted"));
+
+        new ApprovalToolRegistry(delegate, gate, configNoAgentGate()).execute("delete_record", ARGS);
+
+        assertTrue(gate.seen.isEmpty(), "no agent flag, no ToolSpec → no gate");
+        assertEquals(List.of(new RecordingRegistry.Call("delete_record", ARGS, false)), delegate.calls);
+    }
+
+    @Test
+    void agentWithoutTheFlag_andALowRiskClassification_dispatchesStraightThrough() {
+        RecordingRegistry delegate = new RecordingRegistry();
+        delegate.spec = ToolSpec.builtin("delete_record", SideEffects.LOCAL_WRITE,
+                new Reversibility.CostlyButReversible());
+        ScriptedGate gate = new ScriptedGate(new ApprovalDecision.Rejected("should never be consulted"));
+
+        new ApprovalToolRegistry(delegate, gate, configNoAgentGate()).execute("delete_record", ARGS);
+
+        assertTrue(gate.seen.isEmpty(), "a non-high-impact tool does not force a gate");
+        assertEquals(1, delegate.calls.size());
+    }
+
+    @Test
+    void specFor_isDelegatedThrough() {
+        RecordingRegistry delegate = new RecordingRegistry();
+        delegate.spec = ToolSpec.builtin("delete_record", SideEffects.EXTERNAL_WRITE,
+                new Reversibility.IrreversibleHighImpact());
+        ApprovalToolRegistry registry = new ApprovalToolRegistry(
+                delegate, new ScriptedGate(new ApprovalDecision.Approved()), configNoAgentGate());
+
+        assertTrue(registry.specFor("delete_record").orElseThrow().approvalRequired());
+        assertTrue(registry.specFor("unknown").isEmpty());
     }
 
     // ── construction ──────────────────────────────────────────────────────────

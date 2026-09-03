@@ -139,6 +139,45 @@ class ClassifyAndActSpecTest {
         assertEquals("billing", span.attributes().get("routing.target"));
     }
 
+    // ── ADR-0072 D5: routing.recipe_cache_hit on the classify span ────────────
+
+    @Test
+    void a_recipe_cache_bound_spec_tags_the_classify_span_with_the_cache_hit() {
+        io.ara.core.spec.InMemorySpecArchive archive = new io.ara.core.spec.InMemorySpecArchive();
+        // both workers of MINIMAL resolve from the archive, so RecipeCacheResolver alone can build the spec
+        archive.promote("agent-a", io.ara.core.agent.AgentConfig.defaults().agentType("a-handler").build());
+        archive.promote("agent-f", io.ara.core.agent.AgentConfig.defaults().agentType("f-handler").build());
+
+        RecipeCacheResolver resolver = new RecipeCacheResolver(archive,
+                cfg -> io.ara.core.agent.AraAgents.deterministic(AgentId.of(cfg.agentType()), t -> "handled by " + cfg.agentType()));
+        RecordingTelemetry telemetry = new RecordingTelemetry();
+
+        ClassifyAndActSpec.fromJson(MINIMAL)
+                .build(ClassifyAndActSpec.Bindings.of(resolver).withTelemetry(telemetry))
+                .run(task("a request that matches keyword a"));
+
+        var attrs = telemetry.spansNamed("pipeline.classify").getFirst().attributes();
+        assertEquals("A", attrs.get("routing.label"));
+        assertEquals(true, attrs.get("routing.recipe_cache_hit"),
+                "label A routes to a worker resolved from a promoted archived recipe");
+    }
+
+    @Test
+    void a_non_recipe_cache_bound_spec_does_not_emit_the_attribute() {
+        RecordingTelemetry telemetry = new RecordingTelemetry();
+        Map<String, AraAgent> agents = Map.of(
+                "agent-a", echoAgent("agent-a", "a handled"),
+                "agent-f", echoAgent("agent-f", "f handled"));
+
+        ClassifyAndActSpec.fromJson(MINIMAL)
+                .build(ClassifyAndActSpec.Bindings.of(ClassifyAndActSpec.AgentResolver.of(agents))
+                        .withTelemetry(telemetry))
+                .run(task("a request that matches keyword a"));
+
+        var attrs = telemetry.spansNamed("pipeline.classify").getFirst().attributes();
+        assertFalse(attrs.containsKey("routing.recipe_cache_hit"));
+    }
+
     // ── The point of the whole thing ──────────────────────────────────────────
 
     @Test

@@ -455,7 +455,7 @@ public record ClassifyAndActSpec(
         if (routing.confidenceField() != null) confidenceField.accept(routing.confidenceField());
     }
 
-    private static IntentRouter routerFor(ClassifierSpec spec, Bindings bindings) {
+    private IntentRouter routerFor(ClassifierSpec spec, Bindings bindings) {
         Routing routing = spec.routing();
         IntentRouter.Builder builder = (routing.labelField() != null)
                 ? IntentRouter.onField(routing.labelField())
@@ -465,6 +465,19 @@ public record ClassifyAndActSpec(
         if (routing.writeConfidenceTo() != null) builder.writeConfidenceTo(routing.writeConfidenceTo());
         if (routing.confidenceField()   != null) builder.confidenceField(routing.confidenceField());
         if (routing.escalateBelow()     != null) builder.escalateBelow(routing.escalateBelow(), routing.escalateTo());
+
+        // ADR-0072 D5: when the fast-path resolver is bound, tag the classify span for
+        // every routed label whose worker is a promoted archived recipe.
+        if (bindings.agents() instanceof RecipeCacheResolver rcr) {
+            Set<String> hitLabels = routing.routes().entrySet().stream()
+                    .filter(e -> {
+                        String ref = workers.get(e.getValue());
+                        return ref != null && rcr.isCacheHit(ref);
+                    })
+                    .map(Map.Entry::getKey)
+                    .collect(java.util.stream.Collectors.toSet());
+            if (!hitLabels.isEmpty()) builder.recipeCacheLabels(hitLabels);
+        }
         return builder.orElse(routing.orElse());
     }
 

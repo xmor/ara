@@ -528,6 +528,31 @@ public final class AraRuntime implements AutoCloseable {
     }
 
     /**
+     * Kill switch (ADR-0069 D4): requests cooperative cancellation of the in-flight task
+     * on <em>every</em> session of <em>every</em> registered agent. Agents and sessions
+     * stay alive — only running tasks stop at their next iteration boundary, and new tasks
+     * submitted afterwards run normally. A no-op for agents that don't manage sessions
+     * ({@link SessionScoped}).
+     */
+    public void emergencyStopAll() {
+        registry.all().stream()
+                .filter(a -> a instanceof SessionScoped)
+                .forEach(a -> ((SessionScoped) a).cancelAllSessions());
+    }
+
+    /**
+     * Per-agent kill switch (ADR-0069 D4): as {@link #emergencyStopAll()} but scoped to
+     * {@code agentId}. Sibling agents keep running — the same per-session isolation as
+     * {@link #terminateSession}. A no-op if the agent isn't registered or doesn't manage
+     * sessions ({@link SessionScoped}).
+     */
+    public void emergencyStop(AgentId agentId) {
+        registry.findById(agentId)
+                .filter(a -> a instanceof SessionScoped)
+                .ifPresent(a -> ((SessionScoped) a).cancelAllSessions());
+    }
+
+    /**
      * Returns how many sessions are currently held open for {@code agentId} — {@code 0}
      * if the agent isn't registered or doesn't manage sessions ({@link SessionScoped}).
      */
@@ -1179,7 +1204,11 @@ public final class AraRuntime implements AutoCloseable {
                         ToolRegistry base = new DelegatingToolRegistry(
                                 perAgentToolRegistry.apply(agentCfg), messageBus, agentCfg.agentId().value(),
                                 delegationTimeout, agentCfg.delegateStateAccess(), sessionStore);
-                        ToolRegistry withApproval = approvalGate != null && agentCfg.humanApprovalRequired()
+                        // ADR-0067 D6: insert the approval decorator whenever a gate is
+                        // configured, and let it decide per call whether a gate is needed
+                        // (agent flag OR the tool's own ToolSpec.approvalRequired()) — so a
+                        // high-risk tool is gated even when the agent's flag is false.
+                        ToolRegistry withApproval = approvalGate != null
                                 ? new ApprovalToolRegistry(base, approvalGate, agentCfg)
                                 : base;
                         return new TelemetryToolRegistry(withApproval, telemetry);

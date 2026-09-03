@@ -59,4 +59,12 @@ public interface SessionScoped {
      * @return the number of currently tracked sessions; never negative
      */
     int activeSessionCount();
+
+    /**
+     * Requests cooperative cancellation of the in-flight task on <em>every</em> session
+     * of this agent, without terminating the agent (ADR-0069 D4, kill switch). Idle
+     * sessions and future tasks are untouched; each running task stops at its next
+     * iteration boundary, exactly like {@link #terminate(SessionId)} for one session.
+     */
+    void cancelAllSessions();
 }

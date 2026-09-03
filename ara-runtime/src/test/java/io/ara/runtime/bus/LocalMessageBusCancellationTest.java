@@ -68,6 +68,7 @@ class LocalMessageBusCancellationTest {
 
         @Override public void invalidateSession(SessionId sessionId) { }
         @Override public int activeSessionCount() { return terminateCalls.isEmpty() ? 1 : 0; }
+        @Override public void cancelAllSessions() { }
     }
 
     @Test

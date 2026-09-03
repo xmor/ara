@@ -8,6 +8,7 @@ import io.ara.runtime.telemetry.RecordingTelemetry;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
+import java.util.Set;
 
 import static io.ara.runtime.pipeline.PipelineTestAgents.echoAgent;
 import static org.junit.jupiter.api.Assertions.*;
@@ -320,6 +321,40 @@ class IntentRouterTest {
         assertEquals("MATCHED", attrs.get("routing.reason"));
         assertEquals(true,      attrs.get("routing.matched"));
         assertEquals(0.9,       attrs.get("routing.confidence"));
+        assertFalse(attrs.containsKey("routing.recipe_cache_hit"),
+                "no recipe cache bound → the ADR-0072 D5 attribute is not emitted");
+    }
+
+    @Test
+    void the_span_records_a_recipe_cache_hit_for_a_marked_label() {
+        RecordingTelemetry telemetry = new RecordingTelemetry();
+        IntentRouter router = IntentRouter.onField("intent")
+                .route("TECH", "tech").route("SALES", "sales").route("BILLING", "billing")
+                .confidenceField("confidence")
+                .recipeCacheLabels(Set.of("TECH"))   // ADR-0072 D5
+                .telemetry(telemetry)
+                .orElse("fallback");
+
+        triageBuilder(router).build().run("My laptop will not boot");   // classifier answers TECH
+
+        Map<String, Object> attrs = telemetry.spansNamed("pipeline.classify").getFirst().attributes();
+        assertEquals(true, attrs.get("routing.recipe_cache_hit"));
+    }
+
+    @Test
+    void the_span_records_a_recipe_cache_miss_for_an_unmarked_matched_label() {
+        RecordingTelemetry telemetry = new RecordingTelemetry();
+        IntentRouter router = IntentRouter.onField("intent")
+                .route("TECH", "tech").route("SALES", "sales").route("BILLING", "billing")
+                .confidenceField("confidence")
+                .recipeCacheLabels(Set.of("SALES"))   // marked set is non-empty, but TECH is not in it
+                .telemetry(telemetry)
+                .orElse("fallback");
+
+        triageBuilder(router).build().run("My laptop will not boot");
+
+        Map<String, Object> attrs = telemetry.spansNamed("pipeline.classify").getFirst().attributes();
+        assertEquals(false, attrs.get("routing.recipe_cache_hit"));
     }
 
     @Test

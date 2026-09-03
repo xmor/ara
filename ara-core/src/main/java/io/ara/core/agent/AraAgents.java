@@ -96,6 +96,7 @@ public final class AraAgents {
                 config.streamingEnabled(),
                 config.maxConversationTurns() > 0,
                 List.of(config.plannerStrategy()));
-        return new AgentCard(id.agentId(), id.name(), id.description(), id.version(), caps);
+        return new AgentCard(id.agentId(), id.name(), id.description(), id.version(), caps,
+                config.requiredScopes(), List.of("none"));
     }
 }

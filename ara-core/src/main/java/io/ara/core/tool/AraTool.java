@@ -2,6 +2,8 @@ package io.ara.core.tool;
 
 import io.ara.core.agent.AgentTask;
 
+import java.util.List;
+
 /**
  * Contract that every tool registered in ARA must implement.
  *
@@ -62,5 +64,19 @@ public interface AraTool {
      */
     default ToolResult execute(String argumentJson, AgentTask task) {
         return execute(argumentJson);
+    }
+
+    /**
+     * The authorization scopes a caller must hold to have this tool resolved into its
+     * catalog (ADR-033 Fase 1). Default: none — the tool is available to every agent that
+     * enables it, exactly as before.
+     *
+     * <p>Fase 1 is declaration only; {@code DelegatingToolRegistry} does not filter on
+     * this yet (Fase 3).
+     *
+     * @return an unmodifiable list of required scope strings; never {@code null}
+     */
+    default List<String> requiredScopes() {
+        return List.of();
     }
 }

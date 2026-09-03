@@ -91,6 +91,9 @@ public record AgentConfig(
     public String                    retrieverId()           { return execution.retrieverId(); }
     public DelegateStateAccess       delegateStateAccess()   { return execution.delegateStateAccess(); }
     public Duration                  sessionTtl()            { return execution.sessionTtl(); }
+    public List<String>              grantedScopes()         { return execution.grantedScopes(); }
+    public List<String>              visibleToScopes()       { return execution.visibleToScopes(); }
+    public List<String>              requiredScopes()        { return execution.requiredScopes(); }
 
     // -------------------------------------------------------------------------
     // Backward-compat delegation methods — memory
@@ -141,6 +144,9 @@ public record AgentConfig(
                 .retrieverId(execution.retrieverId())
                 .delegateStateAccess(execution.delegateStateAccess())
                 .sessionTtl(execution.sessionTtl())
+                .grantedScopes(execution.grantedScopes())
+                .visibleToScopes(execution.visibleToScopes())
+                .requiredScopes(execution.requiredScopes())
                 .workingMemoryTokenBudget(memory.workingMemoryTokenBudget())
                 .workingMemoryEviction(memory.workingMemoryEviction())
                 .maxConversationTurns(memory.maxConversationTurns())
@@ -185,6 +191,9 @@ public record AgentConfig(
         private String                    retrieverId           = null;
         private DelegateStateAccess       delegateStateAccess   = DelegateStateAccess.OVERLAY;
         private Duration                  sessionTtl            = ExecutionConfig.DEFAULT_SESSION_TTL;
+        private List<String>              grantedScopes         = List.of();
+        private List<String>              visibleToScopes       = List.of();
+        private List<String>              requiredScopes        = List.of();
 
         // memory
         private int    workingMemoryTokenBudget = 0;
@@ -251,6 +260,14 @@ public record AgentConfig(
          */
         public Builder sessionTtl(Duration v)                          { sessionTtl = v;            return this; }
 
+        // --- authorization scopes (ADR-033 Fase 1; default empty = no restriction, no enforcement yet) ---
+        /** Scopes this agent holds as a caller. */
+        public Builder grantedScopes(List<String> v)                   { grantedScopes = v;         return this; }
+        /** Scopes a caller must share for this agent to be discoverable; empty = visible to all. */
+        public Builder visibleToScopes(List<String> v)                 { visibleToScopes = v;       return this; }
+        /** Scopes a caller must hold to invoke this agent; empty = no scopes required. */
+        public Builder requiredScopes(List<String> v)                  { requiredScopes = v;        return this; }
+
         // --- memory ---
         public Builder workingMemoryTokenBudget(int v)    { workingMemoryTokenBudget = v; return this; }
         public Builder workingMemoryEviction(String v)    { workingMemoryEviction = v;    return this; }
@@ -271,7 +288,8 @@ public record AgentConfig(
                     plannerStrategy, strategyConfig, enabledTools, mcpServerIds,
                     maxIterations, executionTimeout, maxTokensPerStep,
                     humanApprovalRequired, knowledgeBaseId, sessionBusyPolicy, retrieverId,
-                    delegateStateAccess, sessionTtl);
+                    delegateStateAccess, sessionTtl,
+                    grantedScopes, visibleToScopes, requiredScopes);
 
             MemoryConfig mem = new MemoryConfig(
                     workingMemoryTokenBudget, workingMemoryEviction,

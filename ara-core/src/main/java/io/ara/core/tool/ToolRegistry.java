@@ -55,6 +55,22 @@ public interface ToolRegistry {
     Optional<AraTool> findById(String toolId);
 
     /**
+     * The risk classification of the tool identified by {@code toolId} (ADR-0067 D5), if
+     * this registry carries one.
+     *
+     * <p>Default: empty. Additive by construction — a new default method on an interface
+     * breaks no existing implementor. A registry that classifies its tools overrides this;
+     * one that does not keeps returning empty for every id, and gating stays governed only
+     * by the calling agent's {@code humanApprovalRequired()} flag, exactly as before.
+     *
+     * @param toolId the tool identifier
+     * @return the {@link ToolSpec} for that tool, or empty if this registry has none
+     */
+    default Optional<ToolSpec> specFor(String toolId) {
+        return Optional.empty();
+    }
+
+    /**
      * Executes the tool identified by {@code toolId} with the given JSON arguments.
      *
      * @param toolId       the tool to execute

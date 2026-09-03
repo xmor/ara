@@ -93,6 +93,11 @@ public final class ContractEnforcingAgent implements AraAgent, SessionHistoryAwa
         return inner instanceof SessionScoped s ? s.activeSessionCount() : 0;
     }
 
+    @Override
+    public void cancelAllSessions() {
+        if (inner instanceof SessionScoped s) s.cancelAllSessions();
+    }
+
     /**
      * Delegates to the wrapped agent. In current usage {@code inner} is always the
      * {@code AgentInstance} this decorator was built together with by {@code

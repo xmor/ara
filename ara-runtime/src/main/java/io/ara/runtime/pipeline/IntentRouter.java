@@ -121,6 +121,8 @@ public final class IntentRouter implements Function<PipelineExecution, String> {
     private final Double              minConfidence;  // null = no threshold configured
     private final String              escalationStep;
     private final AraTelemetry        telemetry;
+    /** Labels (normalised) whose worker is a recipe-cache hit (ADR-0072 D5); null = attribute not emitted. */
+    private final Set<String>         recipeCacheLabels;
 
     /** Guards the "your state writes are going nowhere" warning so it is logged once per router, not once per task. */
     private final AtomicBoolean noopStateWarned = new AtomicBoolean();
@@ -136,6 +138,8 @@ public final class IntentRouter implements Function<PipelineExecution, String> {
         this.minConfidence      = b.minConfidence;
         this.escalationStep     = b.escalationStep;
         this.telemetry          = b.telemetry;
+        this.recipeCacheLabels  = b.recipeCacheLabels == null ? null
+                : b.recipeCacheLabels.stream().map(this::normalise).collect(java.util.stream.Collectors.toUnmodifiableSet());
     }
 
     /**
@@ -257,6 +261,12 @@ public final class IntentRouter implements Function<PipelineExecution, String> {
         try {
             if (decision.label()      != null) span.setAttribute("routing.label", decision.label());
             if (decision.confidence() != null) span.setAttribute("routing.confidence", decision.confidence());
+            if (recipeCacheLabels != null && decision.label() != null) {
+                // ADR-0072 D5: only emitted when a RecipeCacheResolver was bound, so a
+                // plain Classify-and-Act span is unchanged.
+                span.setAttribute("routing.recipe_cache_hit",
+                        recipeCacheLabels.contains(normalise(decision.label())));
+            }
             span.setStatus(SpanStatus.OK);
         } finally {
             span.end();
@@ -308,9 +318,22 @@ public final class IntentRouter implements Function<PipelineExecution, String> {
         private Double       minConfidence;
         private String       escalationStep;
         private AraTelemetry telemetry = AraTelemetry.noop();
+        private Set<String>  recipeCacheLabels;
 
         private Builder(String labelPath) {
             this.labelPath = labelPath;
+        }
+
+        /**
+         * Marks which of {@link #routes(Map) the routed labels} resolve to a recipe-cache
+         * hit, so the {@code pipeline.classify} span carries {@code routing.recipe_cache_hit}
+         * for them (ADR-0072 D5). Set by {@code ClassifyAndActSpec} when a
+         * {@code RecipeCacheResolver} is bound; unset otherwise, and then the attribute is
+         * never emitted. Labels are matched with the same case rule as {@link #route}.
+         */
+        public Builder recipeCacheLabels(Set<String> labels) {
+            this.recipeCacheLabels = labels == null ? null : Set.copyOf(labels);
+            return this;
         }
 
         /**
