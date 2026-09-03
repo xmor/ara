@@ -35,6 +35,29 @@ class EvalTypesTest {
                 () -> EvalCase.curated("c1", "s1", null, "exact_match", 0));
     }
 
+    // ADR-0071 D4 — Draft/Ready status
+    @Test
+    void evalCase_statusDefaultsToReady_andLegacyConstructorToo() {
+        assertEquals(EvalCase.Status.READY, EvalCase.curated("c1", "s1", "x", "exact_match", 0).status());
+        // 10-arg backward-compatible constructor
+        EvalCase legacy = new EvalCase("c1", "s1", false, List.of(), "curated", "x", Map.of(), "exact_match", Map.of(), 0);
+        assertEquals(EvalCase.Status.READY, legacy.status());
+        assertTrue(legacy.countsTowardVerdict());
+    }
+
+    @Test
+    void draftCase_doesNotCountTowardVerdict_untilReadyWith() {
+        EvalCase draft = new EvalCase("c1", "s1", false, List.of(), "production_failure", "x",
+                Map.of(), "pending_human_verifier", Map.of(), 0, EvalCase.Status.DRAFT);
+        assertFalse(draft.countsTowardVerdict());
+
+        EvalCase ready = draft.readyWith("assertion", Map.of("k", "v"));
+        assertEquals(EvalCase.Status.READY, ready.status());
+        assertEquals("assertion", ready.evaluationStrategy());
+        assertTrue(ready.countsTowardVerdict());
+        assertEquals("c1", ready.caseId(), "readyWith keeps identity");
+    }
+
     @Test
     void evalCase_collectionsAreDefensivelyCopiedAndImmutable() {
         java.util.List<String> tags = new java.util.ArrayList<>(List.of("finance"));

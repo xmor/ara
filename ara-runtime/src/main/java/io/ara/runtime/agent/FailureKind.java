@@ -14,13 +14,19 @@ import io.ara.core.agent.AgentResponse;
  * <p>Extracted from {@code AgentInstance} so the mapping can be unit-tested directly
  * rather than only observed through a span attribute.
  *
+ * <p>Public since ADR-0074 D6: the observability dashboard's "top failure modes" panel
+ * buckets {@code TraceSpan.failureKind} (the {@link #name()} of this enum) by value, so a
+ * consumer in another package — {@code io.ara.runtime.observability.DashboardQueryService}
+ * — needs the type. This ADR reuses the classification as-is; it does not add a second
+ * taxonomy (the semantic axis is ADR-0080's {@code FailureCategory}).
+ *
  * <p><strong>Known limitation.</strong> {@link #classify} matches on message text, so a
  * reworded failure reason in a strategy silently degrades to {@link #OTHER}. The structural
  * fix is a typed failure cause on {@code ExecutionResult}; until then the reason strings
  * this class matches are effectively a contract with the built-in strategies, and
  * {@code FailureKindTest} is what pins it down.
  */
-enum FailureKind {
+public enum FailureKind {
 
     /** A task arrived while the session was already executing another one. */
     SESSION_BUSY,
@@ -42,7 +48,7 @@ enum FailureKind {
      * against the reason strings {@code AgentInstance} and the built-in strategies are known
      * to produce; anything unrecognised (including {@code null}) yields {@link #OTHER}.
      */
-    static FailureKind classify(String reason) {
+    public static FailureKind classify(String reason) {
         if (reason == null) return OTHER;
         if (reason.startsWith("Session busy")) return SESSION_BUSY;
         if (reason.equals("Cancelled") || reason.equals("Agent terminated before execution")) return CANCELLED;

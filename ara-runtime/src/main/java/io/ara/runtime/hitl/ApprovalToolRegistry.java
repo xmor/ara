@@ -2,6 +2,8 @@ package io.ara.runtime.hitl;
 
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.RunState;
+import io.ara.core.autonomy.AutonomyPolicy;
 import io.ara.core.hitl.ApprovalDecision;
 import io.ara.core.hitl.ApprovalGate;
 import io.ara.core.hitl.ApprovalRequest;
@@ -44,17 +46,40 @@ import java.util.Optional;
  * <p>The approval timeout defaults to 30 minutes — configurable via the overloaded
  * constructor. This is deliberately generous: HITL is inherently asynchronous and
  * the virtual thread park is free.
+ *
+ * <p><b>Autonomy track record (ADR-0073 D2, optional third disjunct).</b> When an
+ * {@link AutonomyPolicy} is supplied, a call also gates when the policy says the action
+ * must escalate for its {@code task_class} — the level floor (condition 2) or the
+ * confidence threshold (condition 3) of ADR-0073 D2, additive to the two above and never
+ * able to remove them. The {@code task_class} and confidence are read from the call's
+ * {@link RunState} under the configured keys (defaults {@value #DEFAULT_TASK_CLASS_KEY} /
+ * {@value #DEFAULT_CONFIDENCE_KEY}, matching an {@code IntentRouter} write). This can only
+ * be evaluated on the {@link #execute(String, String, AgentTask)} path: a call with no
+ * task carries no {@link RunState}, and a call whose {@code task_class} is absent is
+ * treated as "not measurable here" (ADR-0073, "Non affrontato") — neither adds a gate,
+ * the two floors above still apply.
  */
 public final class ApprovalToolRegistry implements ToolRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(ApprovalToolRegistry.class);
-    private static final Duration DEFAULT_APPROVAL_TIMEOUT = Duration.ofMinutes(30);
+
+    /** Time an operator has to decide before an approval request expires, when not overridden. */
+    public static final Duration DEFAULT_APPROVAL_TIMEOUT = Duration.ofMinutes(30);
+
+    /** Default {@link RunState} key the {@code task_class} is read from (an {@code IntentRouter} label). */
+    public static final String DEFAULT_TASK_CLASS_KEY = "intent";
+
+    /** Default {@link RunState} key the action confidence is read from. */
+    public static final String DEFAULT_CONFIDENCE_KEY = "confidence";
 
     private final ToolRegistry delegate;
     private final ApprovalGate gate;
     private final String agentId;
     private final boolean agentForcesApproval;
     private final Duration approvalTimeout;
+    private final AutonomyPolicy autonomyPolicy;   // nullable — ADR-0073 D2 third disjunct, off when unset
+    private final String taskClassStateKey;
+    private final String confidenceStateKey;
 
     public ApprovalToolRegistry(ToolRegistry delegate, ApprovalGate gate, AgentConfig config) {
         this(delegate, gate, config, DEFAULT_APPROVAL_TIMEOUT);
@@ -62,12 +87,33 @@ public final class ApprovalToolRegistry implements ToolRegistry {
 
     public ApprovalToolRegistry(ToolRegistry delegate, ApprovalGate gate, AgentConfig config,
                                 Duration approvalTimeout) {
+        this(delegate, gate, config, approvalTimeout, null,
+                DEFAULT_TASK_CLASS_KEY, DEFAULT_CONFIDENCE_KEY);
+    }
+
+    /**
+     * With an autonomy track-record policy (ADR-0073 D2), reading {@code task_class} and
+     * confidence from the default {@link RunState} keys. Pass
+     * {@link #DEFAULT_APPROVAL_TIMEOUT} for {@code approvalTimeout} to keep the default.
+     */
+    public ApprovalToolRegistry(ToolRegistry delegate, ApprovalGate gate, AgentConfig config,
+                                Duration approvalTimeout, AutonomyPolicy autonomyPolicy) {
+        this(delegate, gate, config, approvalTimeout, autonomyPolicy,
+                DEFAULT_TASK_CLASS_KEY, DEFAULT_CONFIDENCE_KEY);
+    }
+
+    public ApprovalToolRegistry(ToolRegistry delegate, ApprovalGate gate, AgentConfig config,
+                                Duration approvalTimeout, AutonomyPolicy autonomyPolicy,
+                                String taskClassStateKey, String confidenceStateKey) {
         this.delegate            = Objects.requireNonNull(delegate, "delegate must not be null");
         this.gate                = Objects.requireNonNull(gate, "gate must not be null");
         Objects.requireNonNull(config, "config must not be null");
         this.agentId             = config.agentId().value();
         this.agentForcesApproval = config.humanApprovalRequired();
         this.approvalTimeout     = Objects.requireNonNull(approvalTimeout, "approvalTimeout must not be null");
+        this.autonomyPolicy      = autonomyPolicy;   // nullable by design
+        this.taskClassStateKey   = Objects.requireNonNull(taskClassStateKey, "taskClassStateKey must not be null");
+        this.confidenceStateKey  = Objects.requireNonNull(confidenceStateKey, "confidenceStateKey must not be null");
     }
 
     @Override
@@ -92,13 +138,13 @@ public final class ApprovalToolRegistry implements ToolRegistry {
 
     @Override
     public ToolResult execute(String toolId, String argumentJson) {
-        return executeWithApproval(toolId, argumentJson,
+        return executeWithApproval(toolId, argumentJson, null,
                 (id, args) -> delegate.execute(id, args));
     }
 
     @Override
     public ToolResult execute(String toolId, String argumentJson, AgentTask task) {
-        return executeWithApproval(toolId, argumentJson,
+        return executeWithApproval(toolId, argumentJson, task,
                 (id, args) -> delegate.execute(id, args, task));
     }
 
@@ -107,12 +153,15 @@ public final class ApprovalToolRegistry implements ToolRegistry {
         return delegate.wrapForPropagation(task);
     }
 
-    private ToolResult executeWithApproval(String toolId, String argumentJson,
+    private ToolResult executeWithApproval(String toolId, String argumentJson, AgentTask task,
                                            ToolExecutor executor) {
         // ADR-0067 D6: gate when the agent forces it OR the tool's own classification
         // requires it — never a condition the agent flag alone can switch off.
+        // ADR-0073 D2: plus a third disjunct — the autonomy track record for this
+        // task_class asks to escalate (level floor / confidence threshold). Additive.
         boolean needsGate = agentForcesApproval
-                || delegate.specFor(toolId).map(ToolSpec::approvalRequired).orElse(false);
+                || delegate.specFor(toolId).map(ToolSpec::approvalRequired).orElse(false)
+                || autonomyEscalates(toolId, task);
         if (!needsGate) {
             return executor.execute(toolId, argumentJson);
         }
@@ -158,6 +207,30 @@ public final class ApprovalToolRegistry implements ToolRegistry {
                 yield executor.execute(toolId, newArgs);
             }
         };
+    }
+
+    /**
+     * ADR-0073 D2 conditions 2–3: the autonomy track record for this call's
+     * {@code task_class} asks to escalate. Returns {@code false} (adds no gate) when there
+     * is no policy, no task (hence no {@link RunState}), no {@link ToolSpec} to classify
+     * the action, or no {@code task_class} in state — the last is "not measurable here"
+     * (ADR-0073, "Non affrontato"), not an escalation.
+     */
+    private boolean autonomyEscalates(String toolId, AgentTask task) {
+        if (autonomyPolicy == null || task == null) {
+            return false;
+        }
+        Optional<ToolSpec> spec = delegate.specFor(toolId);
+        if (spec.isEmpty()) {
+            return false;
+        }
+        RunState state = task.runContext().state();
+        String taskClass = state.get(taskClassStateKey, String.class).filter(s -> !s.isBlank()).orElse(null);
+        if (taskClass == null) {
+            return false;
+        }
+        double confidence = state.get(confidenceStateKey, Number.class).map(Number::doubleValue).orElse(0.0);
+        return autonomyPolicy.escalate(taskClass, spec.get(), confidence);
     }
 
     private static Throwable unwrap(Exception e) {
