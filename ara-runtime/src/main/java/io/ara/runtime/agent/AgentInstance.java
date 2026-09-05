@@ -75,6 +75,9 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
     /** Reserved context key for contract-enforced system prompt override. */
     public static final String CTX_SYSTEM_PROMPT = "__ara_system_prompt__";
 
+    /** Upper bound on entries pulled back per turn by {@link MemoryManager#recallRelevant} (ADR-0086). */
+    private static final int RECALL_MAX_RESULTS = 3;
+
     private final Versioned<AgentConfig> versionedConfig;
     /** Permanent shutdown flag (set by {@link #terminate()} / destroy). Poisons the whole agent. */
     private final AtomicBoolean closed;
@@ -408,7 +411,7 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
                 if (config.maxConversationTurns() > 0) {
                     session.conversationHistory().addTurn(task.input(), result.output(), task.media());
                 }
-                return handleSuccess(task.taskId(), session, result, elapsed, effectiveLlm);
+                return handleSuccess(task, session, result, elapsed, effectiveLlm);
             }
 
         } catch (ExecutionTimeoutException e) {
@@ -450,6 +453,11 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
             }
         }
         memoryManager.appendToWorkingMemory("user", task.input(), task.media());
+        // ADR-0086: pull back whatever this agent's offload tier holds that is relevant to
+        // this task — a no-op for a manager with no offload tier (the default). A small,
+        // fixed cap: this is a floor under the task's own context, not a second retrieval
+        // budget for the caller to tune.
+        memoryManager.recallRelevant(task.input(), RECALL_MAX_RESULTS);
     }
 
     /**
@@ -583,23 +591,29 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
 
     // ── Private helpers ────────────────────────────────────────────────────────
 
-    private AgentResponse handleSuccess(String taskId, AgentSession session,
+    private AgentResponse handleSuccess(AgentTask task, AgentSession session,
                                          ExecutionResult result, Duration elapsed, LlmClient usedLlm) {
+        String taskId = task.taskId();
         AgentConfig config = session.wiring().config();
         session.stateMachine().transitionTo(AgentState.DONE);
         AgentExecutionContext doneCtx = buildContext(taskId, session, result.iterationsDone(), result.tokensUsed());
         interceptorChain.after(doneCtx, "Executing", result.output());
+
+        AgentResponse response = AgentResponse.success(
+                taskId, agentId(), result.output(),
+                result.iterationsDone(), result.promptTokens(), result.outputTokens(),
+                estimateCost(result.promptTokens(), result.outputTokens(), config), elapsed, result.steps())
+                .withLlmProvider(resolvedLlmProviderId(usedLlm, config));
+        // ADR-0086: called before clearWorkingMemory() so an implementation that reacts to
+        // a finished turn (e.g. consolidation) still sees this turn's full window.
+        session.memoryManager().onTurnCompleted(task, response);
         session.memoryManager().clearWorkingMemory();
         session.stateMachine().transitionTo(AgentState.IDLE);
 
         log.info("Agent [{}] completed task [{}] in {} iteration(s), {} tokens",
                 agentId().value(), taskId, result.iterationsDone(), result.tokensUsed());
 
-        return AgentResponse.success(
-                taskId, agentId(), result.output(),
-                result.iterationsDone(), result.promptTokens(), result.outputTokens(),
-                estimateCost(result.promptTokens(), result.outputTokens(), config), elapsed, result.steps())
-                .withLlmProvider(resolvedLlmProviderId(usedLlm, config));
+        return response;
     }
 
     private AgentResponse handleFailure(String taskId, AgentSession session,

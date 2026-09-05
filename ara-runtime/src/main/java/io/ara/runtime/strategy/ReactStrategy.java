@@ -156,6 +156,13 @@ public final class ReactStrategy implements ExecutionStrategy {
             totalOutputTokens += completion.outputTokens();
             String output = completion.text();
 
+            ExecutionResult runBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
+                    config, task, completion.promptTokens(), completion.outputTokens(),
+                    iterations, totalPromptTokens, totalOutputTokens, steps);
+            if (runBudgetExceeded != null) {
+                return runBudgetExceeded;
+            }
+
             ReactExecutionSupport.recordAssistantOutput(memory, steps, completion, output, iterations, task.taskId());
             ReactExecutionSupport.logIterationResult(completion, iterations, config.maxIterations(), task.taskId());
 

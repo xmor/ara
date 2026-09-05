@@ -3,6 +3,8 @@ package io.ara.runtime.strategy;
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.ExecutionResult;
+import io.ara.core.agent.RunContext;
+import io.ara.core.budget.RunBudget;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
@@ -192,6 +194,51 @@ class ReactStrategyTest {
                 AgentTask.of("test"), llm, memory, NO_TOOLS, config);
 
         assertTrue(result.isSuccess(), "budget must not be enforced when cost rate is 0");
+    }
+
+    // ── ADR-0069 D2/D3 — the run's RunBudget, when the task's RunContext carries one ──
+
+    @Test
+    void run_budget_from_run_context_stops_loop_when_a_call_exceeds_the_cap() {
+        AgentConfig config = AgentConfig.defaults()
+                .primaryLlm(LlmProfile.of("stub"))
+                .maxIterations(10)
+                .build();
+
+        LlmCompletion firstResponse = new LlmCompletion("Thinking...", 100, 100, "length", null);
+        ScriptedLlmClient llm = ScriptedLlmClient.script()
+                .then(firstResponse)
+                .thenFinalAnswer("must never be reached")
+                .build();
+
+        RunBudget runBudget = RunBudget.of().maxTokens(150).build();
+        AgentTask task = AgentTask.of("test").withRunContext(runBudget.attachTo(RunContext.empty()));
+
+        TrackingMemory memory = seeded("sys", "test");
+        ExecutionResult result = new ReactStrategy().execute(task, llm, memory, NO_TOOLS, config);
+
+        assertFalse(result.isSuccess(), "the run budget's token cap (150) is exceeded by the first call (200)");
+        assertTrue(result.failureReason().contains("Run budget exceeded"),
+                "failure reason must name the run budget breach, got: " + result.failureReason());
+        assertTrue(result.failureReason().contains("TOKENS"),
+                "failure reason must name the exceeded axis, got: " + result.failureReason());
+    }
+
+    @Test
+    void no_run_budget_on_the_task_leaves_execution_unaffected() {
+        AgentConfig config = AgentConfig.defaults()
+                .primaryLlm(LlmProfile.of("stub"))
+                .maxIterations(5)
+                .build();
+
+        ScriptedLlmClient llm = ScriptedLlmClient.script().thenFinalAnswer("ok").build();
+
+        TrackingMemory memory = seeded("sys", "test");
+        // AgentTask.of(...) carries RunContext.empty() — no RunBudget attached.
+        ExecutionResult result = new ReactStrategy().execute(AgentTask.of("test"), llm, memory, NO_TOOLS, config);
+
+        assertTrue(result.isSuccess());
+        assertEquals("ok", result.output());
     }
 
     @Test

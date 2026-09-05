@@ -15,10 +15,15 @@ import io.ara.core.agent.AgentResponse;
  * rather than only observed through a span attribute.
  *
  * <p>Public since ADR-0074 D6: the observability dashboard's "top failure modes" panel
- * buckets {@code TraceSpan.failureKind} (the {@link #name()} of this enum) by value, so a
- * consumer in another package — {@code io.ara.runtime.observability.DashboardQueryService}
- * — needs the type. This ADR reuses the classification as-is; it does not add a second
- * taxonomy (the semantic axis is ADR-0080's {@code FailureCategory}).
+ * buckets {@code TraceSpan.failureKind} (the {@link #name()} of this enum) by value, and
+ * that dashboard is a consumer in a separate, non-public module — it needs this type to
+ * be public even though the dashboard itself is not part of this distribution.
+ *
+ * <p>This is the only failure taxonomy in this module, and it classifies <em>why execution
+ * stopped</em> (timeout, budget exceeded, an unhandled exception, …) — never <em>whether a
+ * completed answer was wrong</em>. A run can finish with {@code failureKind = null} (no
+ * execution failure) and still have produced a bad answer; judging that is a separate,
+ * orthogonal concern handled elsewhere and out of scope for this type.
  *
  * <p><strong>Known limitation.</strong> {@link #classify} matches on message text, so a
  * reworded failure reason in a strategy silently degrades to {@link #OTHER}. The structural

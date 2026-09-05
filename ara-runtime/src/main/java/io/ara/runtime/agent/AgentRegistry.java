@@ -2,8 +2,10 @@ package io.ara.runtime.agent;
 
 import io.ara.core.agent.AgentCard;
 import io.ara.core.agent.AgentState;
+import io.ara.core.agent.AgentView;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.AraAgents;
+import io.ara.core.auth.ScopeSet;
 import io.ara.core.common.AgentId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -186,5 +188,28 @@ public final class AgentRegistry {
     public boolean isRegistered(AgentId agentId) {
         Objects.requireNonNull(agentId, "agentId must not be null");
         return agents.containsKey(agentId.value());
+    }
+
+    /**
+     * A scope-filtered {@link AgentView} of this registry, scoped to {@code
+     * effectiveScopes} (ADR-033 Fase 2) — built fresh, never cached, so it reflects
+     * registrations/deregistrations made after this call.
+     */
+    public AgentView viewFor(ScopeSet effectiveScopes) {
+        return new FilteredAgentView(this, effectiveScopes);
+    }
+
+    /**
+     * A view with no scope restriction — {@link ScopeSet#EMPTY} as the effective scopes.
+     * Sees every agent that has not itself declared {@code visibleToScopes}/{@code
+     * requiredScopes}, i.e. every agent in the wild today: this is today's unrestricted
+     * discovery behavior, expressed as an {@link AgentView} rather than direct registry
+     * access, for a caller migrating onto the {@link AgentView} API before any agent it
+     * talks to has opted into scopes. It is not a superuser bypass of scopes an agent
+     * <em>has</em> declared — {@link ScopeSet#EMPTY} still fails a real restriction the
+     * normal way, which is what "unrestricted" here actually means.
+     */
+    public AgentView unrestricted() {
+        return new FilteredAgentView(this, ScopeSet.EMPTY);
     }
 }

@@ -1,5 +1,6 @@
 package io.ara.core.agent;
 
+import io.ara.core.auth.ExecutionContext;
 import io.ara.core.llm.LlmExecutionHints;
 import io.ara.core.media.MediaRef;
 
@@ -7,6 +8,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
 
@@ -274,6 +276,27 @@ public record AgentTask(
      */
     public AgentTask withAttachment(String key, Object value) {
         return withRunContext(runContext.withOpaque(key, value));
+    }
+
+    /**
+     * Returns a copy of this task carrying {@code ctx} in its {@link #runContext} under
+     * {@link RunContext#EXECUTION_CONTEXT_KEY} (ADR-033 Fase 6) — used by {@code
+     * AraRuntime.executeOnBehalfOf}. Not a separate stored field: {@link #executionContext()}
+     * reads back from exactly this key, so the two can never drift apart the way a second,
+     * independently-copied field could (e.g. across a later {@link #withRunContext} call).
+     */
+    public AgentTask withExecutionContext(ExecutionContext ctx) {
+        return withRunContext(runContext.withOpaque(RunContext.EXECUTION_CONTEXT_KEY, ctx));
+    }
+
+    /**
+     * The {@link ExecutionContext} this task carries (ADR-033 Fase 6), if any — derived
+     * from {@link #runContext}'s opaque channel, not a stored field; see {@link
+     * #withExecutionContext}. {@link Optional#empty()} for every task built before Fase 6
+     * existed, and for the ordinary (non-OBO) case.
+     */
+    public Optional<ExecutionContext> executionContext() {
+        return Optional.ofNullable(runContext.opaque(RunContext.EXECUTION_CONTEXT_KEY, ExecutionContext.class));
     }
 
     /** Notifies the tool-call callback, if set. No-op when null. */

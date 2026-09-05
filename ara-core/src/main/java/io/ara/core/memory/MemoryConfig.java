@@ -11,7 +11,8 @@ public record MemoryConfig(
         String workingMemoryEviction,
         int    maxConversationTurns,
         int    maxReflections,
-        String reflectionPrompt
+        String reflectionPrompt,
+        String contextSummarizerAgentId
 ) {
     public MemoryConfig {
         if (workingMemoryTokenBudget < 0)
@@ -24,9 +25,24 @@ public record MemoryConfig(
         // -maintained copies of it in sync across modules. EvictionPolicy.from(...) is the
         // single place that rejects an unknown value; only "unspecified" is handled here.
         workingMemoryEviction = Objects.requireNonNullElse(workingMemoryEviction, "drop_middle");
+        // contextSummarizerAgentId: an AraAgent id (String, not a typed reference — ara-core
+        // cannot depend on runtime agent resolution, same layering reason as
+        // workingMemoryEviction). Resolved at wiring time. Nullable: SUMMARIZE eviction
+        // (ADR-0078 D2) degrades to DROP_MIDDLE when it is absent.
+    }
+
+    /**
+     * 5-arg constructor (the shape before {@code contextSummarizerAgentId}, ADR-0078 D2) —
+     * kept so every existing {@code new MemoryConfig(...)} call keeps compiling with the
+     * summariser left unset.
+     */
+    public MemoryConfig(int workingMemoryTokenBudget, String workingMemoryEviction,
+                        int maxConversationTurns, int maxReflections, String reflectionPrompt) {
+        this(workingMemoryTokenBudget, workingMemoryEviction, maxConversationTurns, maxReflections,
+                reflectionPrompt, null);
     }
 
     public static MemoryConfig defaults() {
-        return new MemoryConfig(0, "drop_middle", 0, 2, null);
+        return new MemoryConfig(0, "drop_middle", 0, 2, null, null);
     }
 }

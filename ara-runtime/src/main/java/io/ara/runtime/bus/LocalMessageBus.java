@@ -3,13 +3,18 @@ package io.ara.runtime.bus;
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
+import io.ara.core.agent.RunContext;
 import io.ara.core.agent.SessionId;
+import io.ara.core.auth.ExecutionContext;
+import io.ara.core.auth.ScopeSet;
 import io.ara.core.bus.AgentMessage;
 import io.ara.core.bus.MessageBus;
 import io.ara.core.common.AgentId;
+import io.ara.core.hitl.ApprovalGate;
 import io.ara.core.telemetry.AraTelemetry;
 import io.ara.runtime.agent.AgentRegistry;
 import io.ara.runtime.agent.SessionScoped;
+import io.ara.runtime.auth.ScopeVerifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,14 +62,42 @@ public final class LocalMessageBus implements MessageBus {
 
     private final AgentRegistry registry;
     private final AraTelemetry  telemetry;
+    private final ApprovalGate  approvalGate;
+    private final io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry;
 
     public LocalMessageBus(AgentRegistry registry) {
         this(registry, AraTelemetry.noop());
     }
 
     public LocalMessageBus(AgentRegistry registry, AraTelemetry telemetry) {
-        this.registry  = Objects.requireNonNull(registry,  "registry must not be null");
-        this.telemetry = Objects.requireNonNull(telemetry, "telemetry must not be null");
+        this(registry, telemetry, null);
+    }
+
+    /**
+     * @param approvalGate ADR-033 Fase 7 (S4) — checked via {@link ScopeVerifier#checkApproved}
+     *                     after the scope check on every dispatch, for a recipient with
+     *                     {@code config().requiresApproval() == true}. {@code null} (both
+     *                     shorter constructors) keeps today's behavior: no invocation ever
+     *                     pauses for human approval, regardless of any agent's flag.
+     */
+    public LocalMessageBus(AgentRegistry registry, AraTelemetry telemetry, ApprovalGate approvalGate) {
+        this(registry, telemetry, approvalGate, null);
+    }
+
+    /**
+     * @param temporaryScopeRegistry ADR-033 Fase 8 (S5) — the sender's effective scopes for
+     *                               every dispatch are widened by {@code
+     *                               temporaryScopeRegistry.effectiveTemporaryScopes(message
+     *                               .senderId())} before either check runs. {@code null}
+     *                               (every shorter constructor) contributes {@link
+     *                               ScopeSet#EMPTY} — today's behavior, unchanged.
+     */
+    public LocalMessageBus(AgentRegistry registry, AraTelemetry telemetry, ApprovalGate approvalGate,
+                            io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry) {
+        this.registry     = Objects.requireNonNull(registry,  "registry must not be null");
+        this.telemetry    = Objects.requireNonNull(telemetry, "telemetry must not be null");
+        this.approvalGate = approvalGate;
+        this.temporaryScopeRegistry = temporaryScopeRegistry;
     }
 
     // ── MessageBus ────────────────────────────────────────────────────────────
@@ -100,6 +133,10 @@ public final class LocalMessageBus implements MessageBus {
         Objects.requireNonNull(timeout, "timeout must not be null");
 
         AraAgent recipient = resolve(message.recipientId());
+        ExecutionContext ctx = resolveExecutionContext(message, recipient);
+        ScopeSet effectiveScopes = resolveEffectiveScopes(message, ctx);
+        ScopeVerifier.checkAuthorized(recipient, effectiveScopes);
+        ScopeVerifier.checkApproved(recipient, approvalGate, message.senderId(), effectiveScopes);
 
         log.debug("[Bus] Request from={} to={} correlation={}",
                 message.senderId(), message.recipientId(), message.correlationId());
@@ -111,7 +148,7 @@ public final class LocalMessageBus implements MessageBus {
         // ephemeral one here so cancellation always has a target, not just delegations
         // that happen to carry a named session.
         SessionId sessionId = message.sessionId() != null ? message.sessionId() : SessionId.ephemeral();
-        AgentTask task = toTask(message, sessionId);
+        AgentTask task = toTask(message, sessionId, ctx);
 
         CompletableFuture<AgentResponse> future = CompletableFuture.supplyAsync(
                 () -> recipient.execute(task),
@@ -159,12 +196,51 @@ public final class LocalMessageBus implements MessageBus {
 
     private void deliverAndDiscard(AgentMessage message) {
         AraAgent recipient = resolve(message.recipientId());
+        ExecutionContext ctx = resolveExecutionContext(message, recipient);
+        ScopeSet effectiveScopes = resolveEffectiveScopes(message, ctx);
+        ScopeVerifier.checkAuthorized(recipient, effectiveScopes);
+        ScopeVerifier.checkApproved(recipient, approvalGate, message.senderId(), effectiveScopes);
         // Fire-and-forget: nobody waits on this call, so there is nothing to cancel and
         // no need to force a SessionId — message.sessionId() (possibly null) is enough.
-        AgentTask task = toTask(message, message.sessionId());
+        AgentTask task = toTask(message, message.sessionId(), ctx);
         AgentResponse response = recipient.execute(task);
         log.debug("[Bus] Fire-and-forget delivered: to={} success={}",
                 message.recipientId(), response.isSuccess());
+    }
+
+    /**
+     * ADR-033 Fase 5: attenuates the incoming {@link ExecutionContext} — when the message
+     * carries one — down to what {@code recipient} itself is granted, exactly the way
+     * {@code AgentDelegationTool} already narrows a bare {@link ScopeSet} (ADR-0077 D2/D3),
+     * but carrying the subject identity along instead of just a {@code ScopeSet}. {@code
+     * null} means "no {@code ExecutionContext} on this message" — every message built
+     * before this field existed, and every message a caller still builds with only {@link
+     * AgentMessage#withSenderScopes} — and is the signal for both call sites to fall back
+     * to {@link AgentMessage#senderScopes()} exactly as they did before this method existed.
+     */
+    private static ExecutionContext resolveExecutionContext(AgentMessage message, AraAgent recipient) {
+        return message.executionContext()
+                .map(incoming -> incoming.delegate(
+                        recipient.agentId().value(),
+                        ScopeSet.of(recipient.config().grantedScopes())))
+                .orElse(null);
+    }
+
+    /**
+     * ADR-033 Fase 8 (S5): the sender's base effective scopes (from {@code ctx} if present,
+     * else {@link AgentMessage#senderScopes()} — same fallback as Fase 5), widened by any
+     * currently-valid temporary grant on {@link AgentMessage#senderId()}. {@link
+     * ScopeSet#union}, never {@code intersect}: a temporary grant only ever adds authority
+     * for its own limited time/use-count, it can never take any away. A {@code null}
+     * {@link #temporaryScopeRegistry} (every constructor before Fase 8) contributes nothing
+     * — identical to today's behavior.
+     */
+    private ScopeSet resolveEffectiveScopes(AgentMessage message, ExecutionContext ctx) {
+        ScopeSet base = ctx != null ? ctx.effectiveScopes() : message.senderScopes();
+        if (temporaryScopeRegistry == null) {
+            return base;
+        }
+        return base.union(temporaryScopeRegistry.effectiveTemporaryScopes(message.senderId()));
     }
 
     /**
@@ -173,20 +249,32 @@ public final class LocalMessageBus implements MessageBus {
      *                   ({@link #deliverAndDiscard}), or a guaranteed non-null id when the
      *                   caller needs to be able to target this execution later ({@link
      *                   #request}).
+     * @param ctx        this hop's {@link ExecutionContext} as resolved by {@link
+     *                   #resolveExecutionContext}; {@code null} when the message carried
+     *                   none — nothing new is written to the task's {@code RunContext} in
+     *                   that case, matching pre-Fase-5 behavior exactly.
      */
-    private static AgentTask toTask(AgentMessage message, SessionId sessionId) {
+    private static AgentTask toTask(AgentMessage message, SessionId sessionId, ExecutionContext ctx) {
         // Seed the recipient's task with the caller's RunContext by reference (ADR-041
         // rev. 2) — not rebuilt from copied maps — so a delegated sub-task runs with the
         // same flow state and authorization as its caller instead of starting empty.
+        RunContext runContext = message.runContext();
+        if (ctx != null) {
+            // So a recipient that itself delegates further (AgentDelegationTool) can read
+            // its own current ExecutionContext — subject identity included — the same way
+            // it already reads RunContext.SCOPES_KEY, instead of the chain going subject-
+            // blind again the moment it crosses a bus hop.
+            runContext = runContext.withOpaque(RunContext.EXECUTION_CONTEXT_KEY, ctx);
+        }
         return AgentTask.of(message.content(), java.util.Map.of(), message.correlationId(), message.senderId())
-                .withRunContext(message.runContext())
+                .withRunContext(runContext)
                 .withSessionId(sessionId);
     }
 
     /**
      * Cancels {@code sessionId} on {@code recipient} if it manages per-session lifecycle
-     * at all — a recipient with no session concept (e.g. {@code GraphAgent}) simply
-     * doesn't implement {@link SessionScoped}, and there is nothing to cancel on it.
+     * at all — a recipient with no session concept simply doesn't implement {@link
+     * SessionScoped}, and there is nothing to cancel on it.
      */
     private static void terminateIfScoped(AraAgent recipient, SessionId sessionId) {
         if (recipient instanceof SessionScoped scoped) {

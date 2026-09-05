@@ -92,6 +92,15 @@ public final class AgentFactory implements AgentLifecycleManager {
     private final SessionStore sessionStore;
 
     /**
+     * ADR-0068 D1 — when both are set, every agent this factory registers is wrapped in a
+     * {@link io.ara.runtime.trace.TraceEmittingAgent} (outermost decorator) so each
+     * execution appends a run trace. Both {@code null} by default: no wrapper, behaviour
+     * unchanged.
+     */
+    private final io.ara.core.trace.TraceStore traceStore;
+    private final io.ara.core.trace.BlobStore  traceBlobStore;
+
+    /**
      * Shared, ref-counted, versioned catalog of LLM transports (ADR-039 §3-4), keyed by
      * {@code transportId} for named clients and by content-addressed id for inline
      * overrides. One instance per {@code AgentFactory}, seeded once at construction with
@@ -123,6 +132,8 @@ public final class AgentFactory implements AgentLifecycleManager {
         this.telemetry            = builder.telemetry;
         this.sessionStore         = builder.sessionStore;
         this.mediaStore           = builder.mediaStore;
+        this.traceStore           = builder.traceStore;
+        this.traceBlobStore       = builder.traceBlobStore;
 
         this.llmTransports = new DefaultResourceRegistry<>(
                 transport -> {
@@ -166,7 +177,7 @@ public final class AgentFactory implements AgentLifecycleManager {
             return create(config, kbContract);
         }
 
-        AgentInstance agent = buildInstance(config);
+        AraAgent agent = instrumentTracing(buildInstance(config));
 
         registry.register(agent);
         log.info("Created agent [{}] type=[{}] strategy=[{}]",
@@ -191,7 +202,7 @@ public final class AgentFactory implements AgentLifecycleManager {
     public AraAgent create(AgentConfig config, AgentContract contract) {
         Objects.requireNonNull(config, "config must not be null");
 
-        AraAgent toRegister = buildAndWrap(config, contract);
+        AraAgent toRegister = instrumentTracing(buildAndWrap(config, contract));
 
         registry.register(toRegister);
         log.info("Created agent [{}] type=[{}] strategy=[{}] contract={}",
@@ -224,7 +235,7 @@ public final class AgentFactory implements AgentLifecycleManager {
             return replace(config, kbContract);
         }
 
-        AgentInstance agent = buildInstance(config);
+        AraAgent agent = instrumentTracing(buildInstance(config));
 
         AraAgent previous = registry.replace(agent);
         log.info("Replaced agent [{}] type=[{}] strategy=[{}] (displaced previous agent: {})",
@@ -245,7 +256,7 @@ public final class AgentFactory implements AgentLifecycleManager {
     public AraAgent replace(AgentConfig config, AgentContract contract) {
         Objects.requireNonNull(config, "config must not be null");
 
-        AraAgent toRegister = buildAndWrap(config, contract);
+        AraAgent toRegister = instrumentTracing(buildAndWrap(config, contract));
 
         AraAgent previous = registry.replace(toRegister);
         log.info("Replaced agent [{}] type=[{}] strategy=[{}] contract={} (displaced previous agent: {})",
@@ -302,6 +313,18 @@ public final class AgentFactory implements AgentLifecycleManager {
         }
         AgentInstance inner = buildInstance(config);
         return enforcing ? new ContractEnforcingAgent(inner, contract) : inner;
+    }
+
+    /**
+     * ADR-0068 D1 — wraps {@code agent} in a {@link io.ara.runtime.trace.TraceEmittingAgent}
+     * (outermost, forwards the marker interfaces like {@code ContractEnforcingAgent}) when
+     * a trace store and blob store were both configured; otherwise returns {@code agent}
+     * unchanged.
+     */
+    private AraAgent instrumentTracing(AraAgent agent) {
+        return traceStore != null && traceBlobStore != null
+                ? new io.ara.runtime.trace.TraceEmittingAgent(agent, traceStore, traceBlobStore)
+                : agent;
     }
 
     /**
@@ -445,6 +468,8 @@ public final class AgentFactory implements AgentLifecycleManager {
         private AgentRegistry registry;
         private AraTelemetry telemetry = AraTelemetry.noop();
         private SessionStore sessionStore = SessionStore.noop();
+        private io.ara.core.trace.TraceStore traceStore;
+        private io.ara.core.trace.BlobStore  traceBlobStore;
 
         private Builder() {}
 
@@ -579,6 +604,19 @@ public final class AgentFactory implements AgentLifecycleManager {
          */
         public Builder sessionStore(SessionStore sessionStore) {
             this.sessionStore = Objects.requireNonNull(sessionStore, "sessionStore must not be null");
+            return this;
+        }
+
+        /**
+         * ADR-0068 D1 — enables automatic trace emission: every agent this factory
+         * registers is wrapped so each execution appends a run trace to {@code traceStore},
+         * with prompts/outputs content-addressed into {@code blobStore}. Both are required
+         * together; not calling this leaves emission off (today's behaviour).
+         */
+        public Builder traceEmission(io.ara.core.trace.TraceStore traceStore,
+                                     io.ara.core.trace.BlobStore blobStore) {
+            this.traceStore     = Objects.requireNonNull(traceStore, "traceStore must not be null");
+            this.traceBlobStore = Objects.requireNonNull(blobStore, "blobStore must not be null");
             return this;
         }
 

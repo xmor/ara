@@ -58,6 +58,19 @@ public record ScopeSet(Set<String> scopes) {
         return new ScopeSet(common);
     }
 
+    /**
+     * The scopes present in either set (ADR-033 Fase 8) — unlike {@link #intersect}, this
+     * can only ever grow authority, never narrow it. Used to layer a temporary, task-scoped
+     * grant ({@code ScopeGrant}) <em>on top of</em> an actor's static scopes, additive by
+     * design (a temporary grant extends what an actor can do for a limited time/use-count,
+     * it does not replace the actor's own standing authorization).
+     */
+    public ScopeSet union(ScopeSet other) {
+        LinkedHashSet<String> all = new LinkedHashSet<>(scopes);
+        all.addAll(other.scopes());
+        return new ScopeSet(all);
+    }
+
     public boolean isEmpty() {
         return scopes.isEmpty();
     }

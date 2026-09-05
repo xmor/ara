@@ -4,10 +4,13 @@ import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentContract;
 import io.ara.core.agent.AgentFuture;
 import io.ara.core.agent.AgentInterceptor;
+import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.SessionId;
 import io.ara.core.agent.SessionStore;
+import io.ara.core.auth.ExecutionContext;
+import io.ara.core.auth.ScopeSet;
 import io.ara.core.common.AgentId;
 import io.ara.core.hitl.ApprovalGate;
 import io.ara.core.llm.LlmClient;
@@ -15,7 +18,10 @@ import io.ara.core.llm.LlmClientFactory;
 import io.ara.core.llm.LlmTransport;
 import io.ara.core.llm.LlmRouter;
 import io.ara.core.mcp.McpClient;
+import io.ara.core.memory.EmbeddingClient;
+import io.ara.core.memory.MemoryConfig;
 import io.ara.core.memory.MemoryManager;
+import io.ara.core.memory.SemanticStore;
 import io.ara.core.provider.AgentProvider;
 import io.ara.core.telemetry.AraTelemetry;
 import io.ara.core.tool.AraTool;
@@ -36,6 +42,8 @@ import io.ara.runtime.factory.DefaultRetrieverRouter;
 import io.ara.core.agent.ExecutionStrategy;
 import io.ara.core.media.MediaStore;
 import io.ara.runtime.llm.InstrumentedLlmClient;
+import io.ara.runtime.memory.EvictionPolicy;
+import io.ara.runtime.memory.SlidingWindowMemoryManager;
 import io.ara.runtime.strategy.ExecutionPlanner;
 import io.ara.core.retriever.Retriever;
 import io.ara.core.retriever.RetrieverRouter;
@@ -129,6 +137,7 @@ public final class AraRuntime implements AutoCloseable {
     private final AgentScheduler   scheduler;
     private final InstanceContextStore instanceContextStore;
     private final ApprovalGate     approvalGate;
+    private final io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry;
     private final QuiescenceTracker quiescenceTracker = new QuiescenceTracker();
     private final Map<String, LlmClient> llmClients;
     private final ToolRegistry     toolRegistry;
@@ -152,6 +161,7 @@ public final class AraRuntime implements AutoCloseable {
             AgentScheduler scheduler,
             InstanceContextStore instanceContextStore,
             ApprovalGate approvalGate,
+            io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry,
             Map<String, LlmClient> llmClients,
             ToolRegistry toolRegistry,
             Map<String, Retriever> retrievers) {
@@ -162,6 +172,7 @@ public final class AraRuntime implements AutoCloseable {
         this.scheduler     = scheduler;
         this.instanceContextStore = instanceContextStore;
         this.approvalGate  = approvalGate;
+        this.temporaryScopeRegistry = temporaryScopeRegistry;
         this.llmClients    = llmClients;
         this.toolRegistry  = toolRegistry;
         this.retrievers    = retrievers;
@@ -311,6 +322,42 @@ public final class AraRuntime implements AutoCloseable {
             autoStart();
             return factory.create(config, contract);
         }
+    }
+
+    /**
+     * Executes {@code task} on {@code agent} on behalf of {@code userId} (ADR-033 Fase 6,
+     * S2/S6) — Delegation, not Impersonation: the call's {@link ExecutionContext#effectiveScopes()}
+     * is the intersection of {@code agent}'s own granted scopes and {@code userScopes}, so
+     * the agent can never exceed the user it claims to act for, nor the user exceed what
+     * the agent itself is trusted to wield. The context travels with {@code task} into
+     * {@code RunContext.EXECUTION_CONTEXT_KEY} (see {@link AgentTask#withExecutionContext})
+     * — read there today by {@code AgentDelegationTool} if {@code agent} itself delegates
+     * further, attenuating again at each hop exactly as ADR-033 Fase 5 already does for a
+     * machine-to-machine chain.
+     *
+     * <p>Does not otherwise change how {@code agent} resolves its tools or peer visibility
+     * for this call — narrowing what the *delegation chain* downstream of this call can do
+     * (Fase 5, already wired), not yet what {@code agent} itself can invoke directly for
+     * this specific execution (Fase 5.4/6.3, not implemented: {@code AgentInstance} still
+     * builds its {@code AgentView}/tool registry once, at {@code createAgent} time, from
+     * {@code agent.config()} — not fresh per call from this method's {@code userScopes}).
+     *
+     * @param agent      the agent to run; must already be created via {@link #createAgent}
+     * @param task       the task to execute
+     * @param userId     the user this call is made on behalf of
+     * @param userScopes the user's own scopes
+     * @return the agent's response, exactly as {@link AraAgent#execute(AgentTask)} would return it
+     */
+    public AgentResponse executeOnBehalfOf(AraAgent agent, AgentTask task, String userId, ScopeSet userScopes) {
+        Objects.requireNonNull(agent,  "agent must not be null");
+        Objects.requireNonNull(task,   "task must not be null");
+        Objects.requireNonNull(userId, "userId must not be null");
+        ExecutionContext ctx = ExecutionContext.ofUserDelegation(
+                agent.agentId().value(),
+                ScopeSet.of(agent.config().grantedScopes()),
+                userId,
+                userScopes);
+        return agent.execute(task.withExecutionContext(ctx));
     }
 
     /**
@@ -668,6 +715,33 @@ public final class AraRuntime implements AutoCloseable {
     public ApprovalGate approvalGate() { return approvalGate; }
 
     /**
+     * Grants {@code agentId} a temporary, task-scoped set of scopes (ADR-033 Fase 8, S5) —
+     * on top of whatever it already holds via {@link AgentConfig#grantedScopes()}, never in
+     * place of it ({@link io.ara.core.auth.ScopeSet#union}, not {@code intersect}). The next
+     * time this agent is the recipient of a {@link LocalMessageBus} dispatch, the caller's
+     * effective scopes are widened by this grant for as long as it stays {@link
+     * io.ara.core.auth.ScopeGrant#isValid()} — each such dispatch also consumes one use.
+     *
+     * @param agentId  the agent this grant applies to
+     * @param scopes   the scopes it contributes
+     * @param ttl      time limit; {@code null} means no time limit (use-count only)
+     * @param maxUses  invocations before exhaustion; {@code -1} means unlimited
+     * @param reason   human-readable justification, kept for audit on the returned {@link
+     *                 io.ara.core.auth.ScopeGrant}
+     * @return the {@link io.ara.core.auth.ScopeGrant} that was registered
+     */
+    public io.ara.core.auth.ScopeGrant grantTemporaryScope(
+            AgentId agentId, io.ara.core.auth.ScopeSet scopes, Duration ttl, int maxUses, String reason) {
+        Objects.requireNonNull(agentId, "agentId must not be null");
+        Objects.requireNonNull(scopes,  "scopes must not be null");
+        java.time.Instant expiresAt = ttl != null ? java.time.Instant.now().plus(ttl) : null;
+        io.ara.core.auth.ScopeGrant grant = new io.ara.core.auth.ScopeGrant(
+                scopes, expiresAt, maxUses, "system", reason == null ? "" : reason);
+        temporaryScopeRegistry.grant(agentId.value(), grant);
+        return grant;
+    }
+
+    /**
      * Submits a task for asynchronous execution on the runtime's shared
      * virtual-thread executor, returning immediately with an {@link AgentFuture}.
      *
@@ -779,13 +853,19 @@ public final class AraRuntime implements AutoCloseable {
         private final java.util.Map<String, Retriever> namedRetrievers = new java.util.LinkedHashMap<>();
         private String defaultRetrieverId;
         private Function<AgentConfig, MemoryManager> memoryManagerFactory;
+        private EmbeddingClient embeddingClient;
+        private SemanticStore   semanticStore;
         private ToolRegistry toolRegistry;
         private Function<AgentConfig, ToolRegistry> toolRegistryFactory;
         private InstanceContextStore instanceContextStore;
         private AraTelemetry telemetry = AraTelemetry.noop();
         private SessionStore sessionStore = SessionStore.noop();
+        private io.ara.core.trace.TraceStore traceStore;
+        private io.ara.core.trace.BlobStore  traceBlobStore;
         private MediaStore   mediaStore   = MediaStore.noop();
         private ApprovalGate approvalGate;
+        private io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry =
+                new io.ara.runtime.auth.InMemoryTemporaryScopeRegistry();
         private Duration delegationTimeout = Duration.ofSeconds(AgentDelegationTool.DEFAULT_TIMEOUT_SEC);
         private AgentProvider agentProvider;
         private AraRuntimeConfig runtimeConfig;
@@ -905,6 +985,28 @@ public final class AraRuntime implements AutoCloseable {
         }
 
         /**
+         * Embedding backend for the default working-memory manager's episodic offload and
+         * recall (ADR-0078 D3/D4) — used only when {@link #memoryManagerFactory} is never
+         * called, so the built-in {@link SlidingWindowMemoryManager} default can offload
+         * evicted entries and recall them later. Ignored when a {@link #semanticStore} is
+         * not also set (both are required for offload/recall to activate).
+         */
+        public Builder embeddingClient(EmbeddingClient embeddingClient) {
+            this.embeddingClient = embeddingClient;
+            return this;
+        }
+
+        /**
+         * Episodic store for the default working-memory manager's offload/recall — see
+         * {@link #embeddingClient(EmbeddingClient)}. Ignored when an {@code embeddingClient}
+         * is not also set.
+         */
+        public Builder semanticStore(SemanticStore semanticStore) {
+            this.semanticStore = semanticStore;
+            return this;
+        }
+
+        /**
          * Convenience: sets a shared (config-independent) tool registry.
          *
          * <p>Mutually exclusive with {@link #toolRegistryFactory(Function)} — use that
@@ -966,6 +1068,20 @@ public final class AraRuntime implements AutoCloseable {
         }
 
         /**
+         * ADR-0068 D1 — enables automatic execution-trace emission: every agent created by
+         * this runtime appends a run trace to {@code traceStore} after each execution, with
+         * prompts and outputs content-addressed into {@code blobStore}. Both are required
+         * together; not calling this leaves emission off (today's behaviour). Workflow
+         * runs still emit via {@code WorkflowTraceProjection.emit(...)} explicitly.
+         */
+        public Builder traceEmission(io.ara.core.trace.TraceStore traceStore,
+                                     io.ara.core.trace.BlobStore blobStore) {
+            this.traceStore     = Objects.requireNonNull(traceStore, "traceStore must not be null");
+            this.traceBlobStore = Objects.requireNonNull(blobStore, "blobStore must not be null");
+            return this;
+        }
+
+        /**
          * Sets the {@link MediaStore} holding the bytes of any media attached to a task, so
          * the adapter can fetch them when it builds the provider request. Defaults to {@link
          * MediaStore#noop()}, which stores nothing — invisible to a deployment that never
@@ -1001,6 +1117,18 @@ public final class AraRuntime implements AutoCloseable {
          */
         public Builder approvalGate(ApprovalGate approvalGate) {
             this.approvalGate = Objects.requireNonNull(approvalGate, "approvalGate must not be null");
+            return this;
+        }
+
+        /**
+         * ADR-033 Fase 8 (S5) — store backing {@link #grantTemporaryScope}. Defaults to a
+         * fresh {@link io.ara.runtime.auth.InMemoryTemporaryScopeRegistry}, so {@code
+         * grantTemporaryScope} always works without extra wiring; override only to share
+         * one registry across multiple {@code AraRuntime} instances, or to persist grants
+         * beyond process lifetime.
+         */
+        public Builder temporaryScopeRegistry(io.ara.runtime.auth.TemporaryScopeRegistry v) {
+            this.temporaryScopeRegistry = Objects.requireNonNull(v, "temporaryScopeRegistry must not be null");
             return this;
         }
 
@@ -1052,15 +1180,25 @@ public final class AraRuntime implements AutoCloseable {
             AraRuntimeConfig cfg = runtimeConfig != null
                     ? runtimeConfig
                     : AraRuntimeConfig.defaults();
-            Function<AgentConfig, MemoryManager> memFactory = memoryManagerFactory != null
-                    ? memoryManagerFactory
-                    : ignored -> new InMemoryMemoryManager();
             InstanceContextStore ctxStore = instanceContextStore != null
                     ? instanceContextStore
                     : new InstanceContextStore();
 
             AgentRegistry   registry   = new AgentRegistry();
-            LocalMessageBus messageBus = new LocalMessageBus(registry, telemetry);
+            // ADR-0086: a builder that never calls memoryManagerFactory(...) still gets a
+            // real working memory — SlidingWindowMemoryManager wired from AgentConfig.memory()
+            // — instead of the unlimited InMemoryMemoryManager, whenever a token budget is
+            // actually configured. Budget 0 (the record's own default) reproduces exactly
+            // today's unlimited behaviour, so nothing changes for a config that never asked
+            // for a limit.
+            Function<AgentConfig, MemoryManager> memFactory = memoryManagerFactory != null
+                    ? memoryManagerFactory
+                    : agentCfg -> defaultMemoryManager(agentCfg, registry);
+            // ADR-033 Fase 7: the same ApprovalGate that gates a tool's own outgoing calls
+            // (ApprovalToolRegistry, below) also gates delegation INTO an agent that opted
+            // in via requiresApproval() — one Builder.approvalGate(...) call now covers
+            // both surfaces. null (the default) reproduces pre-Fase-7 behavior exactly.
+            LocalMessageBus messageBus = new LocalMessageBus(registry, telemetry, approvalGate, temporaryScopeRegistry);
 
             // Built once here (rather than inline in buildAgentFactory) so the very same
             // instrumented clients back both AgentFactory's registry and the router
@@ -1079,9 +1217,35 @@ public final class AraRuntime implements AutoCloseable {
 
             AgentScheduler scheduler = new LocalAgentScheduler(registry);
             return new AraRuntime(cfg, agentFactory, registry, agentProvider, scheduler, ctxStore,
-                    approvalGate,
+                    approvalGate, temporaryScopeRegistry,
                     Map.copyOf(instrumentedClients), discoveryRegistry(perAgentRegistries),
                     Map.copyOf(namedRetrievers));
+        }
+
+        /**
+         * The default {@link MemoryManager} for an agent whose builder never called
+         * {@link #memoryManagerFactory}: {@link InMemoryMemoryManager} (today's behaviour,
+         * unlimited window) when {@code agentCfg.memory().workingMemoryTokenBudget()} is 0,
+         * or a fully wired {@link SlidingWindowMemoryManager} otherwise (ADR-0086). The
+         * summariser agent is resolved by id from {@code registry} on every call rather than
+         * once, since it may not be registered yet the first time an agent that names it is
+         * created — {@code registry} is mutated in place by {@code create(...)} after
+         * {@code build()} returns.
+         */
+        private MemoryManager defaultMemoryManager(AgentConfig agentCfg, AgentRegistry registry) {
+            MemoryConfig memory = agentCfg.memory();
+            if (memory.workingMemoryTokenBudget() <= 0) {
+                return new InMemoryMemoryManager();
+            }
+            AraAgent summarizer = null;
+            String summarizerId = memory.contextSummarizerAgentId();
+            if (summarizerId != null && !summarizerId.isBlank()) {
+                summarizer = registry.findById(AgentId.of(summarizerId)).orElse(null);
+            }
+            return new SlidingWindowMemoryManager(
+                    memory.workingMemoryTokenBudget(),
+                    EvictionPolicy.from(memory.workingMemoryEviction()),
+                    summarizer, semanticStore, embeddingClient, agentCfg.agentId().value());
         }
 
         /** Fails fast on configurations {@link #build()} could not wire correctly. */
@@ -1198,6 +1362,7 @@ public final class AraRuntime implements AutoCloseable {
             if (llmClientFactory != null) factoryBuilder.llmClientFactory(llmClientFactory);
             mcpServers.forEach((id, binding) ->
                     factoryBuilder.mcpServer(id, binding.connector(), binding.toolsAdapter()));
+            if (traceStore != null) factoryBuilder.traceEmission(traceStore, traceBlobStore);   // ADR-0068 D1
 
             return factoryBuilder
                     .toolRegistryFactory(agentCfg -> {

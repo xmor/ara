@@ -3,13 +3,17 @@ package io.ara.runtime.bus;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.AgentView;
 import io.ara.core.agent.DelegateStateAccess;
 import io.ara.core.agent.RunContext;
 import io.ara.core.agent.RunState;
 import io.ara.core.agent.SessionId;
 import io.ara.core.agent.SessionStore;
+import io.ara.core.auth.ExecutionContext;
+import io.ara.core.auth.ScopeSet;
 import io.ara.core.bus.AgentMessage;
 import io.ara.core.bus.MessageBus;
+import io.ara.core.common.AgentId;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolResult;
 
@@ -64,6 +68,8 @@ public final class AgentDelegationTool implements AraTool {
     private final Duration            timeout;
     private final DelegateStateAccess stateAccess;
     private final SessionStore        sessionStore;
+    private final ScopeSet            ownGrantedScopes;
+    private final AgentView           agentView;
 
     /**
      * @param bus    the local message bus
@@ -105,11 +111,42 @@ public final class AgentDelegationTool implements AraTool {
      */
     public AgentDelegationTool(MessageBus bus, String selfId, Duration timeout, DelegateStateAccess stateAccess,
                                 SessionStore sessionStore) {
-        this.bus          = Objects.requireNonNull(bus,    "bus must not be null");
-        this.selfId       = Objects.requireNonNull(selfId, "selfId must not be null");
-        this.timeout      = Objects.requireNonNull(timeout, "timeout must not be null");
-        this.stateAccess  = Objects.requireNonNull(stateAccess, "stateAccess must not be null");
-        this.sessionStore = Objects.requireNonNull(sessionStore, "sessionStore must not be null");
+        this(bus, selfId, timeout, stateAccess, sessionStore, ScopeSet.EMPTY);
+    }
+
+    /**
+     * @param ownGrantedScopes this agent's own granted scopes (ADR-0077 D2). Across a
+     *                         delegation hop the scope set handed to the delegate is
+     *                         {@code incoming ∩ ownGrantedScopes} — never wider than the
+     *                         caller, never wider than this agent. Defaults to
+     *                         {@link ScopeSet#EMPTY}; while nothing upstream sets the
+     *                         {@link RunContext#SCOPES_KEY} value the narrowing is inert.
+     */
+    public AgentDelegationTool(MessageBus bus, String selfId, Duration timeout, DelegateStateAccess stateAccess,
+                                SessionStore sessionStore, ScopeSet ownGrantedScopes) {
+        this(bus, selfId, timeout, stateAccess, sessionStore, ownGrantedScopes, null);
+    }
+
+    /**
+     * @param agentView (ADR-033 Fase 3 §3.3) checked before every delegation attempt: a
+     *                  recipient {@link AgentView#findById} cannot find — not visible to
+     *                  this agent's scopes, or not authorized to invoke, or simply not
+     *                  registered — fails the tool call before {@code bus.request} is ever
+     *                  attempted. {@code null} (the default on every shorter constructor)
+     *                  skips this pre-check entirely — today's behavior, where visibility
+     *                  is never verified and only {@link LocalMessageBus}'s own {@code
+     *                  requiredScopes} check (the dispatch-time recipient-scope check,
+     *                  ADR-033) applies at actual dispatch.
+     */
+    public AgentDelegationTool(MessageBus bus, String selfId, Duration timeout, DelegateStateAccess stateAccess,
+                                SessionStore sessionStore, ScopeSet ownGrantedScopes, AgentView agentView) {
+        this.bus              = Objects.requireNonNull(bus,    "bus must not be null");
+        this.selfId           = Objects.requireNonNull(selfId, "selfId must not be null");
+        this.timeout          = Objects.requireNonNull(timeout, "timeout must not be null");
+        this.stateAccess      = Objects.requireNonNull(stateAccess, "stateAccess must not be null");
+        this.sessionStore     = Objects.requireNonNull(sessionStore, "sessionStore must not be null");
+        this.ownGrantedScopes = Objects.requireNonNullElse(ownGrantedScopes, ScopeSet.EMPTY);
+        this.agentView        = agentView;
     }
 
     @Override
@@ -225,6 +262,17 @@ public final class AgentDelegationTool implements AraTool {
                     "Self-delegation is not allowed (agent_id = " + selfId + ")");
         }
 
+        // ADR-033 §3.3: a discovery-time gate, ahead of bus.request's own
+        // dispatch-time authorization check (the recipient-scope check on the message bus
+        // itself) — findById folds "not registered",
+        // "not visible", and "not authorized" into one Optional, deliberately: this tool's
+        // failure message doesn't need to distinguish them (LocalMessageBus's own
+        // AuthorizationException, reached below if this pre-check is skipped or passes,
+        // still names the specific reason when the failure is dispatch-time instead).
+        if (agentView != null && agentView.findById(AgentId.of(recipientId)).isEmpty()) {
+            return ToolResult.failure(TOOL_ID, "Agent not found: " + recipientId);
+        }
+
         SessionId delegateSessionId = delegateSessionId(callerSessionId, recipientId);
 
         // The delegate's own RunState layer is backed by SessionStore (persisting()
@@ -245,9 +293,46 @@ public final class AgentDelegationTool implements AraTool {
             case ISOLATED -> callerContext.withState(ownLayer);
         };
 
+        // ADR-0077 D2/D3: non-escalation of permissions across the delegation hop.
+        // effectiveScopes = incoming ∩ ownGrantedScopes — an intersection, so the result
+        // can never be wider than the caller's scopes nor wider than this agent's, by
+        // construction rather than by a runtime check. incoming is null on a first hop
+        // (nothing upstream has set the key yet) — this agent's own granted scopes are
+        // the effective set in that case, there being nothing yet to intersect against.
+        ScopeSet incoming = callerContext.opaque(RunContext.SCOPES_KEY, ScopeSet.class);
+        ScopeSet effectiveForThisHop = incoming != null ? incoming.intersect(ownGrantedScopes) : ownGrantedScopes;
+        if (incoming != null) {
+            outgoing = outgoing.withOpaque(RunContext.SCOPES_KEY, effectiveForThisHop);
+        }
+
+        // ADR-033 Fase 5: the full ExecutionContext (subject identity included) is a
+        // strict superset of the bare ScopeSet above — read, re-attenuate and propagate it
+        // the same way, but only when one is actually present. A caller with only
+        // RunContext.SCOPES_KEY set (M2M, no on-behalf-of) never touched this key, so
+        // executionContext stays null and every outgoing message below is built exactly
+        // as it was before this field existed.
+        ExecutionContext incomingContext = callerContext.opaque(RunContext.EXECUTION_CONTEXT_KEY, ExecutionContext.class);
+        ExecutionContext outgoingContext = incomingContext != null
+                ? incomingContext.delegate(selfId, ownGrantedScopes)
+                : null;
+        if (outgoingContext != null) {
+            outgoing = outgoing.withOpaque(RunContext.EXECUTION_CONTEXT_KEY, outgoingContext);
+        }
+
         try {
-            AgentMessage request  = AgentMessage.of(selfId, recipientId, taskContent, outgoing, delegateSessionId);
-            AgentMessage reply    = bus.request(request, timeout);
+            // ADR-033: the same effectiveForThisHop that ADR-0077 threads onward for
+            // the *next* hop's own attenuation is also what LocalMessageBus checks against
+            // *this* hop's recipient — one value, two consumers, instead of separate scope
+            // plumbing for "am I allowed to call this" and "what do I hand my own delegate".
+            // When outgoingContext (the on-behalf-of subject identity) is present it
+            // supersedes senderScopes at the bus — both are still set so a recipient not
+            // yet ExecutionContext-aware still sees a correct senderScopes.
+            AgentMessage request = AgentMessage.of(selfId, recipientId, taskContent, outgoing, delegateSessionId)
+                    .withSenderScopes(effectiveForThisHop);
+            if (outgoingContext != null) {
+                request = request.withExecutionContext(outgoingContext);
+            }
+            AgentMessage reply = bus.request(request, timeout);
             return ToolResult.success(TOOL_ID,
                     "[" + recipientId + "] " + reply.content());
         } catch (java.util.NoSuchElementException e) {

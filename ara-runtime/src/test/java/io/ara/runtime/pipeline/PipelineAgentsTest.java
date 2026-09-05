@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -87,7 +88,7 @@ class PipelineAgentsTest {
         // AgentResponse instead of being silently discarded as "".
         AgentPipeline pipeline = AgentPipeline.builder()
                 .step("loop", echoAgent("loop", "best answer so far"))
-                .route("loop", execution -> "loop")
+                .route("loop", Set.of("loop"), execution -> "loop")
                 .maxSteps(3)
                 .build();
 

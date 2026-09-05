@@ -1,5 +1,9 @@
 package io.ara.runtime.workflow;
 
+import io.ara.core.agent.AgentChain;
+import io.ara.core.budget.RunBudget;
+import io.ara.core.budget.Spend;
+
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -13,6 +17,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.function.BinaryOperator;
 
 /**
  * The scheduler ADR-052 D1 decides on: dataflow with a per-node journal, not superstep
@@ -46,11 +52,16 @@ public final class DataflowScheduler {
 
     private final WorkflowGraph graph;
     private final int maxOccurrences;
+    private final RunBudget budget;   // null = no global cost governor for this run
 
     private final Map<WorkflowEdge, Deque<String>> tokens = new LinkedHashMap<>();
     private final Set<WorkflowEdge> dead = new LinkedHashSet<>();
     private final Map<String, Integer> occurrence = new HashMap<>();
     private final List<JournalEntry> journal = new ArrayList<>();
+    // ADR-052 D3: every WorkflowNode.Write recorded so far, merged through the graph's
+    // declared reducers. Mutated only from the thread that called run() — same invariant
+    // as every other field above.
+    private final Map<String, Object> sharedState = new LinkedHashMap<>();
 
     /**
      * @param maxOccurrences per-node cap on how many times a node may fire in one run;
@@ -60,8 +71,23 @@ public final class DataflowScheduler {
      *                       exists; this is the runtime backstop that holds regardless.
      */
     public DataflowScheduler(WorkflowGraph graph, int maxOccurrences) {
+        this(graph, maxOccurrences, null);
+    }
+
+    /**
+     * @param budget the run's single cost governor (ADR-054 D6), charged once per node
+     *               occurrence — one journal entry, one {@link RunBudget#charge}. A node's
+     *               {@link WorkflowNode#cost()} supplies the money / token spend; every
+     *               occurrence counts as one activation regardless. When a charge reports
+     *               a breach the run stops with a {@link WorkflowResult#failureReason()}
+     *               naming both the axis and the node that was firing. {@code null} leaves
+     *               the run ungoverned (only the per-node {@code maxOccurrences} backstop
+     *               applies).
+     */
+    public DataflowScheduler(WorkflowGraph graph, int maxOccurrences, RunBudget budget) {
         this.graph = graph;
         this.maxOccurrences = maxOccurrences;
+        this.budget = budget;
     }
 
     public WorkflowResult run(String initialInput, ExecutorService pool) {
@@ -102,7 +128,7 @@ public final class DataflowScheduler {
                 .filter(id -> graph.in(id).isEmpty())
                 .toList();
         if (entryNodes.isEmpty()) {
-            return new WorkflowResult(journal, false, "no entry node (every node has an incoming edge)");
+            return new WorkflowResult(journal, false, "no entry node (every node has an incoming edge)", sharedState);
         }
         entryNodes.stream()
                 .filter(id -> occurrence.getOrDefault(id, 0) == 0)
@@ -153,6 +179,14 @@ public final class DataflowScheduler {
     private Optional<WorkflowResult> applyReplayedOutcome(JournalEntry.Finished finished) {
         return switch (finished.outcome()) {
             case NodeOutcome.Completed completed -> {
+                Optional<WorkflowResult> overspent = charge(finished.nodeId(), finished.occurrence(), completed);
+                if (overspent.isPresent()) {
+                    yield overspent;
+                }
+                Optional<WorkflowResult> collided = applyWrite(finished.nodeId(), graph.node(finished.nodeId()).write(), completed);
+                if (collided.isPresent()) {
+                    yield collided;
+                }
                 for (WorkflowEdge edge : graph.out(finished.nodeId())) {
                     if (completed.selectedTargets().contains(edge.to())) {
                         tokens.get(edge).addLast(completed.content());
@@ -163,10 +197,10 @@ public final class DataflowScheduler {
                 yield Optional.empty();
             }
             case NodeOutcome.Failed failed -> Optional.of(new WorkflowResult(journal, false,
-                    entryLabel(finished) + " had already failed in the prior run: " + failed.reason()));
+                    entryLabel(finished) + " had already failed in the prior run: " + failed.reason(), sharedState));
             case NodeOutcome.Suspended suspended -> Optional.of(new WorkflowResult(journal, false,
                     entryLabel(finished) + " is suspended awaiting a decision — resuming past a suspension "
-                            + "isn't supported until ADR-052 D6: " + suspended.reason()));
+                            + "isn't supported until ADR-052 D6: " + suspended.reason(), sharedState));
         };
     }
 
@@ -178,9 +212,9 @@ public final class DataflowScheduler {
                 yield Optional.empty();
             }
             case FAIL -> Optional.of(new WorkflowResult(journal, false,
-                    entryLabel(started) + " was in flight when the prior run stopped; its onUncertainResume policy is FAIL"));
+                    entryLabel(started) + " was in flight when the prior run stopped; its onUncertainResume policy is FAIL", sharedState));
             case SUSPEND -> Optional.of(new WorkflowResult(journal, false,
-                    entryLabel(started) + " was in flight when the prior run stopped; its onUncertainResume policy is SUSPEND"));
+                    entryLabel(started) + " was in flight when the prior run stopped; its onUncertainResume policy is SUSPEND", sharedState));
         };
     }
 
@@ -210,18 +244,18 @@ public final class DataflowScheduler {
 
                 int occ = occurrence.merge(id, 1, Integer::sum) - 1;
                 if (occ >= maxOccurrences) {
-                    return new WorkflowResult(journal, false, "maxOccurrences exceeded on " + id);
+                    return new WorkflowResult(journal, false, "maxOccurrences exceeded on " + id, sharedState);
                 }
                 consumeTokens(id);
                 journal.add(new JournalEntry.Started(id, occ, input));
                 running.add(id);
                 inFlight++;
                 String firingInput = input;
-                completion.submit(() -> fire(node, occ, firingInput));
+                completion.submit(() -> fire(node, occ, firingInput, pool));
             }
 
             if (inFlight == 0) {
-                return new WorkflowResult(journal, true, null);
+                return new WorkflowResult(journal, true, null, sharedState);
             }
 
             // Wait for the FIRST to finish, not all of them — the difference from BSP.
@@ -229,11 +263,44 @@ public final class DataflowScheduler {
             try {
                 fired = completion.take().get();
             } catch (Exception e) {
-                return new WorkflowResult(journal, false, "node execution failed: " + e);
+                return new WorkflowResult(journal, false, "node execution failed: " + e, sharedState);
             }
             inFlight--;
             running.remove(fired.nodeId());
             journal.add(new JournalEntry.Finished(fired.nodeId(), fired.occurrence(), fired.input(), fired.outcome()));
+
+            // ADR-054 D6: one journal entry, one charge. The occurrence already ran, so a
+            // breach stops the run on this entry rather than mid-node — naming the axis
+            // and the node, the "fallisce nominando il costrutto che ha sforato" behaviour.
+            NodeOutcome.Completed completedForCharge =
+                    fired.outcome() instanceof NodeOutcome.Completed c ? c : null;
+            Optional<WorkflowResult> overspent = charge(fired.nodeId(), fired.occurrence(), completedForCharge);
+            if (overspent.isPresent()) {
+                return overspent.get();
+            }
+
+            // ADR-052 D4: journal and collect every dynamic child before the parent's own
+            // outcome is processed below — a child is never a real WorkflowGraph node, so
+            // it never goes through the normal per-node loop this method's caller runs.
+            WorkflowNode.MapOverSpec spec = graph.node(fired.nodeId()).mapOver();
+            for (MapOverChildResult child : fired.mapOverChildren()) {
+                journal.add(new JournalEntry.Started(child.childId(), 0, child.input()));
+                journal.add(new JournalEntry.Finished(child.childId(), 0, child.input(), child.outcome()));
+                if (child.outcome() instanceof NodeOutcome.Completed childCompleted && spec.collectInto() != null) {
+                    Optional<WorkflowResult> collided = applyWrite(child.childId(),
+                            new WorkflowNode.Write(spec.collectInto(), out -> List.of(out)), childCompleted);
+                    if (collided.isPresent()) {
+                        return collided.get();
+                    }
+                }
+            }
+
+            if (completedForCharge != null) {
+                Optional<WorkflowResult> collided = applyWrite(fired.nodeId(), graph.node(fired.nodeId()).write(), completedForCharge);
+                if (collided.isPresent()) {
+                    return collided.get();
+                }
+            }
 
             // Fail-fast: the first Failed or Suspended outcome stops the run immediately,
             // even with other nodes still in flight. Deciding whether a workflow should
@@ -251,31 +318,174 @@ public final class DataflowScheduler {
                 }
                 case NodeOutcome.Failed failed -> {
                     return new WorkflowResult(journal, false,
-                            "node " + fired.nodeId() + "#" + fired.occurrence() + " failed: " + failed.reason());
+                            "node " + fired.nodeId() + "#" + fired.occurrence() + " failed: " + failed.reason(), sharedState);
                 }
                 case NodeOutcome.Suspended suspended -> {
                     return new WorkflowResult(journal, false,
-                            "node " + fired.nodeId() + "#" + fired.occurrence() + " suspended: " + suspended.reason());
+                            "node " + fired.nodeId() + "#" + fired.occurrence() + " suspended: " + suspended.reason(), sharedState);
                 }
             }
         }
     }
 
-    private record Fired(String nodeId, int occurrence, String input, NodeOutcome outcome) {}
+    /** @param mapOverChildren empty unless {@code node} declares a {@link WorkflowNode#mapOver()} (ADR-052 D4) */
+    private record Fired(String nodeId, int occurrence, String input, NodeOutcome outcome,
+                         List<MapOverChildResult> mapOverChildren) {
+        Fired(String nodeId, int occurrence, String input, NodeOutcome outcome) {
+            this(nodeId, occurrence, input, outcome, List.of());
+        }
+    }
 
-    private Fired fire(WorkflowNode node, int occurrence, String input) {
+    /** One dynamic fan-out activation's outcome (ADR-052 D4) — never a real {@link WorkflowGraph} node. */
+    private record MapOverChildResult(String childId, String input, NodeOutcome outcome) {}
+
+    private Fired fire(WorkflowNode node, int occurrence, String input, ExecutorService pool) {
         try {
             String output = node.body().apply(input);
+
+            List<MapOverChildResult> children = List.of();
+            if (node.mapOver() != null) {
+                WorkflowNode.MapOverSpec spec = node.mapOver();
+                List<String> elements = spec.elements().apply(output);
+                if (elements.size() > spec.maxActivations()) {
+                    return new Fired(node.id(), occurrence, input, new NodeOutcome.Failed(
+                            "mapOver('" + node.id() + "') produced " + elements.size()
+                                    + " element(s), exceeding maxActivations=" + spec.maxActivations()));
+                }
+                children = runMapOverChildren(node.id(), occurrence, spec, elements, pool);
+                boolean anyChildFailed = children.stream().anyMatch(c -> !(c.outcome() instanceof NodeOutcome.Completed));
+                // FAIL_FAST and REQUIRE_ALL both fail the whole group once any child has —
+                // see MapOverSpec's own Javadoc for why the two collapse to one behaviour here.
+                if (anyChildFailed && spec.onPartialFailure() != AgentChain.FailurePolicy.PARTIAL_OK) {
+                    String reason = children.stream()
+                            .filter(c -> !(c.outcome() instanceof NodeOutcome.Completed))
+                            .map(c -> c.childId() + ": " + describeOutcome(c.outcome()))
+                            .collect(java.util.stream.Collectors.joining("; "));
+                    return new Fired(node.id(), occurrence, input,
+                            new NodeOutcome.Failed("mapOver('" + node.id() + "') child(ren) failed: " + reason), children);
+                }
+                if (anyChildFailed && children.stream().noneMatch(c -> c.outcome() instanceof NodeOutcome.Completed)) {
+                    // PARTIAL_OK still needs at least one success to have anything to report.
+                    return new Fired(node.id(), occurrence, input,
+                            new NodeOutcome.Failed("mapOver('" + node.id() + "') — every child failed"), children);
+                }
+            }
+
             List<String> selected = node.selector() == null
                     ? graph.out(node.id()).stream().map(WorkflowEdge::to).toList()
                     : graph.out(node.id()).stream().map(WorkflowEdge::to)
                             .filter(node.selector().apply(output)::contains).toList();
-            return new Fired(node.id(), occurrence, input, new NodeOutcome.Completed(output, selected));
+            return new Fired(node.id(), occurrence, input, new NodeOutcome.Completed(output, selected), children);
         } catch (WorkflowNodeSuspendedException e) {
             return new Fired(node.id(), occurrence, input, new NodeOutcome.Suspended(e.getMessage()));
         } catch (RuntimeException e) {
             return new Fired(node.id(), occurrence, input, new NodeOutcome.Failed(String.valueOf(e.getMessage())));
         }
+    }
+
+    private static String describeOutcome(NodeOutcome outcome) {
+        return switch (outcome) {
+            case NodeOutcome.Failed f -> f.reason();
+            case NodeOutcome.Suspended s -> "suspended: " + s.reason();
+            case NodeOutcome.Completed c -> c.content();
+        };
+    }
+
+    /**
+     * Runs one activation of {@code spec.workerBody()} per element, concurrently, on
+     * {@code pool} — the same pool the scheduler itself submits nodes to. Blocking here
+     * (this already runs on a pool thread, inside {@link #fire}) to wait for all of them
+     * is the same nested-blocking idiom {@code ReactExecutionSupport.dispatchBounded} uses
+     * for parallel tool calls: cheap on virtual threads, and it keeps every mutation of
+     * {@link #journal}/{@link #sharedState} on the single controlling thread that calls
+     * {@link #run} — this method only computes, it never touches scheduler state.
+     */
+    private static List<MapOverChildResult> runMapOverChildren(
+            String parentId, int parentOccurrence, WorkflowNode.MapOverSpec spec, List<String> elements, ExecutorService pool) {
+
+        List<Future<MapOverChildResult>> futures = new ArrayList<>(elements.size());
+        for (int i = 0; i < elements.size(); i++) {
+            String childId = spec.workerId() + "[" + parentId + "#" + parentOccurrence + "." + i + "]";
+            String elementInput = elements.get(i);
+            futures.add(pool.submit(() -> {
+                try {
+                    String childOutput = spec.workerBody().apply(elementInput);
+                    return new MapOverChildResult(childId, elementInput, new NodeOutcome.Completed(childOutput, List.of()));
+                } catch (WorkflowNodeSuspendedException e) {
+                    return new MapOverChildResult(childId, elementInput, new NodeOutcome.Suspended(e.getMessage()));
+                } catch (RuntimeException e) {
+                    return new MapOverChildResult(childId, elementInput, new NodeOutcome.Failed(String.valueOf(e.getMessage())));
+                }
+            }));
+        }
+        List<MapOverChildResult> results = new ArrayList<>(futures.size());
+        for (Future<MapOverChildResult> future : futures) {
+            try {
+                results.add(future.get());
+            } catch (Exception e) {
+                results.add(new MapOverChildResult("?", "", new NodeOutcome.Failed("execution error: " + e)));
+            }
+        }
+        return results;
+    }
+
+    /**
+     * Charges the run budget for one node occurrence (ADR-054 D6). The money / token spend
+     * comes from the node's {@link WorkflowNode#cost()} applied to its output — zero for a
+     * node that declares none, and zero for one that Failed or Suspended before producing
+     * output — while the activation itself always counts as one. Returns a failing {@link
+     * WorkflowResult} naming the axis and this node if the charge pushes any axis (or an
+     * ancestor {@code HierarchicalBudget}) over its cap; empty when there is no budget or
+     * it still fits.
+     */
+    private Optional<WorkflowResult> charge(String nodeId, int occurrence, NodeOutcome.Completed completed) {
+        if (budget == null) {
+            return Optional.empty();
+        }
+        Spend spend = Spend.zero(budget.currency());
+        if (completed != null) {
+            var cost = graph.node(nodeId).cost();
+            if (cost != null) {
+                spend = cost.apply(completed.content());
+            }
+        }
+        RunBudget.Charge result = budget.charge(spend);
+        if (result instanceof RunBudget.Charge.Exceeded ex) {
+            return Optional.of(new WorkflowResult(journal, false,
+                    "RunBudget exceeded on " + ex.axis() + " at node " + nodeId + "#" + occurrence + ": " + ex.detail(),
+                    sharedState));
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Applies {@code write} (ADR-052 D3) to {@link #sharedState}: a first write to a key
+     * is stored as-is; a second one is merged through {@link WorkflowGraph#reducers()}'s
+     * entry for that key. A key written twice with no declared reducer is the same
+     * ambiguity {@code Workflow.Builder}'s D5 control #10 already refuses to guess at for
+     * edges — refused here too, rather than silently picking last-write-wins or losing
+     * one write. {@code write} is nullable so a caller with nothing to apply (the common
+     * case) doesn't need its own null check.
+     */
+    private Optional<WorkflowResult> applyWrite(String nodeId, WorkflowNode.Write write, NodeOutcome.Completed completed) {
+        if (write == null) {
+            return Optional.empty();
+        }
+        Object value = write.extractor().apply(completed.content());
+        String key = write.key();
+        if (!sharedState.containsKey(key)) {
+            sharedState.put(key, value);
+            return Optional.empty();
+        }
+        BinaryOperator<Object> reducer = graph.reducers().get(key);
+        if (reducer == null) {
+            return Optional.of(new WorkflowResult(journal, false,
+                    "node " + nodeId + " wrote key '" + key + "' but it already had a value and no reducer is "
+                            + "declared for it (ADR-052 D3) — call reduce(\"" + key + "\", ...) to say how they combine",
+                    sharedState));
+        }
+        sharedState.put(key, reducer.apply(sharedState.get(key), value));
+        return Optional.empty();
     }
 
     /**

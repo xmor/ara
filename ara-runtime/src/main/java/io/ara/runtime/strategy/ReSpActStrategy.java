@@ -91,7 +91,7 @@ public final class ReSpActStrategy implements ExecutionStrategy {
      * Appended to the system prompt to instruct the LLM on the ReSpAct output format.
      * Injected at the end of the system prompt section so it never overrides
      * agent-specific instructions — same placement rule as {@link
-     * ReactStrategy#REACT_SYSTEM_SUFFIX}.
+     * ReactExecutionSupport#REACT_SYSTEM_SUFFIX}.
      */
     static final String RESPACT_SYSTEM_SUFFIX = """
 
@@ -196,6 +196,13 @@ public final class ReSpActStrategy implements ExecutionStrategy {
             totalPromptTokens += completion.promptTokens();
             totalOutputTokens += completion.outputTokens();
             String output = completion.text();
+
+            ExecutionResult runBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
+                    config, task, completion.promptTokens(), completion.outputTokens(),
+                    iterations, totalPromptTokens, totalOutputTokens, steps);
+            if (runBudgetExceeded != null) {
+                return runBudgetExceeded;
+            }
 
             ReactExecutionSupport.recordAssistantOutput(memory, steps, completion, output, iterations, task.taskId());
 
@@ -357,7 +364,7 @@ public final class ReSpActStrategy implements ExecutionStrategy {
     /**
      * Returns {@code true} when the LLM has said something to the user without closing
      * the task: either the explicit {@code Action: SPEAK} sentinel, or — the ReSpAct-
-     * specific divergence from {@link ReactStrategy#isFinalAnswer} — a natural stop
+     * specific divergence from {@link ReactExecutionSupport#isFinalAnswer} — a natural stop
      * ({@code finishReason == "stop"}) with no tool call and no {@code FINAL_ANSWER}
      * sentinel either (already ruled out by the caller before this is reached).
      */
@@ -371,8 +378,8 @@ public final class ReSpActStrategy implements ExecutionStrategy {
     /**
      * Extracts the text following {@code fieldMarker} (e.g. {@code "Answer:"} or
      * {@code "Message:"}); falls back to the text following {@code sentinel} itself when
-     * the field marker is absent, then to the whole output — mirrors {@code
-     * ReactStrategy.extractFinalAnswer}'s two-format tolerance ({@code Action: X\nField:
+     * the field marker is absent, then to the whole output — mirrors {@link
+     * ReactExecutionSupport#extractFinalAnswer}'s two-format tolerance ({@code Action: X\nField:
      * <text>} vs. bare {@code X <text>}).
      */
     private String extractAfterMarker(String output, String sentinel, String fieldMarker) {
@@ -390,7 +397,7 @@ public final class ReSpActStrategy implements ExecutionStrategy {
     /**
      * Converts working memory to the LLM message list, enhancing the first system
      * message with the tool catalog and the ReSpAct format instructions — same
-     * structure as {@link ReactStrategy#buildMessages}, with {@link
+     * structure as {@link ReactExecutionSupport#buildMessages}, with {@link
      * #RESPACT_SYSTEM_SUFFIX} in place of {@code REACT_SYSTEM_SUFFIX}.
      */
     private List<LlmMessage> buildMessages(

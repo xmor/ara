@@ -1,5 +1,7 @@
 package io.ara.core.eval;
 
+import io.ara.core.budget.Spend;
+
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -17,6 +19,11 @@ import java.util.Objects;
  * @param perTag       mean score aggregated per tag declared on the cases (ADR-0070 D5)
  * @param regressions  {@code caseId}s that passed before this run and fail now
  * @param verdict      the {@link Verdict} from the ADR-0059 cascade
+ * @param runCosts     the {@link Spend} of each individual run, across all evaluated cases,
+ *                     as measured per run by a {@code RunBudget} (ADR-054 D6). Empty when
+ *                     the runner did not track cost. ADR-0085 D1 reads the median of this
+ *                     to size a topology's relative cost. Assumes a consistent currency
+ *                     (true for one agent / provider).
  */
 public record EvalResult(
         String                 evalId,
@@ -26,7 +33,8 @@ public record EvalResult(
         Map<String, CaseStats> perCase,
         Map<String, Double>    perTag,
         List<String>           regressions,
-        Verdict                verdict
+        Verdict                verdict,
+        List<Spend>            runCosts
 ) {
 
     public EvalResult {
@@ -41,6 +49,14 @@ public record EvalResult(
         perCase     = Map.copyOf(Objects.requireNonNullElse(perCase, Map.of()));
         perTag      = Map.copyOf(Objects.requireNonNullElse(perTag, Map.of()));
         regressions = List.copyOf(Objects.requireNonNullElse(regressions, List.of()));
+        runCosts    = List.copyOf(Objects.requireNonNullElse(runCosts, List.of()));
+    }
+
+    /** Backwards-compatible constructor for callers that do not carry per-run cost. */
+    public EvalResult(String evalId, String specHash, String suiteId, int nRunsPerCase,
+                      Map<String, CaseStats> perCase, Map<String, Double> perTag,
+                      List<String> regressions, Verdict verdict) {
+        this(evalId, specHash, suiteId, nRunsPerCase, perCase, perTag, regressions, verdict, List.of());
     }
 
     /** {@code true} when every case's {@link CaseStats} was aggregated over enough runs. */

@@ -6,6 +6,8 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.ExecutionStep;
 import io.ara.core.agent.ExecutionTimeoutException;
+import io.ara.core.budget.RunBudget;
+import io.ara.core.budget.Spend;
 import io.ara.core.common.Budget;
 import io.ara.core.common.Money;
 import io.ara.core.llm.LlmCallContext;
@@ -767,6 +769,65 @@ final class ReactExecutionSupport {
 
     private static java.math.BigDecimal fraction(int tokens) {
         return java.math.BigDecimal.valueOf(tokens).divide(java.math.BigDecimal.valueOf(1_000));
+    }
+
+    /**
+     * Charges the run's {@link RunBudget} — if the task's {@link io.ara.core.agent.RunContext}
+     * carries one (ADR-0069 D2/D3 propagation) — for the tokens spent on one LLM call, and
+     * fails the step if any axis (or an ancestor {@code HierarchicalBudget}) is now over its
+     * cap. This is the enforcement path ADR-0069's structural wiring left as a follow-up once
+     * {@link RunBudget} (ADR-054 D6) existed: {@link io.ara.runtime.workflow.DataflowScheduler}
+     * already charges it per node occurrence, but a leaf agent running the React loop outside
+     * a workflow never did.
+     *
+     * <p>One charge per LLM call — the reasoning call every iteration makes, and each
+     * reflection call {@link ReflActStrategy} adds on top of it — mirrors {@link RunBudget}'s
+     * own rule for the workflow engine ("one journal entry = one activation") applied to the
+     * unit of activation a ReAct-shaped loop actually has: a model call, not a tool dispatch.
+     *
+     * <p>Post-hoc by design, like {@link RunBudget#charge} itself: the call has already
+     * happened and its tokens are already spent by the time this runs, so a breach stops the
+     * run before its <em>next</em> call, not mid-call. When no {@link RunBudget} is attached
+     * to this run — the common case, most agents execute outside a governed workflow — this
+     * is a no-op; {@link #checkBudget}'s local {@code costBudget} check is unaffected either
+     * way, the two are independent governors.
+     *
+     * @return a failure result naming the exceeded axis, or {@code null} to continue as normal
+     */
+    static ExecutionResult chargeRunBudget(
+            AgentConfig config, AgentTask task, int promptTokens, int outputTokens,
+            int iterations, int totalPromptTokens, int totalOutputTokens, List<ExecutionStep> steps) {
+
+        Optional<RunBudget> maybeBudget = RunBudget.from(task.runContext());
+        if (maybeBudget.isEmpty()) {
+            return null;
+        }
+        RunBudget budget = maybeBudget.get();
+        Money cost = costInCurrency(config, promptTokens, outputTokens, budget.currency());
+        RunBudget.Charge charge = budget.charge(Spend.of(cost, promptTokens + outputTokens, 1));
+        if (charge instanceof RunBudget.Charge.Exceeded ex) {
+            log.warn("Task [{}] run budget exceeded on {}: {}", task.taskId(), ex.axis(), ex.detail());
+            return ExecutionResult.failure(
+                    "Run budget exceeded on %s: %s".formatted(ex.axis(), ex.detail()),
+                    iterations, totalPromptTokens, totalOutputTokens, steps);
+        }
+        return null;
+    }
+
+    /**
+     * The cost of one LLM call in {@code currency}, from the agent's configured per-1k-token
+     * rates — {@link Money#zero} when those rates are priced in a different currency than the
+     * run budget's, rather than let {@link Money#plus} throw on a mismatch this call site did
+     * not cause: an operator who wires a run budget in one currency against agents priced in
+     * another gets an under-counted cost axis instead of a crashed run.
+     */
+    private static Money costInCurrency(AgentConfig config, int promptTokens, int outputTokens, String currency) {
+        Money inputRate = config.costInputPer1kTokens();
+        Money outputRate = config.costOutputPer1kTokens();
+        if (!inputRate.currency().equals(currency) || !outputRate.currency().equals(currency)) {
+            return Money.zero(currency);
+        }
+        return inputRate.multiply(fraction(promptTokens)).plus(outputRate.multiply(fraction(outputTokens)));
     }
 
     /** Truncates a string for INFO-level I/O logging; {@code maxChars <= 0} disables truncation. */

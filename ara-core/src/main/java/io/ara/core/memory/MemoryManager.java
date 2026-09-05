@@ -1,5 +1,8 @@
 package io.ara.core.memory;
 
+import io.ara.core.agent.AgentResponse;
+import io.ara.core.agent.AgentTask;
+
 import java.util.List;
 
 /**
@@ -55,4 +58,35 @@ public interface MemoryManager {
      * Clears the working memory window, preparing the agent for a new task.
      */
     void clearWorkingMemory();
+
+    /**
+     * Pulls back into the working-memory window the entries most relevant to
+     * {@code queryText} from whatever episodic/offload tier this manager has (ADR-0078 D4)
+     * — the symmetric counterpart to token-budget eviction. Called at the start of a turn
+     * with the incoming task text as the query.
+     *
+     * <p>The default is a no-op: a manager with no offload tier has nothing to recall, and
+     * pretending otherwise would be worse than doing nothing. {@code
+     * io.ara.runtime.memory.SlidingWindowMemoryManager} overrides it when configured with a
+     * {@code SemanticStore}.
+     *
+     * @param queryText  the text to find relevant past context for; a blank query recalls nothing
+     * @param maxResults upper bound on entries to pull back; {@code <= 0} recalls nothing
+     */
+    default void recallRelevant(String queryText, int maxResults) {}
+
+    /**
+     * Called once, right after a task completes successfully — the hook a memory
+     * implementation that wants to react to a finished turn (e.g. extracting facts to
+     * consolidate later) hangs off, without the runtime needing to know what "reacting"
+     * means (ADR-0086). Called before {@link #clearWorkingMemory()}, so an implementation
+     * that overrides this still sees the turn's full working-memory window if it needs it.
+     *
+     * <p>The default is a no-op: a manager with nothing to do at end-of-turn should not pay
+     * for pretending otherwise.
+     *
+     * @param task     the task that was executed
+     * @param response the resulting response
+     */
+    default void onTurnCompleted(AgentTask task, AgentResponse response) {}
 }

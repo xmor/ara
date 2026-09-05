@@ -49,15 +49,17 @@ import java.util.Optional;
  *
  * <p><b>Autonomy track record (ADR-0073 D2, optional third disjunct).</b> When an
  * {@link AutonomyPolicy} is supplied, a call also gates when the policy says the action
- * must escalate for its {@code task_class} — the level floor (condition 2) or the
- * confidence threshold (condition 3) of ADR-0073 D2, additive to the two above and never
- * able to remove them. The {@code task_class} and confidence are read from the call's
- * {@link RunState} under the configured keys (defaults {@value #DEFAULT_TASK_CLASS_KEY} /
- * {@value #DEFAULT_CONFIDENCE_KEY}, matching an {@code IntentRouter} write). This can only
- * be evaluated on the {@link #execute(String, String, AgentTask)} path: a call with no
- * task carries no {@link RunState}, and a call whose {@code task_class} is absent is
- * treated as "not measurable here" (ADR-0073, "Non affrontato") — neither adds a gate,
- * the two floors above still apply.
+ * must escalate for its {@code task_class} — either because the current autonomy level's
+ * risk floor rejects the action's reversibility, or because the action's confidence is
+ * below that level's threshold (both checks are part of ADR-0073 D2's escalation rule,
+ * additive to the two gates above and never able to remove them). The {@code task_class}
+ * and confidence are read from the call's {@link RunState} under the configured keys
+ * (defaults {@value #DEFAULT_TASK_CLASS_KEY} / {@value #DEFAULT_CONFIDENCE_KEY}, matching
+ * an {@code IntentRouter} write). This can only be evaluated on the
+ * {@link #execute(String, String, AgentTask)} path: a call with no task carries no
+ * {@link RunState}, and a call whose {@code task_class} is absent is treated as
+ * "not measurable here" — a deliberate, stated gap in ADR-0073, not a bug — so neither
+ * check adds a gate; the two floors above still apply.
  */
 public final class ApprovalToolRegistry implements ToolRegistry {
 
@@ -210,11 +212,12 @@ public final class ApprovalToolRegistry implements ToolRegistry {
     }
 
     /**
-     * ADR-0073 D2 conditions 2–3: the autonomy track record for this call's
-     * {@code task_class} asks to escalate. Returns {@code false} (adds no gate) when there
-     * is no policy, no task (hence no {@link RunState}), no {@link ToolSpec} to classify
-     * the action, or no {@code task_class} in state — the last is "not measurable here"
-     * (ADR-0073, "Non affrontato"), not an escalation.
+     * The autonomy track record for this call's {@code task_class} asks to escalate — its
+     * risk floor rejects the action, or its confidence threshold is not met (ADR-0073 D2).
+     * Returns {@code false} (adds no gate) when there is no policy, no task (hence no
+     * {@link RunState}), no {@link ToolSpec} to classify the action, or no {@code task_class}
+     * in state — the last is "not measurable here", a deliberate, stated gap in ADR-0073,
+     * not an escalation.
      */
     private boolean autonomyEscalates(String toolId, AgentTask task) {
         if (autonomyPolicy == null || task == null) {

@@ -3,25 +3,30 @@ package io.ara.runtime.workflow;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.BinaryOperator;
 import java.util.stream.Collectors;
 
 /**
- * The D1 graph model: nodes and edges, nothing else.
+ * The D1 graph model: nodes and edges, nothing else — plus, since ADR-052 D3, the
+ * declared reducers a {@link WorkflowNode.Write} resolves a key collision against.
  *
- * <p>None of ADR-052 D5's ten build-time checks (reachability, dead-end nodes, HITL
- * presence, and so on) live here yet — those are meaningful once the facade (D2) exists
- * to construct graphs a caller can get wrong in the ways those checks catch. What this
- * constructor does enforce is referential integrity: an edge naming a node that doesn't
- * exist is not a design question to defer, it's a bug in whoever built the graph, and
- * every one of the other checks in D5 assumes it can't happen.
+ * <p>Six of ADR-052 D5's ten build-time checks don't live here — see {@code
+ * Workflow.Builder}'s own Javadoc for which four do (in its {@code build()}, not here)
+ * and why the rest need capability this graph model doesn't have. What this constructor
+ * does enforce is referential integrity: an edge naming a node that doesn't exist is not
+ * a design question to defer, it's a bug in whoever built the graph, and every one of
+ * the checks that do exist assumes it can't happen.
  */
-public record WorkflowGraph(List<WorkflowNode> nodes, List<WorkflowEdge> edges) {
+public record WorkflowGraph(List<WorkflowNode> nodes, List<WorkflowEdge> edges,
+                            Map<String, BinaryOperator<Object>> reducers) {
 
     public WorkflowGraph {
         Objects.requireNonNull(nodes, "nodes must not be null");
         Objects.requireNonNull(edges, "edges must not be null");
+        Objects.requireNonNull(reducers, "reducers must not be null");
         nodes = List.copyOf(nodes);
         edges = List.copyOf(edges);
+        reducers = Map.copyOf(reducers);
 
         Map<String, WorkflowNode> byId = nodes.stream()
                 .collect(Collectors.toMap(WorkflowNode::id, n -> n, (a, b) -> {
@@ -35,6 +40,11 @@ public record WorkflowGraph(List<WorkflowNode> nodes, List<WorkflowEdge> edges) 
                 throw new IllegalArgumentException("edge " + edge + " references unknown node: " + edge.to());
             }
         }
+    }
+
+    /** Backwards-compatible constructor: no declared reducers (ADR-052 D3). */
+    public WorkflowGraph(List<WorkflowNode> nodes, List<WorkflowEdge> edges) {
+        this(nodes, edges, Map.of());
     }
 
     WorkflowNode node(String id) {

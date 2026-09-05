@@ -7,6 +7,11 @@ import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.RunState;
 import io.ara.core.common.AgentId;
 import io.ara.runtime.pipeline.PipelineExecution.StepResult;
+import io.ara.runtime.workflow.DataflowScheduler;
+import io.ara.runtime.workflow.WorkflowEdge;
+import io.ara.runtime.workflow.WorkflowGraph;
+import io.ara.runtime.workflow.WorkflowNode;
+import io.ara.runtime.workflow.WorkflowResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,6 +25,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Function;
 
 /**
@@ -59,6 +66,9 @@ public final class AgentPipeline {
 
     private static final int DEFAULT_MAX_STEPS = 20;
 
+    /** Reserved id for the synthetic entry node every compiled graph gets — see {@link #compile}. */
+    private static final String START_NODE = "$pipeline-start$";
+
     // stepOrder is the correctness-critical source of step order: Map.copyOf does not
     // guarantee iteration order preservation even when the source is a LinkedHashMap,
     // so sequential "advance to the next step" logic must never rely on `steps`' own
@@ -66,11 +76,15 @@ public final class AgentPipeline {
     private final List<String>              stepOrder;
     private final Map<String, PipelineStep> steps;
     private final int                       maxSteps;
+    // Resolved, build-time-validated routing targets (ADR-052 D2) — only present for a
+    // step that has a router; empty means "never continues" (e.g. worker()).
+    private final Map<String, Set<String>>  resolvedTargets;
 
     private AgentPipeline(Builder builder) {
-        this.stepOrder = List.copyOf(builder.stepOrder);
-        this.steps     = Map.copyOf(builder.steps);
-        this.maxSteps  = builder.maxSteps;
+        this.stepOrder       = List.copyOf(builder.stepOrder);
+        this.steps           = Map.copyOf(builder.steps);
+        this.maxSteps        = builder.maxSteps;
+        this.resolvedTargets = builder.resolvedTargets;
     }
 
     /**
@@ -100,78 +114,186 @@ public final class AgentPipeline {
         Objects.requireNonNull(task, "task must not be null");
         Instant start = Instant.now();
 
-        String        currentStep  = stepOrder.get(0);
-        AgentResponse lastResponse = null;
-        int           stepCount    = 0;
-        List<StepResult> history   = new ArrayList<>();
+        // ADR-052 D2: compile this run's declared steps/routers into a fresh WorkflowGraph
+        // and drive it through DataflowScheduler instead of the old hand-rolled while loop
+        // — see compile()/RunAccumulator for why "fresh" (per call, not once at build()).
+        RunAccumulator acc = new RunAccumulator(task);
+        WorkflowGraph graph = compile(acc);
 
-        while (currentStep != null) {
-            if (stepCount >= maxSteps) {
-                log.warn("Pipeline exceeded maxSteps={}", maxSteps);
-                return PipelineResult.failure(
-                        "Pipeline exceeded maximum step count of " + maxSteps,
-                        lastResponse, history, elapsed(start));
-            }
-
-            PipelineStep step = steps.get(currentStep);
-            if (step == null) {
-                return PipelineResult.failure(
-                        "Unknown step: '" + currentStep + "' — declared steps: "
-                                + String.join(", ", stepOrder),
-                        lastResponse, history, elapsed(start));
-            }
-
-            PipelineExecution execution = new PipelineExecution(task, history, stepCount);
-            AgentTask stepTask;
-            try {
-                stepTask = step.buildTask(execution);
-            } catch (RuntimeException e) {
-                log.warn("Pipeline step [{}] input shaper threw", currentStep, e);
-                return PipelineResult.failure(
-                        "Step '" + currentStep + "' input shaper threw: " + e,
-                        lastResponse, history, elapsed(start));
-            }
-
-            log.debug("Pipeline step [{}] input.len={}", currentStep, stepTask.input().length());
-            Instant stepStart = Instant.now();
-            lastResponse = step.agent().execute(stepTask);
-            stepCount++;
-
-            // Recorded for every attempted step — success or failure — so token/cost
-            // totals and stepsExecuted() both reflect what actually ran, not just the
-            // steps that completed successfully.
-            history = new ArrayList<>(history);
-            history.add(new StepResult(currentStep, lastResponse.content(),
-                    Duration.between(stepStart, Instant.now()), lastResponse));
-
-            if (!lastResponse.isSuccess()) {
-                log.warn("Pipeline step [{}] failed: {}", currentStep, lastResponse.failureReason());
-                return PipelineResult.failure(
-                        "Step '" + currentStep + "' failed: " + lastResponse.failureReason(),
-                        lastResponse, history, elapsed(start));
-            }
-
-            // Determine next step via router, or advance sequentially
-            Function<PipelineExecution, String> router = step.router();
-            if (router != null) {
-                PipelineExecution executionAfter = new PipelineExecution(task, history, stepCount);
-                String nextStep = router.apply(executionAfter);
-                log.debug("Pipeline router [{}] → [{}]", currentStep, nextStep);
-                currentStep = (nextStep == null || nextStep.isBlank()) ? null : nextStep;
-            } else {
-                // Advance to the next declared step, or end if this was the last
-                int idx = stepOrder.indexOf(currentStep);
-                currentStep = (idx >= 0 && idx + 1 < stepOrder.size()) ? stepOrder.get(idx + 1) : null;
-            }
+        WorkflowResult wfResult;
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+            // Every compiled graph fires at most one node at a time (see compile()'s
+            // Javadoc), so which executor runs a node's body never introduces the
+            // concurrency DataflowScheduler is built for — virtual threads are simply the
+            // idiom the rest of the runtime already uses for a bounded-lifetime pool.
+            //
+            // maxOccurrences is deliberately maxSteps + 1, not maxSteps: it is a per-node
+            // backstop the scheduler checks BEFORE dispatching to a node's body — before
+            // executeStep()'s own maxSteps check ever runs — so setting it to maxSteps would
+            // let it fire first, on whichever single node happens to loop, with its own
+            // generic "maxOccurrences exceeded on X" message instead of the pipeline's own
+            // "exceeded maximum step count" one. No node can ever occur more than maxSteps
+            // times regardless (its own count never exceeds the global one executeStep()
+            // caps), so this backstop never actually trips — it only stays out of the way.
+            wfResult = new DataflowScheduler(graph, maxSteps + 1).run(task.input(), pool);
         }
 
-        return PipelineResult.success(
-                lastResponse != null ? lastResponse.content() : "",
-                lastResponse, history, elapsed(start));
+        List<StepResult> history = List.copyOf(acc.history);
+        AgentResponse lastResponse = acc.lastResponse;
+        Duration elapsed = elapsed(start);
+
+        if (wfResult.ok()) {
+            return PipelineResult.success(
+                    lastResponse != null ? lastResponse.content() : "", lastResponse, history, elapsed);
+        }
+        log.warn("Pipeline run failed: {}", wfResult.failureReason());
+        return PipelineResult.failure(wfResult.failureReason(), lastResponse, history, elapsed);
     }
 
     private static Duration elapsed(Instant start) {
         return Duration.between(start, Instant.now());
+    }
+
+    // ── ADR-052 D2 compiler: Builder's declared steps/routers → a fresh WorkflowGraph ──
+
+    /**
+     * Per-{@link #run} mutable context every compiled node's closures share — one fresh
+     * instance per call, playing the role the old {@code while} loop's own {@code
+     * history}/{@code stepCount} locals played. A fresh {@link WorkflowGraph} is compiled
+     * from it too (see {@link #compile}): {@link WorkflowNode#body()}/{@link
+     * WorkflowNode#selector()} are plain {@code Function<String,String>} with no context
+     * slot of their own to carry a specific run's history through, so the graph — not just
+     * this accumulator — has to be rebuilt fresh every call. That's pure in-memory object
+     * construction, not I/O, and it's what lets {@link AgentPipeline} itself stay immutable
+     * and safely reusable — including concurrently — across repeated {@link #run} calls.
+     *
+     * <p>Every compiled node executes to completion before the next one starts (D1's
+     * activation rule never has more than one node ready at a time in the graphs {@link
+     * #compile} produces — no declared step here has more than one <em>live</em>
+     * predecessor at once), so mutating {@link #history} without extra locking is safe: the
+     * scheduler's own happens-before edge (a {@link java.util.concurrent.Future#get()} per
+     * occurrence) is already what orders one step's writes before the next step's reads.
+     */
+    private static final class RunAccumulator {
+        private final AgentTask task;
+        private final List<StepResult> history = new ArrayList<>();
+        private AgentResponse lastResponse;
+
+        RunAccumulator(AgentTask task) {
+            this.task = task;
+        }
+
+        PipelineExecution snapshot() {
+            return new PipelineExecution(task, history, history.size());
+        }
+
+        void record(StepResult result) {
+            history.add(result);
+            lastResponse = result.response();
+        }
+    }
+
+    /**
+     * Compiles this pipeline's declared steps into a fresh {@link WorkflowGraph} for one
+     * {@link #run} call.
+     *
+     * <p>Every declared step becomes exactly one {@link WorkflowNode}: one with a router
+     * gets an edge to each of its {@link #resolvedTargets} (resolved and validated once, in
+     * {@link Builder#build()}), {@code back} whenever the target does not come strictly
+     * after the source in {@link #stepOrder} — the only way a loop is expressed under D1
+     * (see {@link WorkflowEdge#back()}); one with none gets a single forward edge to the
+     * next declared step, if any — the old loop's "advance sequentially" default.
+     *
+     * <p>A synthetic {@value #START_NODE} node — identity body, a selector that always
+     * picks {@link #stepOrder}'s first entry — is the graph's only true entry point (the
+     * one node with zero incoming edges) and gets an edge to <em>every</em> declared step.
+     * That serves two purposes at once: it lets a later step legitimately route back to an
+     * earlier one — giving that earlier step a real incoming edge without D1 mistaking it
+     * for a second entry point — and it starves any step nothing else ever routes to (D1's
+     * deadness cascade kills that step's lone, never-selected {@value #START_NODE} edge,
+     * and with it every edge downstream of it), reproducing the old loop's "a step nothing
+     * routes to is simply never visited" without a dedicated reachability pass.
+     */
+    private WorkflowGraph compile(RunAccumulator acc) {
+        List<WorkflowNode> nodes = new ArrayList<>();
+        List<WorkflowEdge> edges = new ArrayList<>();
+
+        nodes.add(WorkflowNode.routing(START_NODE, input -> input, output -> Set.of(stepOrder.get(0))));
+        for (String name : stepOrder) {
+            edges.add(WorkflowEdge.of(START_NODE, name));
+        }
+
+        for (int i = 0; i < stepOrder.size(); i++) {
+            String name = stepOrder.get(i);
+            PipelineStep step = steps.get(name);
+            Function<String, String> body = ignoredInput -> executeStep(name, step, acc);
+
+            if (step.router() == null) {
+                nodes.add(WorkflowNode.of(name, body));
+                if (i + 1 < stepOrder.size()) {
+                    edges.add(WorkflowEdge.of(name, stepOrder.get(i + 1)));
+                }
+                continue;
+            }
+
+            Set<String> targets = resolvedTargets.get(name);
+            Function<String, Set<String>> selector = ignoredOutput -> selectTarget(name, step, targets, acc);
+            nodes.add(WorkflowNode.routing(name, body, selector));
+            for (String target : targets) {
+                boolean back = stepOrder.indexOf(target) <= i;
+                edges.add(back ? WorkflowEdge.back(name, target) : WorkflowEdge.of(name, target));
+            }
+        }
+
+        return new WorkflowGraph(nodes, edges);
+    }
+
+    /**
+     * Runs one step's agent and records its result — the shared body of every compiled
+     * node. A thrown exception here is what {@link DataflowScheduler#run} turns into a
+     * {@link io.ara.runtime.workflow.NodeOutcome.Failed}; the message is exactly the one
+     * {@link PipelineResult#failureReason()} carried before this class compiled onto
+     * {@link WorkflowGraph}, so a caller matching on it is unaffected by the change.
+     */
+    private String executeStep(String name, PipelineStep step, RunAccumulator acc) {
+        if (acc.history.size() >= maxSteps) {
+            throw new IllegalStateException("Pipeline exceeded maximum step count of " + maxSteps);
+        }
+        AgentTask stepTask;
+        try {
+            stepTask = step.buildTask(acc.snapshot());
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("Step '" + name + "' input shaper threw: " + e, e);
+        }
+        log.debug("Pipeline step [{}] input.len={}", name, stepTask.input().length());
+        Instant stepStart = Instant.now();
+        AgentResponse response = step.agent().execute(stepTask);
+        acc.record(new StepResult(name, response.content(), Duration.between(stepStart, Instant.now()), response));
+        if (!response.isSuccess()) {
+            throw new IllegalStateException("Step '" + name + "' failed: " + response.failureReason());
+        }
+        return response.content();
+    }
+
+    /**
+     * Resolves one router's next step from the execution so far (including this step's own
+     * just-recorded result — {@link RunAccumulator#record} always runs before this, since
+     * {@link DataflowScheduler} evaluates a node's body before its selector), and enforces
+     * that a valid runtime return value never names a step outside {@code targets} — the
+     * same "Unknown step" failure the old loop reported for a router that returned
+     * something no declared step answers to.
+     */
+    private Set<String> selectTarget(String name, PipelineStep step, Set<String> targets, RunAccumulator acc) {
+        String next = step.router().apply(acc.snapshot());
+        log.debug("Pipeline router [{}] → [{}]", name, next);
+        if (next == null || next.isBlank()) {
+            return Set.of();
+        }
+        if (!targets.contains(next)) {
+            throw new IllegalStateException(
+                    "Unknown step: '" + next + "' — declared steps: " + String.join(", ", stepOrder));
+        }
+        return Set.of(next);
     }
 
     public static Builder    builder()    { return new Builder(); }
@@ -181,10 +303,14 @@ public final class AgentPipeline {
 
     public static final class Builder {
 
-        private final List<String>              stepOrder   = new ArrayList<>();
-        private final Map<String, PipelineStep> steps       = new LinkedHashMap<>();
-        private final Map<String, IntentRouter> classifiers = new LinkedHashMap<>();
+        private final List<String>              stepOrder       = new ArrayList<>();
+        private final Map<String, PipelineStep> steps           = new LinkedHashMap<>();
+        // Populated only by the typed route(name, targets, router) overload — a step
+        // routed through the untyped one is resolved conservatively instead, in build().
+        private final Map<String, Set<String>>  explicitTargets = new LinkedHashMap<>();
         private int maxSteps = DEFAULT_MAX_STEPS;
+        // Set once, at the end of build() — see the ADR-052 D2 target-resolution block there.
+        private Map<String, Set<String>> resolvedTargets;
 
         private Builder() {}
 
@@ -261,6 +387,29 @@ public final class AgentPipeline {
         }
 
         /**
+         * Attaches a conditional router whose full set of possible return values is
+         * declared up front (ADR-052 D2) — every step {@code router} can ever name, so
+         * {@link #build()} can wire the compiled graph's edges and reject a target that
+         * was never declared as a step, the same way {@link #classify} already does via
+         * {@link IntentRouter#targets()}. An empty set means "never continues" — the shape
+         * {@link #worker} uses.
+         *
+         * <p>Prefer this over {@link #route(String, Function)}: a router whose targets are
+         * unknown to the builder is wired conservatively (every other declared step), which
+         * is always correct but gives up the build-time check on the router's own
+         * return value — see the class Javadoc on that overload for when it still applies.
+         *
+         * @throws IllegalArgumentException if {@code stepName} was never declared via {@link #step}
+         * @throws IllegalStateException    at {@link #build()}, if {@code targets} names an undeclared step
+         */
+        public Builder route(String stepName, Set<String> targets, Function<PipelineExecution, String> router) {
+            Objects.requireNonNull(targets, "targets must not be null");
+            route(stepName, router);
+            explicitTargets.put(stepName, Set.copyOf(targets));
+            return this;
+        }
+
+        /**
          * Declares a terminal step that receives the pipeline's <em>original</em> input —
          * the worker end of a classify-and-act pipeline, where a classifier picked which
          * one of several mutually exclusive workers handles the task.
@@ -305,7 +454,7 @@ public final class AgentPipeline {
                 RunState isolated = RunState.overlay(execution.state(), RunState.inMemory());
                 return task.withRunContext(task.runContext().withState(isolated));
             });
-            return route(name, execution -> null);
+            return route(name, Set.of(), execution -> null);
         }
 
         /**
@@ -331,8 +480,7 @@ public final class AgentPipeline {
         public Builder classify(String name, AraAgent classifier, IntentRouter router) {
             Objects.requireNonNull(router, "router must not be null");
             step(name, classifier, execution -> execution.task().withInput(execution.initialInput()));
-            classifiers.put(name, router);
-            return route(name, router);
+            return route(name, router.targets(), router);
         }
 
         /** Sets the hard cap on total step executions (including retries). Default: 20. */
@@ -346,14 +494,39 @@ public final class AgentPipeline {
             if (stepOrder.isEmpty()) {
                 throw new IllegalStateException("AgentPipeline must have at least one step");
             }
-            classifiers.forEach((stepName, router) -> router.targets().stream()
-                    .filter(target -> !steps.containsKey(target))
-                    .findFirst()
-                    .ifPresent(target -> {
+            if (steps.containsKey(START_NODE)) {
+                throw new IllegalStateException(
+                        "'" + START_NODE + "' is reserved for the pipeline's own synthetic entry node (ADR-052 D2)");
+            }
+
+            // ADR-052 D2: resolve and validate every router's target set once, here, so
+            // compile() can wire a WorkflowGraph edge per target without re-deriving it on
+            // every run() call — classify()'s IntentRouter.targets() and the typed route()
+            // overload both land in explicitTargets; the untyped route(name, fn) has none,
+            // so it falls back to "every other declared step", the always-safe superset a
+            // return value can never fall outside of.
+            Map<String, Set<String>> resolved = new LinkedHashMap<>();
+            for (Map.Entry<String, PipelineStep> e : steps.entrySet()) {
+                String stepName = e.getKey();
+                if (e.getValue().router() == null) {
+                    continue;
+                }
+                Set<String> targets = explicitTargets.get(stepName);
+                if (targets == null) {
+                    targets = new LinkedHashSet<>(steps.keySet());
+                    targets.remove(stepName);
+                }
+                for (String target : targets) {
+                    if (!steps.containsKey(target)) {
                         throw new IllegalStateException(
-                                "classify('" + stepName + "') routes to undeclared step '" + target
+                                "route('" + stepName + "') targets undeclared step '" + target
                                         + "' — declared steps: " + String.join(", ", stepOrder));
-                    }));
+                    }
+                }
+                resolved.put(stepName, Set.copyOf(targets));
+            }
+            this.resolvedTargets = Map.copyOf(resolved);
+
             return new AgentPipeline(this);
         }
     }
@@ -461,12 +634,14 @@ public final class AgentPipeline {
                     .filter(e -> !e.getKey().equals(entry))
                     .forEach(e -> b.step(e.getKey(), e.getValue()));
 
-            // Routers: terminal → stop, explicit transitions, else sequential
+            // Routers: terminal → stop, explicit transitions, else sequential. The target
+            // set for a conditional transition is every declared state — always safe,
+            // since a transition function can only ever return one of them (ADR-052 D2).
             for (String state : states.keySet()) {
                 if (terminals.contains(state)) {
-                    b.route(state, __ -> null);
+                    b.route(state, Set.of(), __ -> null);
                 } else if (transitions.containsKey(state)) {
-                    b.route(state, transitions.get(state));
+                    b.route(state, Set.copyOf(states.keySet()), transitions.get(state));
                 }
             }
 

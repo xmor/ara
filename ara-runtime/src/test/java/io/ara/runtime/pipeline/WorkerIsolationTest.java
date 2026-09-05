@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static io.ara.runtime.pipeline.PipelineTestAgents.echoAgent;
 import static org.junit.jupiter.api.Assertions.*;
@@ -55,7 +56,7 @@ class WorkerIsolationTest {
 
         AgentPipeline pipeline = AgentPipeline.builder()
                 .step("classify", stateWriter("classify", "intent", "BILLING", "{\"intent\":\"BILLING\"}"))
-                .route("classify", execution -> "billing")
+                .route("classify", Set.of("billing"), execution -> "billing")
                 .worker("billing", new AraAgent() {
                     final AgentId id = AgentId.of("billing");
                     @Override public AgentId agentId() { return id; }

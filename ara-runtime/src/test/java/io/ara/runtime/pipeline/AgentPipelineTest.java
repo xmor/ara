@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -95,7 +96,7 @@ class AgentPipelineTest {
 
         AgentPipeline pipeline = AgentPipeline.builder()
                 .step("loop", countingAgent)
-                .route("loop", execution -> calls.get() < 3 ? "loop" : null)
+                .route("loop", Set.of("loop"), execution -> calls.get() < 3 ? "loop" : null)
                 .build();
         PipelineResult r = pipeline.run("go");
         assertTrue(r.success());
@@ -110,7 +111,7 @@ class AgentPipelineTest {
                 .step("generate", generate)
                 .step("validate", echoAgent("validate", "still invalid"))
                 .step("giveUp",   echoAgent("giveUp",   "gave up"))
-                .route("validate", execution ->
+                .route("validate", Set.of("generate", "giveUp"), execution ->
                         execution.attemptsOf("generate") < 3 ? "generate" : "giveUp")
                 .maxSteps(12)
                 .build();
@@ -126,7 +127,7 @@ class AgentPipelineTest {
     void attemptsOf_isZero_forAStepThatHasNotRunYet() {
         AgentPipeline pipeline = AgentPipeline.builder()
                 .step("first", echoAgent("first", "out"))
-                .route("first", execution -> {
+                .route("first", Set.of(), execution -> {
                     assertEquals(0, execution.attemptsOf("never-declared"));
                     assertEquals(1, execution.attemptsOf("first"));
                     return null;
@@ -154,7 +155,7 @@ class AgentPipelineTest {
         AraAgent looping = echoAgent("loop", "out");
         AgentPipeline pipeline = AgentPipeline.builder()
                 .step("loop", looping)
-                .route("loop", execution -> "loop")  // infinite loop
+                .route("loop", Set.of("loop"), execution -> "loop")  // infinite loop
                 .maxSteps(5)
                 .build();
         PipelineResult r = pipeline.run("go");
@@ -167,7 +168,7 @@ class AgentPipelineTest {
         AgentPipeline pipeline = AgentPipeline.builder()
                 .step("first",  echoAgent("first",  "first-output"))
                 .step("second", echoAgent("second", "second-output"))
-                .route("second", execution -> {
+                .route("second", Set.of(), execution -> {
                     assertEquals("initial",      execution.initialInput());
                     assertEquals(2,              execution.stepCount());
                     assertEquals("second-output", execution.lastOutput());
@@ -238,26 +239,46 @@ class AgentPipelineTest {
     @Test
     void route_onUndeclaredStep_throws() {
         AgentPipeline.Builder builder = AgentPipeline.builder().step("a", echoAgent("a", "out"));
-        assertThrows(IllegalArgumentException.class, () -> builder.route("nonexistent", execution -> null));
+        assertThrows(IllegalArgumentException.class,
+                () -> builder.route("nonexistent", Set.of(), execution -> null));
     }
 
     @Test
-    void router_returningUndeclaredStepAtRuntime_failsGracefully() {
-        // Unlike route(stepName, ...), which validates stepName at build time, a router's
-        // *return value* is only known at runtime — a typo here must not crash run().
+    void route_withATargetThatIsNotADeclaredStep_failsAtBuildTime() {
+        // ADR-052 D2: unlike the untyped route(stepName, fn) — where a router's return
+        // value is only known at runtime — a declared target set is checked against the
+        // pipeline's steps at build(), the same way classify() already checks
+        // IntentRouter.targets(). A router whose only ever literal is "nonexistent" now
+        // fails here instead of surfacing as a runtime PipelineResult failure.
+        AgentPipeline.Builder builder = AgentPipeline.builder()
+                .step("a", echoAgent("a", "out-a"))
+                .step("b", echoAgent("b", "out-b"))
+                .route("a", Set.of("nonexistent"), execution -> "nonexistent");
+
+        IllegalStateException e = assertThrows(IllegalStateException.class, builder::build);
+        assertTrue(e.getMessage().contains("nonexistent"));
+        assertTrue(e.getMessage().contains("declared steps"));
+        assertTrue(e.getMessage().contains("a"));
+        assertTrue(e.getMessage().contains("b"));
+    }
+
+    @Test
+    void router_returningATargetOutsideItsDeclaredSet_failsGracefullyAtRuntime() {
+        // A router's declared target set is a contract on its RETURN VALUE, checked once
+        // per call — not a static analysis of its body. A router that violates its own
+        // contract at runtime (declares {"b"}, returns something else) must still fail
+        // the run cleanly instead of silently ending it or crashing run().
         AgentPipeline pipeline = AgentPipeline.builder()
                 .step("a", echoAgent("a", "out-a"))
                 .step("b", echoAgent("b", "out-b"))
-                .route("a", execution -> "nonexistent")
+                .route("a", Set.of("b"), execution -> "not-declared-for-a")
                 .build();
 
         PipelineResult r = pipeline.run("start");
 
         assertFalse(r.success());
-        assertTrue(r.failureReason().contains("nonexistent"));
+        assertTrue(r.failureReason().contains("not-declared-for-a"));
         assertTrue(r.failureReason().contains("declared steps"));
-        assertTrue(r.failureReason().contains("a"));
-        assertTrue(r.failureReason().contains("b"));
     }
 
     @Test

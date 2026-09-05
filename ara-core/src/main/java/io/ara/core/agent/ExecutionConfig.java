@@ -27,7 +27,8 @@ public record ExecutionConfig(
         Duration                  sessionTtl,
         List<String>              grantedScopes,
         List<String>              visibleToScopes,
-        List<String>              requiredScopes
+        List<String>              requiredScopes,
+        boolean                   requiresApproval
 ) {
     /** Idle time after which an unused session is reclaimed, when none is configured. */
     public static final Duration DEFAULT_SESSION_TTL = Duration.ofMinutes(30);
@@ -117,10 +118,29 @@ public record ExecutionConfig(
                 List.of(), List.of(), List.of());
     }
 
+    /**
+     * Backward-compatible constructor (ADR-033 Fase 7) — {@code requiresApproval} defaults
+     * to {@code false}: an agent gates on human approval before it can be invoked via
+     * delegation only when explicitly opted in, distinct from {@link #humanApprovalRequired}
+     * (which instead gates that agent's own <em>outgoing</em> tool calls, ADR-0067 D6).
+     */
+    public ExecutionConfig(
+            String plannerStrategy, StrategyConfig strategyConfig, List<String> enabledTools,
+            List<String> mcpServerIds, int maxIterations, Duration executionTimeout,
+            int maxTokensPerStep, boolean humanApprovalRequired, String knowledgeBaseId,
+            SessionBusyPolicy sessionBusyPolicy, String retrieverId,
+            DelegateStateAccess delegateStateAccess, Duration sessionTtl,
+            List<String> grantedScopes, List<String> visibleToScopes, List<String> requiredScopes) {
+        this(plannerStrategy, strategyConfig, enabledTools, mcpServerIds, maxIterations,
+                executionTimeout, maxTokensPerStep, humanApprovalRequired, knowledgeBaseId,
+                sessionBusyPolicy, retrieverId, delegateStateAccess, sessionTtl,
+                grantedScopes, visibleToScopes, requiredScopes, false);
+    }
+
     public static ExecutionConfig defaults() {
         return new ExecutionConfig("react", null, List.of(), List.of(),
                 10, Duration.ofMinutes(5), 4096, false, null, SessionBusyPolicy.REJECT, null,
                 DelegateStateAccess.OVERLAY, DEFAULT_SESSION_TTL,
-                List.of(), List.of(), List.of());
+                List.of(), List.of(), List.of(), false);
     }
 }

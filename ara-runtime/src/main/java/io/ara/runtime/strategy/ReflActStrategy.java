@@ -188,6 +188,13 @@ public final class ReflActStrategy implements ExecutionStrategy {
             totalOutputTokens += completion.outputTokens();
             String output = completion.text();
 
+            ExecutionResult runBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
+                    config, task, completion.promptTokens(), completion.outputTokens(),
+                    iterations, totalPromptTokens, totalOutputTokens, steps);
+            if (runBudgetExceeded != null) {
+                return runBudgetExceeded;
+            }
+
             ReactExecutionSupport.recordAssistantOutput(memory, steps, completion, output, iterations, task.taskId());
             ReactExecutionSupport.logIterationResult(completion, iterations, config.maxIterations(), task.taskId());
 
@@ -235,6 +242,12 @@ public final class ReflActStrategy implements ExecutionStrategy {
                             totalPromptTokens += usage.promptTokens();
                             totalOutputTokens += usage.outputTokens();
                             reflectionsUsed++;
+                            ExecutionResult reflectionBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
+                                    config, task, usage.promptTokens(), usage.outputTokens(),
+                                    iterations, totalPromptTokens, totalOutputTokens, steps);
+                            if (reflectionBudgetExceeded != null) {
+                                return reflectionBudgetExceeded;
+                            }
                         }
                     }
                     case ReactExecutionSupport.StepDecision.Continue ignored -> {
@@ -248,6 +261,12 @@ public final class ReflActStrategy implements ExecutionStrategy {
                             totalOutputTokens += usage.outputTokens();
                             reflectionsUsed++;
                             unproductiveStreak = 0;
+                            ExecutionResult reflectionBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
+                                    config, task, usage.promptTokens(), usage.outputTokens(),
+                                    iterations, totalPromptTokens, totalOutputTokens, steps);
+                            if (reflectionBudgetExceeded != null) {
+                                return reflectionBudgetExceeded;
+                            }
                         }
                     }
                 }

@@ -2,9 +2,12 @@ package io.ara.core.bus;
 
 import io.ara.core.agent.RunContext;
 import io.ara.core.agent.SessionId;
+import io.ara.core.auth.ExecutionContext;
+import io.ara.core.auth.ScopeSet;
 
 import java.time.Instant;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -31,6 +34,17 @@ import java.util.UUID;
  *       behavior). Set by {@link io.ara.core.agent.DelegateStateAccess}-aware callers so
  *       a delegate's {@code RunState} and conversation history can persist and be
  *       resumed across repeated delegations, instead of vanishing with each hop.</li>
+ *   <li>{@code senderScopes}  — the sender's authorization scopes (ADR-033 Fase 2),
+ *       checked by {@code LocalMessageBus} against the recipient's {@code requiredScopes}
+ *       before dispatch when no {@code executionContext} is present. Defaults to
+ *       {@link ScopeSet#EMPTY} — a message with no declared scopes satisfies only a
+ *       recipient that itself requires none, exactly today's unrestricted behavior.</li>
+ *   <li>{@code executionContext} — the full {@link ExecutionContext} (ADR-033 Fase 5),
+ *       superseding {@code senderScopes} wherever it is present: it carries a subject
+ *       identity across the whole delegation chain (on-behalf-of, ADR-033 Fase 6), not
+ *       just a single hop's {@link ScopeSet}. {@code LocalMessageBus} prefers this field
+ *       when set and falls back to {@code senderScopes} otherwise — every message built
+ *       before this field existed keeps behaving exactly as it did under Fase 2.</li>
  * </ul>
  *
  * <p>{@code runContext} is {@link RunContext#empty()} for replies: the answer flows
@@ -56,7 +70,9 @@ public record AgentMessage(
         String  correlationId,
         Instant sentAt,
         RunContext runContext,
-        SessionId sessionId
+        SessionId sessionId,
+        ScopeSet senderScopes,
+        Optional<ExecutionContext> executionContext
 ) {
 
     public AgentMessage {
@@ -68,6 +84,40 @@ public record AgentMessage(
         Objects.requireNonNull(sentAt,        "sentAt must not be null");
         if (content.isBlank()) throw new IllegalArgumentException("content must not be blank");
         runContext = Objects.requireNonNullElseGet(runContext, RunContext::empty);
+        senderScopes = Objects.requireNonNullElse(senderScopes, ScopeSet.EMPTY);
+        executionContext = Objects.requireNonNullElse(executionContext, Optional.empty());
+    }
+
+    /** Backwards-compatible constructor (ADR-033 Fase 2): {@code senderScopes} defaults to {@link ScopeSet#EMPTY}, no {@code executionContext}. */
+    public AgentMessage(String messageId, String senderId, String recipientId, String content,
+                        String correlationId, Instant sentAt, RunContext runContext, SessionId sessionId,
+                        ScopeSet senderScopes) {
+        this(messageId, senderId, recipientId, content, correlationId, sentAt, runContext, sessionId,
+                senderScopes, Optional.empty());
+    }
+
+    /** Backwards-compatible constructor (ADR-033 Fase 2): {@code senderScopes} defaults to {@link ScopeSet#EMPTY}. */
+    public AgentMessage(String messageId, String senderId, String recipientId, String content,
+                        String correlationId, Instant sentAt, RunContext runContext, SessionId sessionId) {
+        this(messageId, senderId, recipientId, content, correlationId, sentAt, runContext, sessionId, ScopeSet.EMPTY);
+    }
+
+    /** Returns a copy of this message with {@link #senderScopes} replaced (ADR-033 Fase 2). */
+    public AgentMessage withSenderScopes(ScopeSet senderScopes) {
+        return new AgentMessage(messageId, senderId, recipientId, content, correlationId, sentAt,
+                runContext, sessionId, Objects.requireNonNull(senderScopes, "senderScopes must not be null"),
+                executionContext);
+    }
+
+    /**
+     * Returns a copy of this message carrying {@code ctx} (ADR-033 Fase 5) — the richer,
+     * subject-aware replacement for {@link #withSenderScopes}. When both are set,
+     * {@code LocalMessageBus} prefers this one.
+     */
+    public AgentMessage withExecutionContext(ExecutionContext ctx) {
+        return new AgentMessage(messageId, senderId, recipientId, content, correlationId, sentAt,
+                runContext, sessionId, senderScopes,
+                Optional.ofNullable(ctx));
     }
 
     /**

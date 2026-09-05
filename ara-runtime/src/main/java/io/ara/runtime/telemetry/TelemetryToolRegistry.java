@@ -1,7 +1,10 @@
 package io.ara.runtime.telemetry;
 
 import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.RunContext;
+import io.ara.core.auth.ScopeSet;
 import io.ara.core.telemetry.AraTelemetry;
+import io.ara.runtime.bus.AgentDelegationTool;
 import io.ara.core.telemetry.Span;
 import io.ara.core.telemetry.SpanStatus;
 import io.ara.core.tool.AraTool;
@@ -95,6 +98,14 @@ public final class TelemetryToolRegistry implements ToolRegistry {
         String toolCallId = task.runContext().opaque(TOOL_CALL_ID_ATTACHMENT_KEY, String.class);
         if (toolCallId != null && !toolCallId.isBlank()) {
             spanBuilder.setAttribute("tool.call_id", toolCallId);
+        }
+        // ADR-0077 D5: for a delegation call, whether the caller carried a scope set for
+        // AgentDelegationTool to narrow across the hop. Computed from the task this
+        // registry already holds — no change to AgentDelegationTool's own telemetry.
+        if (AgentDelegationTool.TOOL_ID.equals(toolId)) {
+            boolean attenuationActive =
+                    task.runContext().opaque(RunContext.SCOPES_KEY, ScopeSet.class) != null;
+            spanBuilder.setAttribute("delegate.scope_attenuation_active", attenuationActive);
         }
         Span span = spanBuilder.startSpan();
         return executeWithSpan(span, () -> delegate.execute(toolId, argumentJson, task));

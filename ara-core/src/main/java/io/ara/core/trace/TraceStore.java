@@ -10,8 +10,10 @@ import java.util.List;
  * <p>Distinct from {@code CheckpointStore} (ADR-048 D2), not an extension of it. A
  * checkpoint store answers "what is the latest state to resume from" and may discard a
  * superseded checkpoint once a resume succeeds; a trace store answers "what happened, start
- * to finish, for this run" and its lifetime is governed by the differentiated retention of
- * ADR-0061, not by a resume. Same events, opposite lifecycles.
+ * to finish, for this run" and its lifetime is governed by a retention policy that varies
+ * by outcome — success, failure, flagged for review (ADR-0061) — never by whether a resume
+ * happened. Same events, opposite lifecycles: a checkpoint is disposable once superseded,
+ * a trace outlives the run it describes.
  */
 public interface TraceStore {
 

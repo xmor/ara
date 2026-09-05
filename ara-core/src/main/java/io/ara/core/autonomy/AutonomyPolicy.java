@@ -35,12 +35,16 @@ import java.util.Objects;
 @FunctionalInterface
 public interface AutonomyPolicy {
 
-    /** {@code true} if the action must escalate — conditions 1–3 of ADR-0073 D2, always evaluated. */
+    /**
+     * {@code true} if the action must escalate — the OR of the three conditions above
+     * (absolute floor, level floor, confidence threshold; ADR-0073 D2), always evaluated.
+     */
     boolean escalate(String taskClass, ToolSpec toolSpec, double confidence);
 
     /**
      * A policy that treats every {@code task_class} as fixed at {@code level}, ignoring any
-     * track record — the conditions 1–3 of ADR-0073 D2 evaluated against a constant level.
+     * track record — the same three conditions above evaluated against that constant level
+     * instead of one read from a ledger.
      * Useful as a default before an {@code AutonomyLedger} is wired, and in tests.
      */
     static AutonomyPolicy fixed(AutonomyLevel level) {

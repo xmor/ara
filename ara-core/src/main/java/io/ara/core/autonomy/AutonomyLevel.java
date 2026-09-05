@@ -13,9 +13,9 @@ import io.ara.core.tool.ToolSpec;
  *   <li>a <b>confidence threshold</b> — the {@code escalateBelow}-style cutoff (ADR-050):
  *       an action whose classifier confidence is under it escalates;</li>
  *   <li>an <b>audit sampling rate</b> — the fraction of autonomous executions selected for
- *       after-the-fact human review, reusing the ADR-0061 sampling infrastructure. Not a
- *       gate: the action already ran; a review that marks it bad feeds the ledger as an
- *       observed failure (ADR-0073 D1).</li>
+ *       after-the-fact human review, reusing the same trace-sampling machinery already built
+ *       for retention (ADR-0061). Not a gate: the action already ran; a review that marks it
+ *       bad feeds the ledger as an observed failure (ADR-0073 D1).</li>
  * </ul>
  *
  * <p><b>No level makes {@link Reversibility.IrreversibleHighImpact} autonomous</b> — not
@@ -27,8 +27,8 @@ import io.ara.core.tool.ToolSpec;
  *
  * <p>{@link #INITIAL} is A0: every new {@code task_class} starts fully gated and earns its
  * way up through {@code AutonomyLedger} (ADR-0073 D4 — no unearned trust). The numeric
- * values here are declared starting points, not values calibrated on real data
- * (ADR-0073, "Non affrontato").
+ * values here are declared starting points, not values calibrated on real data — that
+ * calibration is deliberately left as an open question in ADR-0073.
  */
 public enum AutonomyLevel {
 
@@ -60,15 +60,16 @@ public enum AutonomyLevel {
         this.auditSamplingRate   = auditSamplingRate;
     }
 
-    /** The {@code escalateBelow}-style cutoff for this level (ADR-0073 D1, column 3). */
+    /** The {@code escalateBelow}-style cutoff for this level — below it, escalate (ADR-0073 D1). */
     public double confidenceThreshold() {
         return confidenceThreshold;
     }
 
     /**
      * Fraction of autonomous executions at this level to sample for after-the-fact human
-     * review (ADR-0073 D1, column 4 — reuses ADR-0061 sampling). Between {@code 0.0} and
-     * {@code 1.0} inclusive.
+     * review — higher levels are audited less often, trading review volume for the trust
+     * already earned (ADR-0073 D1; reuses the ADR-0061 sampling machinery). Between
+     * {@code 0.0} and {@code 1.0} inclusive.
      */
     public double auditSamplingRate() {
         return auditSamplingRate;
@@ -76,7 +77,9 @@ public enum AutonomyLevel {
 
     /**
      * Whether an action carrying {@code reversibility} may run without a human gate at
-     * this level — the risk floor of ADR-0073 D2 condition 2.
+     * this level — {@code true} only when it is no more irreversible than this level's
+     * risk floor (e.g. A2 permits {@code Reversible} and {@code CostlyButReversible} but
+     * not {@code IrreversibleLowImpact}; ADR-0073 D2).
      * {@link Reversibility.IrreversibleHighImpact} is never permitted, at any level
      * (ADR-0073 D3).
      */

@@ -24,6 +24,7 @@ import java.util.Objects;
  * @param sandbox      {@code null} for {@link ToolOrigin#BUILTIN}; mandatory for {@link ToolOrigin#SYNTHESIZED}
  * @param origin       {@link ToolOrigin#BUILTIN} or {@link ToolOrigin#SYNTHESIZED}
  * @param tests        must be non-empty for a synthesized tool (§3.2.6)
+ * @param status       {@link ToolLifecycle} phase (ADR-0084 D5); defaults to {@link ToolLifecycle#DRAFT}
  */
 public record ToolSpec(
         String        toolId,
@@ -31,7 +32,8 @@ public record ToolSpec(
         Reversibility reversibility,
         SandboxPolicy sandbox,
         ToolOrigin    origin,
-        List<String>  tests
+        List<String>  tests,
+        ToolLifecycle status
 ) {
 
     public ToolSpec {
@@ -41,6 +43,7 @@ public record ToolSpec(
         Objects.requireNonNull(reversibility, "reversibility must not be null");
         origin = Objects.requireNonNullElse(origin, ToolOrigin.BUILTIN);
         tests = List.copyOf(Objects.requireNonNullElse(tests, List.of()));
+        status = Objects.requireNonNullElse(status, ToolLifecycle.DRAFT);
         if (origin == ToolOrigin.SYNTHESIZED && tests.isEmpty()) {
             throw new IllegalArgumentException(
                     "a synthesized tool must declare at least one test (§3.2.6, non-negotiable)");
@@ -48,6 +51,22 @@ public record ToolSpec(
         if (origin == ToolOrigin.SYNTHESIZED && sandbox == null) {
             throw new IllegalArgumentException("a synthesized tool must declare a sandbox policy");
         }
+    }
+
+    /**
+     * 6-arg constructor (the shape before {@code status}, ADR-0084 D5) — kept so every
+     * existing {@code new ToolSpec(...)} call from ADR-0067 keeps compiling with the phase
+     * defaulted to {@link ToolLifecycle#DRAFT}.
+     */
+    public ToolSpec(String toolId, SideEffects sideEffects, Reversibility reversibility,
+                    SandboxPolicy sandbox, ToolOrigin origin, List<String> tests) {
+        this(toolId, sideEffects, reversibility, sandbox, origin, tests, ToolLifecycle.DRAFT);
+    }
+
+    /** A copy in a different lifecycle phase (ADR-0084 D4). */
+    public ToolSpec withStatus(ToolLifecycle newStatus) {
+        return new ToolSpec(toolId, sideEffects, reversibility, sandbox, origin, tests,
+                Objects.requireNonNull(newStatus, "newStatus must not be null"));
     }
 
     /**

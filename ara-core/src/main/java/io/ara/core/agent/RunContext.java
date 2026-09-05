@@ -64,6 +64,31 @@ public record RunContext(
         RunState             userMemory
 ) {
 
+    /**
+     * {@link #opaque()} key under which the caller's current authorization scopes
+     * (an {@link io.ara.core.auth.ScopeSet}) travel across a delegation hop (ADR-0077 D2).
+     * Reusing the opaque channel rather than a fifth record field is deliberate: scopes
+     * are exactly the "an opaque object such as a {@code SecurityContext}" this channel's
+     * javadoc already anticipates, not a genuinely orthogonal lifecycle like
+     * {@code state}/{@code userMemory}. {@code AgentDelegationTool} narrows the value
+     * ({@code incoming ∩ ownGrantedScopes}) at every hop; nothing sets it today, so the
+     * narrowing is inert until an upstream mechanism populates it.
+     */
+    public static final String SCOPES_KEY = "io.ara.auth.scopes";
+
+    /**
+     * {@link #opaque()} key under which the caller's full {@link io.ara.core.auth.ExecutionContext}
+     * (ADR-033 Fase 5) travels across a delegation hop — a strict superset of {@link
+     * #SCOPES_KEY}: where that key carries only a bare {@code ScopeSet} for the current
+     * hop, this one also carries the subject identity (on-behalf-of, Fase 6) across the
+     * *whole* chain, not just one hop. {@code AgentDelegationTool} reads and re-attenuates
+     * this value exactly as it already does for {@link #SCOPES_KEY}, and sets both on the
+     * outgoing message when an incoming {@code ExecutionContext} is present. Absent for
+     * every task built before Fase 5 existed — reading it back {@code null} is the normal,
+     * zero-behavior-change case, not an error.
+     */
+    public static final String EXECUTION_CONTEXT_KEY = "io.ara.auth.executionContext";
+
     public RunContext {
         promptVars = Map.copyOf(Objects.requireNonNullElse(promptVars, Map.of()));
         opaque     = Map.copyOf(Objects.requireNonNullElse(opaque, Map.of()));

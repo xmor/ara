@@ -1,8 +1,10 @@
 package io.ara.runtime.bus;
 
 import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.AgentView;
 import io.ara.core.agent.DelegateStateAccess;
 import io.ara.core.agent.SessionStore;
+import io.ara.core.auth.ScopeSet;
 import io.ara.core.bus.MessageBus;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolCallNormalizer;
@@ -98,13 +100,31 @@ public final class DelegatingToolRegistry implements ToolRegistry {
      */
     public DelegatingToolRegistry(ToolRegistry inner, MessageBus bus, String selfId, Duration timeout,
                                    DelegateStateAccess stateAccess, SessionStore sessionStore) {
+        this(inner, bus, selfId, timeout, stateAccess, sessionStore, ScopeSet.EMPTY, null);
+    }
+
+    /**
+     * @param ownGrantedScopes this agent's own granted scopes — see {@link
+     *                         AgentDelegationTool}'s own constructor Javadoc for how it
+     *                         attenuates across a delegation hop (ADR-0077 D2) and doubles
+     *                         as the {@code senderScopes} {@link LocalMessageBus} checks
+     *                         at dispatch (ADR-033 Fase 2).
+     * @param agentView        (ADR-033 Fase 3 §3.3) a discovery-time visibility/authorization
+     *                         gate ahead of every delegation attempt; {@code null} skips it —
+     *                         see {@link AgentDelegationTool}'s own constructor Javadoc.
+     */
+    public DelegatingToolRegistry(ToolRegistry inner, MessageBus bus, String selfId, Duration timeout,
+                                   DelegateStateAccess stateAccess, SessionStore sessionStore,
+                                   ScopeSet ownGrantedScopes, AgentView agentView) {
         this.inner          = Objects.requireNonNull(inner,  "inner must not be null");
         this.delegationTool = new AgentDelegationTool(
                 Objects.requireNonNull(bus,    "bus must not be null"),
                 Objects.requireNonNull(selfId, "selfId must not be null"),
                 timeout,
                 Objects.requireNonNull(stateAccess, "stateAccess must not be null"),
-                Objects.requireNonNull(sessionStore, "sessionStore must not be null"));
+                Objects.requireNonNull(sessionStore, "sessionStore must not be null"),
+                ownGrantedScopes,
+                agentView);
     }
 
     @Override

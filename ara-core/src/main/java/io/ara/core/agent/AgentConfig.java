@@ -94,6 +94,7 @@ public record AgentConfig(
     public List<String>              grantedScopes()         { return execution.grantedScopes(); }
     public List<String>              visibleToScopes()       { return execution.visibleToScopes(); }
     public List<String>              requiredScopes()        { return execution.requiredScopes(); }
+    public boolean                   requiresApproval()      { return execution.requiresApproval(); }
 
     // -------------------------------------------------------------------------
     // Backward-compat delegation methods — memory
@@ -104,6 +105,7 @@ public record AgentConfig(
     public int    maxConversationTurns()     { return memory.maxConversationTurns(); }
     public int    maxReflections()           { return memory.maxReflections(); }
     public String reflectionPrompt()         { return memory.reflectionPrompt(); }
+    public String contextSummarizerAgentId() { return memory.contextSummarizerAgentId(); }
 
     // -------------------------------------------------------------------------
     // Factory
@@ -147,11 +149,13 @@ public record AgentConfig(
                 .grantedScopes(execution.grantedScopes())
                 .visibleToScopes(execution.visibleToScopes())
                 .requiredScopes(execution.requiredScopes())
+                .requiresApproval(execution.requiresApproval())
                 .workingMemoryTokenBudget(memory.workingMemoryTokenBudget())
                 .workingMemoryEviction(memory.workingMemoryEviction())
                 .maxConversationTurns(memory.maxConversationTurns())
                 .maxReflections(memory.maxReflections())
-                .reflectionPrompt(memory.reflectionPrompt());
+                .reflectionPrompt(memory.reflectionPrompt())
+                .contextSummarizerAgentId(memory.contextSummarizerAgentId());
     }
 
     // -------------------------------------------------------------------------
@@ -194,6 +198,7 @@ public record AgentConfig(
         private List<String>              grantedScopes         = List.of();
         private List<String>              visibleToScopes       = List.of();
         private List<String>              requiredScopes        = List.of();
+        private boolean                   requiresApproval      = false;
 
         // memory
         private int    workingMemoryTokenBudget = 0;
@@ -201,6 +206,7 @@ public record AgentConfig(
         private int    maxConversationTurns     = 0;
         private int    maxReflections           = 2;
         private String reflectionPrompt         = null;
+        private String contextSummarizerAgentId = null;
 
         private Builder() {}
 
@@ -267,6 +273,15 @@ public record AgentConfig(
         public Builder visibleToScopes(List<String> v)                 { visibleToScopes = v;       return this; }
         /** Scopes a caller must hold to invoke this agent; empty = no scopes required. */
         public Builder requiredScopes(List<String> v)                  { requiredScopes = v;        return this; }
+        /**
+         * Whether an attempt to invoke this agent via delegation must pause for human
+         * approval (ADR-033) — checked in addition to, not instead of, {@code
+         * requiredScopes}; scopes must still be satisfied first. Distinct from {@link
+         * #humanApprovalRequired(boolean)}, which instead gates this agent's own outgoing
+         * tool calls (ADR-0067 D6). Default {@code false} — no gate, matching the behavior
+         * before this per-invocation approval flag existed.
+         */
+        public Builder requiresApproval(boolean v)                     { requiresApproval = v;      return this; }
 
         // --- memory ---
         public Builder workingMemoryTokenBudget(int v)    { workingMemoryTokenBudget = v; return this; }
@@ -274,6 +289,7 @@ public record AgentConfig(
         public Builder maxConversationTurns(int v)        { maxConversationTurns = v;     return this; }
         public Builder maxReflections(int v)              { maxReflections = v;           return this; }
         public Builder reflectionPrompt(String v)         { reflectionPrompt = v;         return this; }
+        public Builder contextSummarizerAgentId(String v) { contextSummarizerAgentId = v; return this; }
 
         public AgentConfig build() {
             LlmProfile primary = primaryLlm != null ? primaryLlm : LlmProfile.builder().build();
@@ -289,11 +305,11 @@ public record AgentConfig(
                     maxIterations, executionTimeout, maxTokensPerStep,
                     humanApprovalRequired, knowledgeBaseId, sessionBusyPolicy, retrieverId,
                     delegateStateAccess, sessionTtl,
-                    grantedScopes, visibleToScopes, requiredScopes);
+                    grantedScopes, visibleToScopes, requiredScopes, requiresApproval);
 
             MemoryConfig mem = new MemoryConfig(
                     workingMemoryTokenBudget, workingMemoryEviction,
-                    maxConversationTurns, maxReflections, reflectionPrompt);
+                    maxConversationTurns, maxReflections, reflectionPrompt, contextSummarizerAgentId);
 
             return new AgentConfig(id, llmCfg, exec, mem);
         }

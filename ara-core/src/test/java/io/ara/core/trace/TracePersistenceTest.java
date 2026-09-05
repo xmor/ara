@@ -53,6 +53,31 @@ class TracePersistenceTest {
         assertEquals("run-42", s.runId());
     }
 
+    // D6 (ADR-0074) — failureKind: nullable, only valid on a Failed span
+    @Test
+    void span_failureKindIsNullByDefaultAndOnlyValidForFailedStatus() {
+        assertNull(span("r", "s").build().failureKind());
+
+        TraceSpan failed = span("r", "s")
+                .status(new SpanStatus.Failed("Cost budget exceeded"))
+                .failureKind("BUDGET_EXCEEDED")
+                .build();
+        assertEquals("BUDGET_EXCEEDED", failed.failureKind());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> span("r", "s").failureKind("BUDGET_EXCEEDED").build());
+        assertThrows(IllegalArgumentException.class,
+                () -> span("r", "s").status(new SpanStatus.Suspended("waiting"))
+                        .failureKind("TIMEOUT").build());
+    }
+
+    @Test
+    void span_preAdr0074ConstructorLeavesFailureKindUnset() {
+        TraceSpan s = new TraceSpan("r", "s", null, "a", null, null, null,
+                0, 0, Money.ZERO_EUR, new SpanStatus.Completed(), false, T0, T1);
+        assertNull(s.failureKind());
+    }
+
     @Test
     void span_carriesTheProvenanceFlagAsRecorded() {
         TraceSpan trusted = span("r", "s").build();
@@ -133,6 +158,22 @@ class TracePersistenceTest {
         assertInstanceOf(SpanStatus.Failed.class, runA.get(1).status());
         assertEquals(1, store.findByRunId("run-B").size());
         assertTrue(store.findByRunId("run-unknown").isEmpty());
+    }
+
+    // ADR-0074 D2/D4 — findSince: cross-run read filtered by span start
+    @Test
+    void traceStore_findSinceReturnsSpansAcrossRunsAtOrAfterInstant() {
+        TraceStore store = TraceStore.inMemory();
+        Instant early = Instant.parse("2026-08-01T00:00:00Z");
+        Instant late  = Instant.parse("2026-09-03T09:59:59Z");
+        store.append(TraceSpan.builder("run-A", "old", "a").startedAt(early).endedAt(early.plusSeconds(1)).build());
+        store.append(span("run-A", "recent").build());          // starts at T0
+        store.append(span("run-B", "recent").build());
+
+        assertEquals(3, store.findSince(Instant.EPOCH).size());
+        assertEquals(2, store.findSince(late).size());
+        assertEquals(0, store.findSince(T1.plusSeconds(1)).size());
+        assertTrue(store.findSince(T0).stream().allMatch(s -> !s.startedAt().isBefore(T0)));
     }
 
     @Test

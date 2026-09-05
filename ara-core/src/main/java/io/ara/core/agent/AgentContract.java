@@ -41,13 +41,23 @@ import java.util.Objects;
  *
  * <p>{@code mediaValidators} was added the same way, but with a 4-arg overload retaining the
  * previous shape, so this time direct positional calls keep compiling.
+ *
+ * <p>{@code inputSchema} (ADR-0077 D1) is the accessor symmetric to {@code outputSchema}:
+ * the input schema an agent (or a {@code task_class} whose handoff axis has been promoted,
+ * ADR-0055 D1) declares it expects, readable once without duplication. It adds
+ * <em>no new enforcement</em> — {@code ContractEnforcer} already rejects a failed
+ * {@code inputProcessors()} before {@code execute()} — it only closes the asymmetry where
+ * the declared output shape was discoverable and the input one was not. The 5-arg
+ * constructor keeps every prior {@code new AgentContract(...)} call compiling with
+ * {@code inputSchema = null}.
  */
 public record AgentContract(
         List<InputProcessor>  inputProcessors,
         List<MediaValidator>  mediaValidators,
         List<PromptShaper>    promptShapers,
         List<OutputProcessor> outputProcessors,
-        SchemaProvider        outputSchema
+        SchemaProvider        outputSchema,
+        SchemaProvider        inputSchema
 ) {
 
     public AgentContract {
@@ -55,7 +65,7 @@ public record AgentContract(
         mediaValidators  = List.copyOf(Objects.requireNonNullElse(mediaValidators,  List.of()));
         promptShapers    = List.copyOf(Objects.requireNonNullElse(promptShapers,    List.of()));
         outputProcessors = List.copyOf(Objects.requireNonNullElse(outputProcessors, List.of()));
-        // outputSchema may be null
+        // outputSchema / inputSchema may be null
     }
 
     /**
@@ -64,11 +74,21 @@ public record AgentContract(
      */
     public AgentContract(List<InputProcessor> inputProcessors, List<PromptShaper> promptShapers,
                          List<OutputProcessor> outputProcessors, SchemaProvider outputSchema) {
-        this(inputProcessors, List.of(), promptShapers, outputProcessors, outputSchema);
+        this(inputProcessors, List.of(), promptShapers, outputProcessors, outputSchema, null);
+    }
+
+    /**
+     * 5-arg constructor (the shape before {@code inputSchema}, ADR-0077 D1), kept so every
+     * existing direct {@code new AgentContract(...)} call keeps compiling unchanged.
+     */
+    public AgentContract(List<InputProcessor> inputProcessors, List<MediaValidator> mediaValidators,
+                         List<PromptShaper> promptShapers, List<OutputProcessor> outputProcessors,
+                         SchemaProvider outputSchema) {
+        this(inputProcessors, mediaValidators, promptShapers, outputProcessors, outputSchema, null);
     }
 
     public static AgentContract empty() {
-        return new AgentContract(List.of(), List.of(), List.of(), List.of(), null);
+        return new AgentContract(List.of(), List.of(), List.of(), List.of(), null, null);
     }
 
     public boolean isEmpty() {
@@ -76,7 +96,8 @@ public record AgentContract(
                 && mediaValidators.isEmpty()
                 && promptShapers.isEmpty()
                 && outputProcessors.isEmpty()
-                && outputSchema == null;
+                && outputSchema == null
+                && inputSchema == null;
     }
 
     public static Builder builder() {
@@ -90,6 +111,7 @@ public record AgentContract(
         private final List<PromptShaper>    shapers  = new ArrayList<>();
         private final List<OutputProcessor> outputs  = new ArrayList<>();
         private SchemaProvider              schema   = null;
+        private SchemaProvider              inSchema = null;
 
         private Builder() {}
 
@@ -117,13 +139,24 @@ public record AgentContract(
             return this;
         }
 
+        /**
+         * The input schema this contract declares (ADR-0077 D1) — symmetric to
+         * {@link #outputSchema}. Pass the same {@link SchemaProvider} instance to
+         * {@link #addInputProcessor} for it to be enforced; on its own this only makes the
+         * declared shape readable.
+         */
+        public Builder inputSchema(SchemaProvider schemaProvider) {
+            this.inSchema = Objects.requireNonNull(schemaProvider, "schemaProvider must not be null");
+            return this;
+        }
+
         public Builder addOutputProcessor(OutputProcessor processor) {
             outputs.add(Objects.requireNonNull(processor, "processor must not be null"));
             return this;
         }
 
         public AgentContract build() {
-            return new AgentContract(inputs, media, shapers, outputs, schema);
+            return new AgentContract(inputs, media, shapers, outputs, schema, inSchema);
         }
     }
 }

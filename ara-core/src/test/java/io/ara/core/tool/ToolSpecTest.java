@@ -73,6 +73,27 @@ class ToolSpecTest {
         assertThrows(IllegalArgumentException.class, () -> SandboxPolicy.denied(10, 0));
     }
 
+    // ADR-0084 D2 — the synthesized-tool default is network-denied, scoped fs, 30s/256MB
+    @Test
+    void sandboxPolicy_synthesizedDefault() {
+        SandboxPolicy p = SandboxPolicy.synthesizedDefault("run-42");
+        assertEquals(SandboxPolicy.Network.DENY, p.network());
+        assertEquals("/tmp/ara-forge-sandbox/run-42", p.fsScope());
+        assertEquals(30, p.timeoutSeconds());
+        assertEquals(256, p.memMb());
+    }
+
+    // ADR-0084 D5 — status is a 7th field, defaulting to DRAFT; 6-arg ctor still compiles
+    @Test
+    void toolSpec_statusDefaultsToDraftAndIsCopyable() {
+        ToolSpec sixArg = new ToolSpec("gen_tool", SideEffects.EXTERNAL_READ,
+                new Reversibility.Reversible(), SandboxPolicy.denied(30, 256),
+                ToolOrigin.SYNTHESIZED, List.of("t1"));
+        assertEquals(ToolLifecycle.DRAFT, sixArg.status());
+        assertEquals(ToolLifecycle.SHADOW, sixArg.withStatus(ToolLifecycle.SHADOW).status());
+        assertEquals("gen_tool", sixArg.withStatus(ToolLifecycle.SHADOW).toolId());
+    }
+
     // D5 — specFor default is empty, breaks no implementor
     @Test
     void toolRegistry_specFor_defaultsToEmpty() {

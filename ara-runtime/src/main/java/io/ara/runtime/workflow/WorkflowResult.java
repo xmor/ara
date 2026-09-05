@@ -1,6 +1,7 @@
 package io.ara.runtime.workflow;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -16,12 +17,23 @@ import java.util.Objects;
  * is something to resume a suspended run *into*; adding that distinction here now, with
  * nothing yet consuming it, would be exactly the premature abstraction the coding
  * guidelines ask to avoid.
+ *
+ * @param state every {@link WorkflowNode.Write} recorded so far, merged through the
+ *              graph's declared reducers (ADR-052 D3) — present even on a failed or
+ *              partial run, reflecting whatever was written before the run stopped.
  */
-public record WorkflowResult(List<JournalEntry> journal, boolean ok, String failureReason) {
+public record WorkflowResult(List<JournalEntry> journal, boolean ok, String failureReason, Map<String, Object> state) {
 
     public WorkflowResult {
         Objects.requireNonNull(journal, "journal must not be null");
+        Objects.requireNonNull(state, "state must not be null");
         journal = List.copyOf(journal);
+        state = Map.copyOf(state);
+    }
+
+    /** Backwards-compatible constructor: no shared state (ADR-052 D3). */
+    public WorkflowResult(List<JournalEntry> journal, boolean ok, String failureReason) {
+        this(journal, ok, failureReason, Map.of());
     }
 
     /** How many occurrences of this node reached a {@link JournalEntry.Finished} entry, of any outcome. */
