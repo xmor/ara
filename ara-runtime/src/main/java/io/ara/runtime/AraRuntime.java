@@ -138,6 +138,7 @@ public final class AraRuntime implements AutoCloseable {
     private final InstanceContextStore instanceContextStore;
     private final ApprovalGate     approvalGate;
     private final io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry;
+    private final io.ara.runtime.auth.AuthorizationService authorizationService;
     private final QuiescenceTracker quiescenceTracker = new QuiescenceTracker();
     private final Map<String, LlmClient> llmClients;
     private final ToolRegistry     toolRegistry;
@@ -162,6 +163,7 @@ public final class AraRuntime implements AutoCloseable {
             InstanceContextStore instanceContextStore,
             ApprovalGate approvalGate,
             io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry,
+            io.ara.core.auth.AbacPolicyEngine abacPolicyEngine,
             Map<String, LlmClient> llmClients,
             ToolRegistry toolRegistry,
             Map<String, Retriever> retrievers) {
@@ -173,6 +175,7 @@ public final class AraRuntime implements AutoCloseable {
         this.instanceContextStore = instanceContextStore;
         this.approvalGate  = approvalGate;
         this.temporaryScopeRegistry = temporaryScopeRegistry;
+        this.authorizationService = new io.ara.runtime.auth.AuthorizationService(abacPolicyEngine);
         this.llmClients    = llmClients;
         this.toolRegistry  = toolRegistry;
         this.retrievers    = retrievers;
@@ -715,6 +718,16 @@ public final class AraRuntime implements AutoCloseable {
     public ApprovalGate approvalGate() { return approvalGate; }
 
     /**
+     * ADR-033 Fase 2b — the {@link io.ara.runtime.auth.AuthorizationService} for this
+     * runtime. Never {@code null}: without {@link Builder#abacPolicies}, it still runs
+     * the scope check (Fasi 1-9) via {@link io.ara.runtime.auth.AuthorizationService#authorize},
+     * just with {@link io.ara.runtime.auth.AuthorizationService#abacEnabled()} {@code false}
+     * and the ABAC half a no-op. Not consulted automatically by anything in this runtime
+     * (see that class's own Javadoc for why) — a caller invokes it explicitly.
+     */
+    public io.ara.runtime.auth.AuthorizationService authorizationService() { return authorizationService; }
+
+    /**
      * Grants {@code agentId} a temporary, task-scoped set of scopes (ADR-033 Fase 8, S5) —
      * on top of whatever it already holds via {@link AgentConfig#grantedScopes()}, never in
      * place of it ({@link io.ara.core.auth.ScopeSet#union}, not {@code intersect}). The next
@@ -866,6 +879,7 @@ public final class AraRuntime implements AutoCloseable {
         private ApprovalGate approvalGate;
         private io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry =
                 new io.ara.runtime.auth.InMemoryTemporaryScopeRegistry();
+        private io.ara.core.auth.AbacPolicyEngine abacPolicyEngine;
         private Duration delegationTimeout = Duration.ofSeconds(AgentDelegationTool.DEFAULT_TIMEOUT_SEC);
         private AgentProvider agentProvider;
         private AraRuntimeConfig runtimeConfig;
@@ -1133,6 +1147,29 @@ public final class AraRuntime implements AutoCloseable {
         }
 
         /**
+         * ADR-033 Fase 2b (S8, Livello 1b) — opt-in ABAC layer, on top of the scope check
+         * (Fasi 1-9) that always applies. Not configured (the default) means {@link
+         * #authorizationService()} carries no {@code AbacPolicyEngine} and behaves
+         * identically to every phase before Fase 2b — this builds the engine and exposes
+         * it via {@code AraRuntime.authorizationService()} for a caller to use explicitly;
+         * see {@link io.ara.runtime.auth.AuthorizationService}'s own Javadoc for why it is
+         * not silently auto-wired into every dispatch.
+         *
+         * <pre>{@code
+         * .abacPolicies(policies -> policies
+         *     .add("clearance", ClearancePolicy.standard())
+         *     .combineWith(CompositeAbacPolicyEngine.CombiningAlgorithm.DENY_OVERRIDES))
+         * }</pre>
+         */
+        public Builder abacPolicies(java.util.function.Consumer<io.ara.runtime.auth.AbacPoliciesBuilder> configure) {
+            Objects.requireNonNull(configure, "configure must not be null");
+            io.ara.runtime.auth.AbacPoliciesBuilder b = new io.ara.runtime.auth.AbacPoliciesBuilder();
+            configure.accept(b);
+            this.abacPolicyEngine = b.build();
+            return this;
+        }
+
+        /**
          * Sets how long {@code delegate_task} waits for the target agent's reply before
          * failing the delegation, for every agent this runtime creates. Defaults to
          * {@value AgentDelegationTool#DEFAULT_TIMEOUT_SEC} seconds ({@link
@@ -1217,7 +1254,7 @@ public final class AraRuntime implements AutoCloseable {
 
             AgentScheduler scheduler = new LocalAgentScheduler(registry);
             return new AraRuntime(cfg, agentFactory, registry, agentProvider, scheduler, ctxStore,
-                    approvalGate, temporaryScopeRegistry,
+                    approvalGate, temporaryScopeRegistry, abacPolicyEngine,
                     Map.copyOf(instrumentedClients), discoveryRegistry(perAgentRegistries),
                     Map.copyOf(namedRetrievers));
         }
@@ -1366,9 +1403,20 @@ public final class AraRuntime implements AutoCloseable {
 
             return factoryBuilder
                     .toolRegistryFactory(agentCfg -> {
+                        // ADR-0077 D2's other declared gap, closed: ownGrantedScopes now
+                        // reflects this agent's own AgentConfig.grantedScopes() instead of
+                        // the implicit ScopeSet.EMPTY every caller got before — the
+                        // attenuation AgentDelegationTool already performs (incoming ∩
+                        // ownGrantedScopes) had a real ceiling to narrow against only when
+                        // constructed directly (e.g. the ara-private-examples delegation
+                        // example); every agent created through AraRuntime saw EMPTY
+                        // regardless of what it declared. agentView stays null (unchanged):
+                        // wiring registry.viewFor(...) here is a separate decision (ADR-033
+                        // Fase 3 §3.3's pre-check), not part of this fix.
                         ToolRegistry base = new DelegatingToolRegistry(
                                 perAgentToolRegistry.apply(agentCfg), messageBus, agentCfg.agentId().value(),
-                                delegationTimeout, agentCfg.delegateStateAccess(), sessionStore);
+                                delegationTimeout, agentCfg.delegateStateAccess(), sessionStore,
+                                io.ara.core.auth.ScopeSet.of(agentCfg.grantedScopes()), null);
                         // ADR-0067 D6: insert the approval decorator whenever a gate is
                         // configured, and let it decide per call whether a gate is needed
                         // (agent flag OR the tool's own ToolSpec.approvalRequired()) — so a

@@ -57,11 +57,12 @@ class ExecutionContextDelegationChainTest {
     void threeHopChain_CSeesOpsOnly_evenThoughAAndBCouldMore() {
         AgentRegistry registry = new AgentRegistry();
         AtomicReference<ExecutionContext> seenAtC = new AtomicReference<>();
-        // C's own ceiling, as registered — this is what LocalMessageBus.resolveExecutionContext
-        // attenuates against on the B→C hop, independently of what B's AgentDelegationTool
-        // itself was configured with (a pre-existing, documented seam: the two ceilings
-        // are not the same knob today; a consistent deployment keeps them in sync by hand).
-        registry.register(echoingLeaf(AgentId.of("C"), List.of("ops"), seenAtC));
+        // C's own grantedScopes is deliberately left empty and irrelevant here: the
+        // narrowing to "ops" comes entirely from each hop's AgentDelegationTool
+        // (ownGrantedScopes ctor param), never from LocalMessageBus re-intersecting
+        // against the recipient's own ceiling — a leaf agent that never delegates
+        // further, like C, correctly needs no grantedScopes of its own to be reachable.
+        registry.register(echoingLeaf(AgentId.of("C"), List.of(), seenAtC));
 
         LocalMessageBus bus = new LocalMessageBus(registry);
 
@@ -104,5 +105,37 @@ class ExecutionContextDelegationChainTest {
                 "C cannot see finance even though B could");
         assertFalse(atC.effectiveScopes().scopes().contains("hr"),
                 "C cannot see hr even though A could");
+    }
+
+    /**
+     * Regression test for a real bug found end-to-end (not in this file): {@code
+     * LocalMessageBus.resolveExecutionContext} used to re-intersect the incoming
+     * {@code ExecutionContext} against {@code recipient.config().grantedScopes()} — a
+     * leaf recipient with no reason to declare a ceiling of its own (it never delegates
+     * further) saw its caller's legitimately-attenuated authority silently zeroed before
+     * its own {@code requiredScopes} check ever ran. Fixed by relabeling the actor
+     * without a second intersection — {@code recipient}'s own ceiling only ever matters
+     * once {@code recipient} itself becomes a sender.
+     */
+    @Test
+    void leafRecipientWithNoGrantedScopesOfItsOwn_stillReceivesTheCallersFullAttenuatedGrant() {
+        AgentRegistry registry = new AgentRegistry();
+        AtomicReference<ExecutionContext> seenAtLeaf = new AtomicReference<>();
+        registry.register(echoingLeaf(AgentId.of("leaf"), List.of(), seenAtLeaf));
+
+        LocalMessageBus bus = new LocalMessageBus(registry);
+        AgentDelegationTool delegateToLeaf = new AgentDelegationTool(
+                bus, "caller", Duration.ofSeconds(5), DelegateStateAccess.OVERLAY,
+                SessionStore.noop(), ScopeSet.of("finance:read"));
+
+        AgentTask initial = AgentTask.of("start").withRunContext(
+                RunContext.empty().withOpaque(RunContext.EXECUTION_CONTEXT_KEY,
+                        ExecutionContext.ofAgent("caller", ScopeSet.of("finance:read"))));
+
+        ToolResult result = delegateToLeaf.execute("{\"agent_id\":\"leaf\",\"task\":\"go\"}", initial);
+
+        assertTrue(result.isSuccess(), result.error());
+        assertEquals(ScopeSet.of("finance:read"), seenAtLeaf.get().effectiveScopes(),
+                "the leaf's own empty grantedScopes must not zero out the caller's grant");
     }
 }

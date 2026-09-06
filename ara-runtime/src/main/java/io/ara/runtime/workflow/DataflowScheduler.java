@@ -499,11 +499,14 @@ public final class DataflowScheduler {
      *       never <em>when</em> the token arrived.</li>
      * </ul>
      *
-     * <p>The composed input joins every forward edge's token with {@code " | "}, in
-     * edge-declaration order — never completion order, which is what makes the join
-     * deterministic under concurrency. This is a placeholder join, not a policy: ADR-052
-     * D2 replaces it with a declared {@code MergeStrategy} once nodes are agent-shaped
-     * and have a real reason to compose differently.
+     * <p>The composed input takes every forward edge's token in edge-declaration order —
+     * never completion order, which is what makes the join deterministic under
+     * concurrency — and combines them with the node's declared {@link
+     * WorkflowNode#composer()}, falling back to joining them with {@code " | "} when none
+     * is declared. That fallback is a placeholder, not a policy, and it is only ever
+     * reached by a single-predecessor node: {@code Workflow.Builder}'s control #10 refuses
+     * to build a multi-predecessor node that declares no composer, so nothing silently
+     * relies on the placeholder to mean something.
      *
      * @return the composed input, or {@code null} if the node isn't ready yet
      */
@@ -537,11 +540,22 @@ public final class DataflowScheduler {
             return null; // every forward edge dead: this node is dead too, never fires
         }
 
-        return forward.stream()
+        List<String> ordered = forward.stream()
                 .filter(e -> !tokens.get(e).isEmpty())
                 .map(e -> tokens.get(e).peekFirst())
-                .reduce((a, b) -> a + " | " + b)
-                .orElseThrow();
+                .toList();
+        java.util.function.Function<List<String>, String> composer = graph.node(id).composer();
+        if (composer == null) {
+            return String.join(" | ", ordered);
+        }
+        String composed = composer.apply(ordered);
+        if (composed == null) {
+            // Returning null here would read as "not ready yet" and stall the node forever —
+            // a silent hang is the worst possible answer to a caller's bug, so it's loud.
+            throw new IllegalStateException(
+                    "composer for node '" + id + "' returned null for " + ordered.size() + " input(s)");
+        }
+        return composed;
     }
 
     private void consumeTokens(String id) {

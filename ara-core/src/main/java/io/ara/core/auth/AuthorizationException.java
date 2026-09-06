@@ -25,7 +25,9 @@ public class AuthorizationException extends AraException {
         /** The tool is not accessible with the caller's current scopes. */
         TOOL_NOT_AUTHORIZED,
         /** Scopes are satisfied but the target requires an explicit human approval (ADR-033 S4). */
-        APPROVAL_REQUIRED
+        APPROVAL_REQUIRED,
+        /** Scopes are satisfied but a configured ABAC policy denied the action (ADR-033 S8, Fase 2b). */
+        ABAC_POLICY_DENIED
     }
 
     private final Reason   reason;

@@ -209,20 +209,29 @@ public final class LocalMessageBus implements MessageBus {
     }
 
     /**
-     * ADR-033 Fase 5: attenuates the incoming {@link ExecutionContext} — when the message
-     * carries one — down to what {@code recipient} itself is granted, exactly the way
-     * {@code AgentDelegationTool} already narrows a bare {@link ScopeSet} (ADR-0077 D2/D3),
-     * but carrying the subject identity along instead of just a {@code ScopeSet}. {@code
-     * null} means "no {@code ExecutionContext} on this message" — every message built
-     * before this field existed, and every message a caller still builds with only {@link
-     * AgentMessage#withSenderScopes} — and is the signal for both call sites to fall back
+     * ADR-033 Fase 5: relabels the incoming {@link ExecutionContext} — when the message
+     * carries one — as belonging to {@code recipient}, carrying {@link
+     * ExecutionContext#effectiveScopes()} through <em>unchanged</em>. Deliberately NOT a
+     * second {@code intersect} against {@code recipient.config().grantedScopes()} here:
+     * a bug found the hard way (an end-to-end test with a real, auto-wired {@code
+     * delegate_task} against a leaf recipient that legitimately declares no {@code
+     * grantedScopes} of its own — it never delegates further, so it never needed a
+     * ceiling — got denied its own {@code requiredScopes} regardless of what the caller
+     * legitimately presented, because that recipient's empty ceiling intersected the
+     * caller's grant down to {@link ScopeSet#EMPTY} before the authorization check ever
+     * ran). {@code recipient}'s own ceiling still applies — correctly — the moment
+     * {@code recipient} itself becomes a sender: {@code AgentDelegationTool.delegate()}'s
+     * own {@code ownGrantedScopes} narrows there, exactly once, not redundantly here too.
+     * {@code null} means "no {@code ExecutionContext} on this message" — every message
+     * built before this field existed, and every message a caller still builds with only
+     * {@link AgentMessage#withSenderScopes} — the signal for both call sites to fall back
      * to {@link AgentMessage#senderScopes()} exactly as they did before this method existed.
      */
     private static ExecutionContext resolveExecutionContext(AgentMessage message, AraAgent recipient) {
         return message.executionContext()
-                .map(incoming -> incoming.delegate(
-                        recipient.agentId().value(),
-                        ScopeSet.of(recipient.config().grantedScopes())))
+                .map(incoming -> new ExecutionContext(
+                        recipient.agentId().value(), incoming.effectiveScopes(),
+                        incoming.subjectId(), incoming.subjectScopes()))
                 .orElse(null);
     }
 

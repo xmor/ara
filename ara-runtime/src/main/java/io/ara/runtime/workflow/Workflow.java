@@ -143,6 +143,36 @@ public final class Workflow {
         }
 
         /**
+         * Declares how an already-added node combines the tokens of its several forward
+         * incoming edges into its single input — the "declared way to compose them" that
+         * control #10 refuses to invent on a caller's behalf (ADR-052 D5, ADR-054 D1).
+         * The list arrives in edge-declaration order, never completion order.
+         *
+         * <p>It runs on the scheduler's control thread, so keep it cheap — shaping several
+         * inputs into one, never the work of choosing between them. A judge that compares
+         * N candidates does the comparing in its {@code body}, which runs on the pool; its
+         * composer only hands it the N candidates in one piece (see {@code
+         * io.ara.runtime.workflow.patterns.Tournament}).
+         *
+         * @throws IllegalArgumentException if {@code id} was never added via {@link #node}
+         */
+        public Builder composer(String id, Function<List<String>, String> composer) {
+            return replace(id, requireNode(id).withComposer(composer));
+        }
+
+        /**
+         * Compiles a declarative pattern spec into this builder (ADR-054's O3: patterns
+         * are specs that compile onto {@code WorkflowGraph}, never special node types in
+         * the scheduler). Each spec carries its own build-time checks and adds only nodes,
+         * edges and the per-node properties declared above — which is what keeps the
+         * scheduler free of any {@code case}/{@code instanceof} on node type (FF-6).
+         */
+        public Builder pattern(WorkflowPattern pattern) {
+            Objects.requireNonNull(pattern, "pattern must not be null").compileInto(this);
+            return this;
+        }
+
+        /**
          * Declares how two writes to the same shared-state {@code key} combine (ADR-052
          * D3) — e.g. {@code reduce("findings", Reducers.concatLists())}. See {@link
          * Reducers} for common combinators.
@@ -341,18 +371,26 @@ public final class Workflow {
          * Control #10 — a node with more than one <em>forward</em> (non-{@code back})
          * predecessor has no declared way to compose their outputs: D1's join concatenates
          * them with {@code " | "} (see {@code DataflowScheduler#enablingInput}'s own
-         * Javadoc), a placeholder its own author calls out, not a policy. Rejected outright
-         * until ADR-052 D3 gives a node a declared {@code MergeStrategy} to opt in with.
+         * Javadoc), a placeholder its own author calls out, not a policy.
+         *
+         * <p>Opting in is what {@link #composer} is for (ADR-054 D1): a node that declares
+         * one has said how its several inputs combine, so there is nothing left to guess
+         * and nothing to refuse. Without one the node is still rejected — the default
+         * stays "refuse rather than silently concatenate", which is the behaviour every
+         * graph built before composers existed already relies on.
          */
         private void checkAmbiguousFanIn(WorkflowGraph graph) {
             for (WorkflowNode node : graph.nodes()) {
+                if (node.composer() != null) {
+                    continue;
+                }
                 long forwardPredecessors = graph.in(node.id()).stream().filter(e -> !e.back()).count();
                 if (forwardPredecessors > 1) {
                     throw new IllegalStateException(
                             "node '" + node.id() + "' has " + forwardPredecessors + " forward predecessors with "
                                     + "no declared way to compose them (ADR-052 D5 control #10) — D1's join is a "
-                                    + "placeholder concatenation, not a policy; a declared merge strategy is "
-                                    + "ADR-052 D3, not available yet");
+                                    + "placeholder concatenation, not a policy; declare composer(\"" + node.id()
+                                    + "\", ...) to say how they combine");
                 }
             }
         }

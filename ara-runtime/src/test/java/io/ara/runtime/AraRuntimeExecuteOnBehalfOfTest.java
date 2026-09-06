@@ -141,13 +141,32 @@ class AraRuntimeExecuteOnBehalfOfTest {
     }
 
     @Test
-    void plainExecute_withoutExecuteOnBehalfOf_carriesNoExecutionContext_zeroBehaviorChange() {
+    void plainExecute_onAnAgentWithGrantedScopes_seedsItsOwnCeilingAsTheStartingContext() {
+        // ADR-0077 D2's declared external blocker, closed (AgentInstance.execute): a
+        // top-level task that carries neither an incoming attenuated scope (delegation)
+        // nor an OBO subject starts at this agent's own declared ceiling — the natural
+        // root of any delegation chain beneath it, not an unauthenticated void.
         AtomicReference<ExecutionContext> seen = new AtomicReference<>();
         Fixture fx = buildAgent(List.of("finance:read"), seen);
 
         AgentResponse response = fx.agent().execute(AgentTask.of("go"));
 
         assertTrue(response.isSuccess(), response.failureReason());
-        assertNull(seen.get(), "a task never routed through executeOnBehalfOf carries no ExecutionContext");
+        assertEquals(ScopeSet.of("finance:read"), seen.get().effectiveScopes());
+        assertEquals("finance-agent", seen.get().actorId());
+        assertNull(seen.get().subjectId(), "plain execute is M2M — no OBO subject");
+    }
+
+    @Test
+    void plainExecute_onAnAgentWithNoGrantedScopesConfigured_carriesNoExecutionContext_zeroBehaviorChange() {
+        // The overwhelming default today: an agent that never declared grantedScopes at
+        // all sees no new opaque keys, exactly as before this fix existed.
+        AtomicReference<ExecutionContext> seen = new AtomicReference<>();
+        Fixture fx = buildAgent(List.of(), seen);
+
+        AgentResponse response = fx.agent().execute(AgentTask.of("go"));
+
+        assertTrue(response.isSuccess(), response.failureReason());
+        assertNull(seen.get());
     }
 }

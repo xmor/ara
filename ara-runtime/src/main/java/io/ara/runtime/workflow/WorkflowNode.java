@@ -41,6 +41,18 @@ import java.util.function.Function;
  *                           means "writes nothing" — most nodes.
  * @param mapOver            declares this node as a dynamic fan-out source (ADR-052 D4);
  *                           {@code null} means "an ordinary node" — almost all of them.
+ * @param composer           how this node combines the tokens of its several forward
+ *                           incoming edges into its single input, in edge-declaration
+ *                           order (never completion order — that is what keeps a join
+ *                           deterministic under concurrency). {@code null} means "not
+ *                           declared", and a node with more than one forward predecessor
+ *                           that declares none is refused at build time
+ *                           ({@code Workflow.Builder}'s control #10) rather than silently
+ *                           joined by the placeholder concatenation. Runs on the
+ *                           scheduler's control thread, not the pool, so it must be
+ *                           cheap: a composer is for <em>shaping</em> the several inputs
+ *                           into one, never for the work of deciding between them — that
+ *                           belongs in {@link #body()}, which does run on the pool.
  */
 public record WorkflowNode(
         String id,
@@ -49,13 +61,21 @@ public record WorkflowNode(
         UncertainResumePolicy onUncertainResume,
         Function<String, Spend> cost,
         Write write,
-        MapOverSpec mapOver
+        MapOverSpec mapOver,
+        Function<List<String>, String> composer
 ) {
 
     public WorkflowNode {
         Objects.requireNonNull(id, "id must not be null");
         Objects.requireNonNull(body, "body must not be null");
         Objects.requireNonNull(onUncertainResume, "onUncertainResume must not be null");
+    }
+
+    /** Backwards-compatible constructor: a node that declares no {@link #composer}. */
+    public WorkflowNode(String id, Function<String, String> body, Function<String, Set<String>> selector,
+                        UncertainResumePolicy onUncertainResume, Function<String, Spend> cost, Write write,
+                        MapOverSpec mapOver) {
+        this(id, body, selector, onUncertainResume, cost, write, mapOver, null);
     }
 
     /** Backwards-compatible constructor: a node that declares no {@link #mapOver}. */
@@ -87,25 +107,34 @@ public record WorkflowNode(
 
     /** Returns a copy of this node with its {@link #onUncertainResume} policy replaced. */
     public WorkflowNode withOnUncertainResume(UncertainResumePolicy policy) {
-        return new WorkflowNode(id, body, selector, policy, cost, write, mapOver);
+        return new WorkflowNode(id, body, selector, policy, cost, write, mapOver, composer);
     }
 
     /** Returns a copy of this node with a {@link #cost} function that maps its output to the {@link Spend} it drew. */
     public WorkflowNode withCost(Function<String, Spend> cost) {
         return new WorkflowNode(id, body, selector, onUncertainResume,
-                Objects.requireNonNull(cost, "cost must not be null"), write, mapOver);
+                Objects.requireNonNull(cost, "cost must not be null"), write, mapOver, composer);
     }
 
     /** Returns a copy of this node with a {@link #write} that maps its output to a shared-state entry. */
     public WorkflowNode withWrite(Write write) {
         return new WorkflowNode(id, body, selector, onUncertainResume, cost,
-                Objects.requireNonNull(write, "write must not be null"), mapOver);
+                Objects.requireNonNull(write, "write must not be null"), mapOver, composer);
     }
 
     /** Returns a copy of this node with a {@link #mapOver} spec (ADR-052 D4). */
     public WorkflowNode withMapOver(MapOverSpec mapOver) {
         return new WorkflowNode(id, body, selector, onUncertainResume, cost, write,
-                Objects.requireNonNull(mapOver, "mapOver must not be null"));
+                Objects.requireNonNull(mapOver, "mapOver must not be null"), composer);
+    }
+
+    /**
+     * Returns a copy of this node with a {@link #composer} — the declared way it combines
+     * the tokens of several forward incoming edges (ADR-052 D5 control #10, ADR-054 D1).
+     */
+    public WorkflowNode withComposer(Function<List<String>, String> composer) {
+        return new WorkflowNode(id, body, selector, onUncertainResume, cost, write, mapOver,
+                Objects.requireNonNull(composer, "composer must not be null"));
     }
 
     /**

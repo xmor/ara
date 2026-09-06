@@ -11,6 +11,7 @@ import io.ara.core.agent.ConversationTurn;
 import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.ExecutionStrategy;
 import io.ara.core.agent.ExecutionTimeoutException;
+import io.ara.core.agent.RunContext;
 import io.ara.core.agent.RunState;
 import io.ara.core.agent.SessionBusyPolicy;
 import io.ara.core.agent.SessionId;
@@ -272,6 +273,28 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         }
 
         AgentConfig sessionConfig = session.wiring().config();
+
+        // ADR-0077 D2's declared external blocker, closed: "senza grantedScopes popolato
+        // da qualche meccanismo di configurazione/autenticazione a monte, incoming è
+        // sempre null" — this is that upstream mechanism, now that ADR-033 Fasi 1-9 give
+        // it somewhere real to flow to. Seeds this agent's OWN declared ceiling as the
+        // starting authorization context — but ONLY for a genuinely fresh, top-level task
+        // that carries neither channel yet: one delivered via AgentDelegationTool/
+        // LocalMessageBus already carries an attenuated incoming scope from a prior hop,
+        // and one built via AraRuntime.executeOnBehalfOf already carries the OBO subject —
+        // overwriting either here with this agent's own (wider) ceiling would defeat the
+        // whole attenuation chain. An agent with no grantedScopes configured (still the
+        // overwhelming default) seeds nothing — zero behavior change for the unconfigured
+        // case, exactly like the state/userMemory guards immediately above.
+        if (!sessionConfig.grantedScopes().isEmpty()
+                && effectiveTask.runContext().opaque(RunContext.SCOPES_KEY, io.ara.core.auth.ScopeSet.class) == null
+                && effectiveTask.executionContext().isEmpty()) {
+            io.ara.core.auth.ScopeSet ownScopes = io.ara.core.auth.ScopeSet.of(sessionConfig.grantedScopes());
+            effectiveTask = effectiveTask
+                    .withRunContext(effectiveTask.runContext().withOpaque(RunContext.SCOPES_KEY, ownScopes))
+                    .withExecutionContext(io.ara.core.auth.ExecutionContext.ofAgent(agentId().value(), ownScopes));
+        }
+
         String effectiveSystemPrompt = effectiveTask.runContext().promptVar(CTX_SYSTEM_PROMPT, sessionConfig.systemPrompt());
 
         return executeUnderSessionLock(effectiveTask, session, sessionConfig, effectiveSystemPrompt);
