@@ -10,6 +10,9 @@ import io.ara.core.memory.EpisodeLabel;
 import io.ara.core.memory.MemoryEntry;
 import io.ara.core.memory.SemanticStore;
 import io.ara.core.memory.ToolCallMetadata;
+import io.ara.core.telemetry.AraTelemetry;
+import io.ara.core.telemetry.Span;
+import io.ara.core.telemetry.SpanStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,6 +52,13 @@ import java.util.stream.Collectors;
  * {@link SemanticStore} before it is discarded (D3) and pulled back via
  * {@link #recallRelevant} (D4). Both are inert unless a store, an {@link EmbeddingClient}
  * and an {@code agentId} are all supplied.
+ *
+ * <h2>Telemetry (ADR-0078 D5)</h2>
+ * Emits {@code memory.evict} (once per eviction pass — {@code policy}, {@code
+ * entries_evicted}, {@code offloaded}, {@code summarized}) and {@code memory.recall} (once
+ * per {@link #recallRelevant} call that actually reaches the store — {@code
+ * recalled_count}). No preexisting span on either operation to extend, unlike most of this
+ * backlog's other D5/D6 decisions — both are new.
  */
 public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
 
@@ -85,6 +95,7 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
     private final SemanticStore   offloadStore;
     private final EmbeddingClient embeddingClient;
     private final String          agentId;
+    private final AraTelemetry    telemetry;
 
     /**
      * @param maxTokens token budget for working memory (0 = unlimited)
@@ -116,6 +127,13 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
      */
     public SlidingWindowMemoryManager(int maxTokens, EvictionPolicy policy, AraAgent summarizerAgent,
                                       SemanticStore offloadStore, EmbeddingClient embeddingClient, String agentId) {
+        this(maxTokens, policy, summarizerAgent, offloadStore, embeddingClient, agentId, AraTelemetry.noop());
+    }
+
+    /** Full form plus {@link AraTelemetry} for the {@code memory.evict}/{@code memory.recall} spans (ADR-0078 D5). */
+    public SlidingWindowMemoryManager(int maxTokens, EvictionPolicy policy, AraAgent summarizerAgent,
+                                      SemanticStore offloadStore, EmbeddingClient embeddingClient, String agentId,
+                                      AraTelemetry telemetry) {
         if (maxTokens < 0) throw new IllegalArgumentException("maxTokens must be >= 0");
         this.maxTokens       = maxTokens;
         this.policy          = policy != null ? policy : EvictionPolicy.DROP_MIDDLE;
@@ -123,6 +141,7 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
         this.offloadStore    = offloadStore;
         this.embeddingClient = embeddingClient;
         this.agentId         = agentId;
+        this.telemetry       = telemetry != null ? telemetry : AraTelemetry.noop();
     }
 
     private boolean offloadEnabled() {
@@ -149,32 +168,46 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
 
     // ── Eviction ──────────────────────────────────────────────────────────────
 
+    /** One eviction pass' outcome, for the {@code memory.evict} span (ADR-0078 D5). */
+    private record EvictionEvent(int entriesEvicted, boolean summarized) {}
+
     private void evictIfNeeded() {
         while (estimatedTokens() > maxTokens && working.size() > 1) {
-            switch (policy) {
+            EvictionEvent event = switch (policy) {
                 case DROP_OLDEST -> evictOldest();
                 case DROP_MIDDLE -> evictMiddle();
                 case SUMMARIZE   -> evictSummarize();
-            }
+            };
+            telemetry.spanBuilder("memory.evict")
+                    .setAttribute("policy", policy.name())
+                    .setAttribute("entries_evicted", (long) event.entriesEvicted())
+                    .setAttribute("offloaded", offloadEnabled())
+                    .setAttribute("summarized", event.summarized())
+                    .startSpan()
+                    .setStatus(SpanStatus.OK)
+                    .end();
         }
     }
 
-    private void evictOldest() {
-        if (working.isEmpty()) return;
+    private EvictionEvent evictOldest() {
+        if (working.isEmpty()) return new EvictionEvent(0, false);
         int[] bounds = toolCallGroupBounds(0);
         offloadBeforeDiscard(bounds[0], bounds[1]);
+        int evicted = bounds[1] - bounds[0];
         removeRange(bounds[0], bounds[1]);
+        return new EvictionEvent(evicted, false);
     }
 
-    private void evictMiddle() {
+    private EvictionEvent evictMiddle() {
         int size = working.size();
         if (size <= ANCHOR_COUNT * 2) {
-            evictOldest();
-            return;
+            return evictOldest();
         }
         int[] bounds = toolCallGroupBounds(ANCHOR_COUNT);
         offloadBeforeDiscard(bounds[0], bounds[1]);
+        int evicted = bounds[1] - bounds[0];
         removeRange(bounds[0], bounds[1]);
+        return new EvictionEvent(evicted, false);
     }
 
     /**
@@ -183,12 +216,11 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
      * summariser is configured, and on any failure/non-success from the summariser, so the
      * worst case is wasted latency, never a stuck turn.
      */
-    private void evictSummarize() {
+    private EvictionEvent evictSummarize() {
         if (summarizerAgent == null) {
             log.warn("SlidingWindowMemoryManager: SUMMARIZE policy configured with no summarizer agent "
                     + "— degrading to DROP_MIDDLE");
-            evictMiddle();
-            return;
+            return evictMiddle();
         }
         // Collapse the whole middle block (between the anchors) into one summary entry, so
         // the window always shrinks by at least one entry — a single-entry summarise could
@@ -200,26 +232,30 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
             end--;   // never end mid tool-call group
         }
         if (end - start < 2) {
-            evictMiddle();   // not enough middle to collapse without risking an orphaned tool result
-            return;
+            return evictMiddle();   // not enough middle to collapse without risking an orphaned tool result
         }
         String toSummarize = concatEntries(start, end);
         try {
             AgentResponse summary = summarizerAgent.execute(AgentTask.of(toSummarize));
             offloadBeforeDiscard(start, end);
+            int evicted = end - start;
             removeRange(start, end);
-            if (summary.isSuccess() && summary.content() != null && !summary.content().isBlank()) {
+            boolean summarized = summary.isSuccess() && summary.content() != null && !summary.content().isBlank();
+            if (summarized) {
                 working.add(start,
                         MemoryEntry.of("system", summary.content(), new EpisodeLabel("context_summary")));
             } else {
                 log.warn("SlidingWindowMemoryManager: summarizer agent produced no usable summary "
                         + "— dropped the range instead");
             }
+            return new EvictionEvent(evicted, summarized);
         } catch (RuntimeException e) {
             log.warn("SlidingWindowMemoryManager: summarizer agent failed ({}) — degrading to DROP_MIDDLE",
                     e.getMessage());
             offloadBeforeDiscard(start, end);
+            int evicted = end - start;
             removeRange(start, end);
+            return new EvictionEvent(evicted, false);
         }
     }
 
@@ -253,22 +289,30 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
         if (!offloadEnabled() || queryText == null || queryText.isBlank() || maxResults <= 0) {
             return;
         }
-        List<MemoryEntry> hits;
-        try {
-            hits = offloadStore.search(agentId, embeddingClient.embed(queryText), maxResults);
-        } catch (RuntimeException e) {
-            log.warn("SlidingWindowMemoryManager: recall search failed ({})", e.getMessage());
-            return;
+        Span span = telemetry.spanBuilder("memory.recall").startSpan();
+        try (var scope = span.makeCurrent()) {
+            List<MemoryEntry> hits;
+            try {
+                hits = offloadStore.search(agentId, embeddingClient.embed(queryText), maxResults);
+            } catch (RuntimeException e) {
+                log.warn("SlidingWindowMemoryManager: recall search failed ({})", e.getMessage());
+                span.setAttribute("recalled_count", 0L).setStatus(SpanStatus.ERROR);
+                return;
+            }
+            if (hits == null || hits.isEmpty()) {
+                span.setAttribute("recalled_count", 0L).setStatus(SpanStatus.OK);
+                return;
+            }
+            List<MemoryEntry> recalled = hits.stream()
+                    .filter(h -> h.content() != null && !h.content().isBlank())
+                    .map(h -> MemoryEntry.of(h.role() != null ? h.role() : "system",
+                            h.content(), new EpisodeLabel("recalled")))
+                    .collect(Collectors.toCollection(ArrayList::new));
+            working.addAll(0, recalled);
+            span.setAttribute("recalled_count", (long) recalled.size()).setStatus(SpanStatus.OK);
+        } finally {
+            span.end();
         }
-        if (hits == null || hits.isEmpty()) {
-            return;
-        }
-        List<MemoryEntry> recalled = hits.stream()
-                .filter(h -> h.content() != null && !h.content().isBlank())
-                .map(h -> MemoryEntry.of(h.role() != null ? h.role() : "system",
-                        h.content(), new EpisodeLabel("recalled")))
-                .collect(Collectors.toCollection(ArrayList::new));
-        working.addAll(0, recalled);
     }
 
     private String concatEntries(int fromInclusive, int toExclusive) {
