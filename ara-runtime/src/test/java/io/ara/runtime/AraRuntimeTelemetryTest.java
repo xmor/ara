@@ -320,4 +320,42 @@ class AraRuntimeTelemetryTest {
         }
         @Override public String providerId() { return "primary"; }
     }
+
+    /**
+     * ADR-0078 D5 / this session's wiring pass: {@code AraRuntime.Builder.defaultMemoryManager}
+     * is the one production call site that already constructs a real
+     * {@code SlidingWindowMemoryManager} (ADR-0086, for any agent with a positive
+     * {@code workingMemoryTokenBudget}) — it now forwards the runtime's own {@code telemetry}
+     * instead of leaving that constructor argument to default to {@code noop()}. Same
+     * eviction-forcing recipe as {@code AraRuntimeMemoryWiringTest.positiveBudget_...}, plus a
+     * real {@code AraTelemetry} to prove the span reaches it end-to-end through the runtime,
+     * not just when {@code SlidingWindowMemoryManager} is constructed directly in isolation.
+     */
+    @Test
+    void defaultMemoryManager_forwardsTheRuntimesTelemetry_evictionSpanIsRecorded() {
+        RecordingTelemetry telemetry = new RecordingTelemetry();
+        AraRuntime runtime = AraRuntime.builder()
+                .llmClient(ScriptedLlmClient.script().thenFinalAnswer("reply padding padding padding").build())
+                .telemetry(telemetry)
+                .build();
+        AraAgent agent = runtime.createAgent(AgentConfig.defaults()
+                .agentType("t").primaryLlm(LlmProfile.of("default")).plannerStrategy("react")
+                .maxConversationTurns(20)
+                .workingMemoryTokenBudget(30)
+                .workingMemoryEviction("drop_oldest")
+                .build());
+        io.ara.core.agent.SessionId session = io.ara.core.agent.SessionId.of("s1");
+
+        for (int i = 0; i < 10; i++) {
+            AgentResponse r = agent.execute(AgentTask.of("message " + i + " padding padding padding")
+                    .withSessionId(session));
+            assertTrue(r.isSuccess(), () -> "execute failed: " + r.failureReason());
+        }
+
+        List<RecordingTelemetry.RecordedSpan> evictSpans = telemetry.spansNamed("memory.evict");
+        assertFalse(evictSpans.isEmpty(),
+                "a bounded working-memory budget must evict over 10 turns, and every eviction must "
+                + "now reach the runtime's real AraTelemetry instead of the noop() default");
+        assertEquals("DROP_OLDEST", evictSpans.get(0).attributes().get("policy"));
+    }
 }
