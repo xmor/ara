@@ -76,6 +76,28 @@ class EvaluatorsTest {
     }
 
     @Test
+    void exactMatchField_extractsTheLastLabelledLine_ignoreCaseAndMissingConfig() {
+        var s = new io.ara.core.eval.evaluator.ExactMatchFieldEvaluator();
+        assertTrue(s.evaluate(output("some rationale\nCATEGORY: faulty_reasoning\nCONFIDENCE: 0.9"),
+                caseWith("exact_match_field", Map.of("field", "CATEGORY", "expected", "faulty_reasoning"))).passed());
+        assertFalse(s.evaluate(output("CATEGORY: wrong_tool_selected"),
+                caseWith("exact_match_field", Map.of("field", "CATEGORY", "expected", "faulty_reasoning"))).passed());
+        assertTrue(s.evaluate(output("Category: FAULTY_REASONING"),
+                caseWith("exact_match_field",
+                        Map.of("field", "Category", "expected", "faulty_reasoning", "ignore_case", "true"))).passed());
+        assertFalse(s.evaluate(output("no directive here"),
+                caseWith("exact_match_field", Map.of("field", "CATEGORY", "expected", "x"))).passed(),
+                "no matching line → fail, not an error");
+        assertFalse(s.evaluate(output("CATEGORY: a\nCATEGORY: b"),
+                caseWith("exact_match_field", Map.of("field", "CATEGORY", "expected", "a"))).passed(),
+                "the last occurrence wins");
+        assertFalse(s.evaluate(output("x"), caseWith("exact_match_field", Map.of("field", "CATEGORY"))).passed(),
+                "missing expected → error");
+        assertFalse(s.evaluate(output("x"), caseWith("exact_match_field", Map.of("expected", "y"))).passed(),
+                "missing field → error");
+    }
+
+    @Test
     void judgePlaceholder_isAdvisoryNeutral() {
         var r = new io.ara.core.eval.evaluator.PlaceholderJudgeEvaluator()
                 .evaluate(output("whatever"), caseWith("judge", Map.of()));
@@ -86,7 +108,7 @@ class EvaluatorsTest {
     @Test
     void defaultsRegistersEveryBuiltInId() {
         StrategyRegistry r = StrategyRegistry.defaults();
-        for (String id : List.of("exact_match", "regex", "contains", "non_empty",
+        for (String id : List.of("exact_match", "exact_match_field", "regex", "contains", "non_empty",
                 "json_well_formed", "schema", "assertion", "judge")) {
             assertTrue(r.has(id), id);
         }

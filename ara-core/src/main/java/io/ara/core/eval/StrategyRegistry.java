@@ -3,6 +3,7 @@ package io.ara.core.eval;
 import io.ara.core.eval.evaluator.AssertionEvaluator;
 import io.ara.core.eval.evaluator.ContainsEvaluator;
 import io.ara.core.eval.evaluator.ExactMatchEvaluator;
+import io.ara.core.eval.evaluator.ExactMatchFieldEvaluator;
 import io.ara.core.eval.evaluator.JsonWellFormedEvaluator;
 import io.ara.core.eval.evaluator.NonEmptyEvaluator;
 import io.ara.core.eval.evaluator.PlaceholderJudgeEvaluator;
@@ -18,10 +19,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * (ADR-0070 / ADR-019). {@code EvalRunner} looks each case's verifier up here; an
  * unregistered id is a hard failure at run time, never a silently skipped case.
  *
- * <p>{@link #defaults()} ships the deterministic built-ins (exact-match, regex, contains,
- * non-empty, well-formed-JSON, a composite assertion, and an advisory judge placeholder).
- * A caller registers a real LLM judge or a full JSON-Schema validator over the same ids to
- * upgrade them.
+ * <p>{@link #defaults()} ships the deterministic built-ins (exact-match, exact-match on one
+ * labelled directive line, regex, contains, non-empty, well-formed-JSON, a composite
+ * assertion, and an advisory judge placeholder). A caller registers a real LLM judge or a
+ * full JSON-Schema validator over the same ids to upgrade them.
  */
 public final class StrategyRegistry {
 
@@ -58,6 +59,7 @@ public final class StrategyRegistry {
         r.register("json_well_formed", new JsonWellFormedEvaluator());
         r.register("schema", new JsonWellFormedEvaluator());   // L0 stand-in — see JsonWellFormedEvaluator
         r.register("assertion", new AssertionEvaluator());
+        r.register("exact_match_field", new ExactMatchFieldEvaluator());
         r.register("judge", new PlaceholderJudgeEvaluator());
         return r;
     }
