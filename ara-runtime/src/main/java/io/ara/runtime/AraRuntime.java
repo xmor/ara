@@ -1282,7 +1282,7 @@ public final class AraRuntime implements AutoCloseable {
             return new SlidingWindowMemoryManager(
                     memory.workingMemoryTokenBudget(),
                     EvictionPolicy.from(memory.workingMemoryEviction()),
-                    summarizer, semanticStore, embeddingClient, agentCfg.agentId().value());
+                    summarizer, semanticStore, embeddingClient, agentCfg.agentId().value(), telemetry);
         }
 
         /** Fails fast on configurations {@link #build()} could not wire correctly. */
