@@ -30,6 +30,16 @@ import java.util.UUID;
  * applies a {@code must-match} filter on that field, so agents only see their
  * own memories.
  *
+ * <p><b>Multi-tenant scoping (ADR-0060 D2) is a caller convention, not a parameter of
+ * this class.</b> {@code agentId} is treated as an opaque string, used identically for
+ * the stored payload and the search filter — so a caller in a multi-tenant deployment
+ * composes {@code "<tenant>:<agentId>"} before calling {@link #upsert}/{@link #search},
+ * and the existing exact-match filter isolates tenants for free, on the same collection,
+ * with no change to this class. Forgetting to compose the prefix at a single call site
+ * is exactly the class of bug ADR-044 documents for a comparable framework (a derived key
+ * omitting one identity dimension) — this class cannot enforce the convention itself, only
+ * apply whatever string it is given.
+ *
  * <h2>Qdrant REST endpoints used</h2>
  * <ul>
  *   <li>{@code PUT  /collections/{name}}                       — create (idempotent)</li>
