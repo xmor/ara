@@ -49,10 +49,6 @@ public final class DocumentStore implements KbStore {
     private static final Logger      log    = LoggerFactory.getLogger(DocumentStore.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /** Maximum characters per chunk before splitting further. */
-    private static final int CHUNK_SIZE    = 600;
-    /** Character overlap between consecutive chunks for context continuity. */
-    private static final int CHUNK_OVERLAP = 80;
 
     private final QdrantConfig  config;
     private final EmbeddingClient embeddingClient;
@@ -267,63 +263,14 @@ public final class DocumentStore implements KbStore {
     // ── Chunking ──────────────────────────────────────────────────────────────
 
     /**
-     * Splits {@code text} into chunks of at most {@value #CHUNK_SIZE} characters
-     * with {@value #CHUNK_OVERLAP} characters of overlap.
-     *
-     * <p>Splits first on paragraph boundaries ({@code \n\n}), then on sentences
-     * ({@code . }) if a paragraph still exceeds the limit, and finally on a
-     * hard character window as a last resort.
+     * Delegates to {@link ChunkUtil#chunk(String)} which splits the text into
+ * overlapping chunks (max size {@value ChunkUtil#CHUNK_SIZE} characters and {@value ChunkUtil#CHUNK_OVERLAP} characters overlap). The method exists for
+     * backward compatibility with the original API.
      */
-    static List<String> chunk(String text) {
-        List<String> chunks = new ArrayList<>();
-        String[] paragraphs = text.split("\n\n+");
+     static List<String> chunk(String text) {
+         return ChunkUtil.chunk(text);
+     }
 
-        StringBuilder current = new StringBuilder();
-        for (String para : paragraphs) {
-            String p = para.strip();
-            if (p.isBlank()) continue;
-
-            if (current.length() + p.length() + 2 <= CHUNK_SIZE) {
-                if (!current.isEmpty()) current.append("\n\n");
-                current.append(p);
-            } else {
-                if (!current.isEmpty()) {
-                    chunks.add(current.toString());
-                    // overlap: keep last CHUNK_OVERLAP chars
-                    String tail = current.toString();
-                    current.setLength(0);
-                    if (tail.length() > CHUNK_OVERLAP) {
-                        current.append(tail.substring(tail.length() - CHUNK_OVERLAP));
-                    } else {
-                        current.append(tail);
-                    }
-                }
-                if (p.length() > CHUNK_SIZE) {
-                    // hard split on sentence boundaries or characters
-                    splitLarge(p, chunks);
-                } else {
-                    if (!current.isEmpty()) current.append("\n\n");
-                    current.append(p);
-                }
-            }
-        }
-        if (!current.isEmpty()) chunks.add(current.toString());
-        return chunks.isEmpty() ? List.of(text) : List.copyOf(chunks);
-    }
-
-    private static void splitLarge(String text, List<String> out) {
-        int start = 0;
-        while (start < text.length()) {
-            int end = Math.min(start + CHUNK_SIZE, text.length());
-            // try to break on a sentence boundary
-            if (end < text.length()) {
-                int dot = text.lastIndexOf(". ", end);
-                if (dot > start + CHUNK_SIZE / 2) end = dot + 2;
-            }
-            out.add(text.substring(start, end).strip());
-            start = Math.max(start + 1, end - CHUNK_OVERLAP);
-        }
-    }
 
     // ── HTTP helpers ──────────────────────────────────────────────────────────
 

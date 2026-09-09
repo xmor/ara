@@ -1212,51 +1212,45 @@ public final class AraRuntime implements AutoCloseable {
         }
 
         public AraRuntime build() {
+            // Validate configuration early to fail fast.
             validate();
 
-            AraRuntimeConfig cfg = runtimeConfig != null
-                    ? runtimeConfig
-                    : AraRuntimeConfig.defaults();
-            InstanceContextStore ctxStore = instanceContextStore != null
-                    ? instanceContextStore
-                    : new InstanceContextStore();
-
-            AgentRegistry   registry   = new AgentRegistry();
-            // ADR-0086: a builder that never calls memoryManagerFactory(...) still gets a
-            // real working memory — SlidingWindowMemoryManager wired from AgentConfig.memory()
-            // — instead of the unlimited InMemoryMemoryManager, whenever a token budget is
-            // actually configured. Budget 0 (the record's own default) reproduces exactly
-            // today's unlimited behaviour, so nothing changes for a config that never asked
-            // for a limit.
-            Function<AgentConfig, MemoryManager> memFactory = memoryManagerFactory != null
-                    ? memoryManagerFactory
-                    : agentCfg -> defaultMemoryManager(agentCfg, registry);
-            // ADR-033 Fase 7: the same ApprovalGate that gates a tool's own outgoing calls
-            // (ApprovalToolRegistry, below) also gates delegation INTO an agent that opted
-            // in via requiresApproval() — one Builder.approvalGate(...) call now covers
-            // both surfaces. null (the default) reproduces pre-Fase-7 behavior exactly.
+            // Resolve core components into separate helpers for readability.
+            AraRuntimeConfig cfg = resolveConfig();
+            InstanceContextStore ctxStore = resolveInstanceContextStore();
+            AgentRegistry registry = new AgentRegistry();
+            Function<AgentConfig, MemoryManager> memFactory = resolveMemoryFactory(registry);
             LocalMessageBus messageBus = new LocalMessageBus(registry, telemetry, approvalGate, temporaryScopeRegistry);
-
-            // Built once here (rather than inline in buildAgentFactory) so the very same
-            // instrumented clients back both AgentFactory's registry and the router
-            // ReflexionStrategy uses to resolve StrategyConfig.Reflexion#reflectionProvider()
-            // — no separate, uninstrumented path for reflection calls.
             Map<String, LlmClient> instrumentedClients = instrumentClients();
             ExecutionPlanner planner = buildExecutionPlanner(instrumentedClients);
-            // Populated by resolvePerAgentToolRegistry()'s wrapper every time the factory
-            // produces a registry for a newly created agent — the accumulator backing
-            // discoveryRegistry() below when toolRegistryFactory is in play.
             Map<String, ToolRegistry> perAgentRegistries = new java.util.concurrent.ConcurrentHashMap<>();
             Function<AgentConfig, ToolRegistry> perAgentToolRegistry = resolvePerAgentToolRegistry(perAgentRegistries);
-
             AgentFactory agentFactory = buildAgentFactory(
                     instrumentedClients, planner, perAgentToolRegistry, messageBus, memFactory, registry);
-
             AgentScheduler scheduler = new LocalAgentScheduler(registry);
             return new AraRuntime(cfg, agentFactory, registry, agentProvider, scheduler, ctxStore,
                     approvalGate, temporaryScopeRegistry, abacPolicyEngine,
                     Map.copyOf(instrumentedClients), discoveryRegistry(perAgentRegistries),
                     Map.copyOf(namedRetrievers));
+        }
+
+        // ── helper methods for build() ───────────────────────────────────────────────
+
+        /** Resolve the runtime configuration, falling back to defaults. */
+        private AraRuntimeConfig resolveConfig() {
+            return runtimeConfig != null ? runtimeConfig : AraRuntimeConfig.defaults();
+        }
+
+        /** Resolve the instance context store, creating a default one if none supplied. */
+        private InstanceContextStore resolveInstanceContextStore() {
+            return instanceContextStore != null ? instanceContextStore : new InstanceContextStore();
+        }
+
+        /** Resolve the memory manager factory, using the default if none was set. */
+        private Function<AgentConfig, MemoryManager> resolveMemoryFactory(AgentRegistry registry) {
+            return memoryManagerFactory != null
+                    ? memoryManagerFactory
+                    : agentCfg -> defaultMemoryManager(agentCfg, registry);
         }
 
         /**
