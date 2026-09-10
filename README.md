@@ -335,9 +335,9 @@ on virtual threads automatically — no configuration needed:
 
 ```
 LLM response → [get_weather(Rome), get_weather(London)]
-                      ↓ virtual thread         ↓ virtual thread
-                   300 ms I/O              300 ms I/O
-                      └──────────── ~300 ms total ──────────────┘
+                      ↓ virtual thread            ↓ virtual thread
+                   300 ms I/O                  300 ms I/O
+                      └──────── ~300 ms total ───────┘
 ```
 
 ---
