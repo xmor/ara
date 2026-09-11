@@ -115,6 +115,8 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
             List<AraTool> resolvedTools,
             AgentConfig config,
             String systemPrompt,
+            String plannerCatalog,
+            String stepCatalog,
             Instant deadline,
             int maxIterations,
             int maxStepRounds,
@@ -167,13 +169,24 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         // structured tool specs attached to the step-execution call context instead of
         // the text catalog/instructions (planning and synthesis never invoke tools
         // either way, so they are left untouched).
+        //
+        // The catalogs are precomputed once for the whole pass and carried on Run, like
+        // systemPrompt: resolvedTools is stable, yet rebuildStepMessages ran
+        // ToolCatalogFormatter.format per step round, re-serialising every tool schema.
+        List<AraTool> resolvedTools = tools.resolveEnabled(
+                config.enabledTools() != null ? config.enabledTools() : List.of());
+        boolean nativeTools = llm.supportsNativeTools();
+        String plannerCatalog = ToolCatalogFormatter.format(resolvedTools);
+        String stepCatalog = nativeTools ? "" : plannerCatalog;
+
         Run run = new Run(
                 task, llm, LlmCallContext.of(config, task), tools,
-                tools.resolveEnabled(config.enabledTools() != null ? config.enabledTools() : List.of()),
+                resolvedTools,
                 config, extractSystemPrompt(memory),
+                plannerCatalog, stepCatalog,
                 Instant.now().plus(config.executionTimeout()),
                 config.maxIterations(), pe.maxStepRoundsPerStep(),
-                llm.supportsNativeTools());
+                nativeTools);
         Tally tally = new Tally();
 
         // ── Phase 1: Planning ──────────────────────────────────────────────────
@@ -488,7 +501,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
     private List<LlmMessage> buildPlanningMessages(Run run, int maxPlanSteps) {
         return List.of(
                 new LlmMessage("system",
-                        run.systemPrompt() + ToolCatalogFormatter.format(run.resolvedTools()) + PLAN_SUFFIX),
+                        run.systemPrompt() + run.plannerCatalog() + PLAN_SUFFIX),
                 // The planner has to see the attachments too: "summarise this PDF" cannot be
                 // broken into steps by a model shown only the words around the document.
                 LlmMessage.user(
@@ -512,7 +525,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
             int currentStepIdx, List<LlmMessage> stepLocalHistory) {
 
         List<LlmMessage> messages = new ArrayList<>();
-        String toolCatalog = run.nativeTools() ? "" : ToolCatalogFormatter.format(run.resolvedTools());
+        String toolCatalog = run.stepCatalog();
         String execSuffix  = run.nativeTools() ? EXEC_SUFFIX_NATIVE : EXEC_SUFFIX;
         messages.add(new LlmMessage("system", run.systemPrompt() + toolCatalog + execSuffix));
         // Unlike the ReAct family, this strategy does not rebuild the conversation from

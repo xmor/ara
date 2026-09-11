@@ -1,23 +1,19 @@
 package io.ara.adapters.llm.anthropic;
 
-import io.ara.adapters.llm.CallParameterUtils;
-import io.ara.adapters.llm.ProviderErrorMapper;
-import io.ara.adapters.llm.TokenStreamPublisher;
-import io.ara.adapters.llm.ToolConversionUtils;
+import io.ara.adapters.llm.AbstractLangChain4jLlmClient;
+import io.ara.adapters.llm.AbstractLlmClientBuilder;
+import io.ara.adapters.llm.AbstractLlmClientBuilder.LlmSettings;
 import io.ara.core.llm.*;
 import io.ara.core.media.MediaTypes;
 import io.ara.core.media.MediaTypes.MediaKind;
 import dev.langchain4j.agent.tool.ToolSpecification;
-import dev.langchain4j.data.message.*;
 import dev.langchain4j.model.anthropic.AnthropicChatModel;
 import dev.langchain4j.model.anthropic.AnthropicStreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 
-import java.time.Duration;
-import java.util.*;
-import java.util.concurrent.Flow;
-import java.util.stream.Collectors;
+import java.util.Set;
 
 /**
  * {@link LlmClient} adapter for the <a href="https://www.anthropic.com/">Anthropic</a> API,
@@ -44,19 +40,24 @@ import java.util.stream.Collectors;
  * function-calling API.
  *
  * <h2>Streaming</h2>
- * <p>Tokens are emitted via {@link #stream(List, LlmCallContext)} using a server-sent
+ * <p>Tokens are emitted via the shared pipeline's {@code stream} method over a server-sent
  * events connection to the Anthropic streaming endpoint.
  *
  * @see LlmClient
  * @see AnthropicLlmClient.Models
  */
-public class AnthropicLlmClient implements LlmClient {
+public class AnthropicLlmClient extends AbstractLangChain4jLlmClient {
 
     private static final String PROVIDER = "Anthropic";
 
     private final AnthropicChatModel          chatModel;
     private final AnthropicStreamingChatModel streamingModel;
     private final String                      modelName;
+    /**
+     * Precomputed once: a pure function of the adapter's capabilities, which never change
+     * after construction — rebuilding the set on every request only allocates needlessly.
+     */
+    private final Set<String> supportedMediaTypes;
 
     // ── Model catalogue ───────────────────────────────────────────────────────
 
@@ -96,24 +97,27 @@ public class AnthropicLlmClient implements LlmClient {
     // ── Construction ──────────────────────────────────────────────────────────
 
     private AnthropicLlmClient(Builder builder) {
-        this.modelName = builder.modelName;
+        LlmSettings s = builder.settings();
+        this.modelName = s.modelName();
+        this.supportedMediaTypes =
+                MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT);
         this.chatModel = AnthropicChatModel.builder()
-                .apiKey(builder.apiKey)
-                .baseUrl(builder.baseUrl)
-                .modelName(builder.modelName)
-                .temperature(builder.temperature)
-                .maxTokens(builder.maxTokens)
-                .timeout(builder.timeout)
-                .logRequests(builder.logRequests)
-                .logResponses(builder.logResponses)
+                .apiKey(s.apiKey())
+                .baseUrl(s.baseUrl())
+                .modelName(s.modelName())
+                .temperature(s.temperature())
+                .maxTokens(s.maxTokens())
+                .timeout(s.timeout())
+                .logRequests(s.logRequests())
+                .logResponses(s.logResponses())
                 .build();
         this.streamingModel = AnthropicStreamingChatModel.builder()
-                .apiKey(builder.apiKey)
-                .baseUrl(builder.baseUrl)
-                .modelName(builder.modelName)
-                .temperature(builder.temperature)
-                .maxTokens(builder.maxTokens)
-                .timeout(builder.timeout)
+                .apiKey(s.apiKey())
+                .baseUrl(s.baseUrl())
+                .modelName(s.modelName())
+                .temperature(s.temperature())
+                .maxTokens(s.maxTokens())
+                .timeout(s.timeout())
                 .build();
     }
 
@@ -124,7 +128,7 @@ public class AnthropicLlmClient implements LlmClient {
         return "anthropic-" + modelName;
     }
 
-    /** Anthropic's tool use is sent natively — see {@link #complete} and its response mapping. */
+    /** Anthropic's tool use is sent natively — see the shared pipeline's response mapping in {@link AbstractLangChain4jLlmClient}. */
     @Override
     public boolean supportsNativeTools() {
         return true;
@@ -138,106 +142,27 @@ public class AnthropicLlmClient implements LlmClient {
      */
     @Override
     public Set<String> supportedMediaTypes() {
-        return MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT);
+        return supportedMediaTypes;
+    }
+
+    @Override
+    protected ChatResponse chat(ChatRequest request) {
+        return chatModel.chat(request);
     }
 
     /**
-     * Sends {@code messages} to the Anthropic Chat API and blocks until a completion arrives.
-     *
-     * @param messages the conversation history (system → user → assistant turns)
-     * @param context  per-call parameters: temperature override, max tokens, tool list, etc.
-     * @return the model's completion
-     * @throws LlmException on authentication failures, rate limits, context-length violations,
-     *                       network errors and unrecoverable server errors
+     * Streaming call into the shared {@code stream()} pipeline. Each token is emitted as an
+     * individual {@code String} item; the publisher completes normally on {@code STOP} or
+     * {@code END_TURN}, and exceptionally on any network or API error.
      */
     @Override
-    public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) throws LlmException {
-        try {
-            ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages, context));
-            CallParameterUtils.applyTo(reqBuilder, context);
-
-            if (context != null && context.hasResolvedTools()) {
-                reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
-            }
-
-            ChatResponse response = chatModel.chat(reqBuilder.build());
-            return toLlmCompletion(response);
-
-        } catch (LlmException ex) {
-            throw ex;
-        } catch (Exception ex) {
-            throw mapException(ex);
-        }
+    protected void streamChat(ChatRequest request, StreamingChatResponseHandler handler) {
+        streamingModel.chat(request, handler);
     }
 
-    /**
-     * Streams tokens from the Anthropic streaming endpoint.
-     *
-     * <p>Each token is emitted as an individual {@code String} item. The publisher
-     * completes normally on {@code STOP} or {@code END_TURN}, and exceptionally on any
-     * network or API error.
-     *
-     * @param messages the conversation history
-     * @param context  per-call parameters
-     * @return a {@link Flow.Publisher} of token strings
-     */
     @Override
-    public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-        return TokenStreamPublisher.of(
-                handler -> {
-                    ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                            .messages(toLC4jMessages(messages, context));
-                    CallParameterUtils.applyTo(reqBuilder, context);
-
-                    if (context != null && context.hasResolvedTools()) {
-                        reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
-                    }
-
-                    streamingModel.chat(reqBuilder.build(), handler);
-                },
-                this::mapException);
-    }
-
-    // ── Conversion helpers ────────────────────────────────────────────────────
-
-    private List<ChatMessage> toLC4jMessages(List<LlmMessage> messages, LlmCallContext context) {
-        // Delegates to ToolConversionUtils so "assistant_tool_call"/"assistant_tool_calls"/"tool"
-        // roles are reconstructed as native AiMessage(toolExecutionRequests)/
-        // ToolExecutionResultMessage instead of collapsing into a generic UserMessage — see its
-        // javadoc for the previous bug this replaced — and so media is checked against this
-        // client's declared types and flattened in one shared place.
-        return ToolConversionUtils.toNativeAwareChatMessages(messages, context, this);
-    }
-
-    private LlmCompletion toLlmCompletion(ChatResponse response) {
-        var ai = response.aiMessage();
-
-        String text = (ai != null && ai.text() != null) ? ai.text() : "";
-
-        String finishReason = response.finishReason() != null
-                ? response.finishReason().toString().toLowerCase() : "stop";
-        int inputTokens  = response.tokenUsage() != null ? response.tokenUsage().inputTokenCount()  : 0;
-        int outputTokens = response.tokenUsage() != null ? response.tokenUsage().outputTokenCount() : 0;
-
-        String toolCallJson = null;
-        String toolCallId   = null;
-        List<ToolCallEntry> toolCalls = List.of();
-        if (ai != null && ai.hasToolExecutionRequests()) {
-            // Map ALL requests: Claude can emit several tool_use blocks in one response.
-            var requests = ai.toolExecutionRequests();
-            toolCalls    = ToolConversionUtils.toToolCallEntries(requests);
-            toolCallJson = ToolConversionUtils.toLegacyToolCallJson(requests.get(0));
-            toolCallId   = requests.get(0).id();
-            finishReason = "tool_calls";
-        }
-
-        return new LlmCompletion(text, inputTokens, outputTokens, finishReason,
-                toolCallJson, toolCallId, toolCalls);
-    }
-
-    private LlmException mapException(Throwable ex) {
-        String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+    protected LlmException mapException(Throwable ex) {
+        String msg = errorMessage(ex);
         if (msg.contains("401") || msg.contains("authentication") || msg.contains("api_key")) {
             return LlmException.authenticationError(PROVIDER, msg);
         }
@@ -251,15 +176,7 @@ public class AnthropicLlmClient implements LlmClient {
             return LlmException.contextLengthExceeded(PROVIDER, modelName, 0, 0);
         }
 
-        // Before falling through to a retryable network error: langchain4j classifies HTTP
-        // failures onto its own retriable/non-retriable hierarchy, and reading that is both
-        // more accurate than the substring checks above and immune to a provider rewording
-        // its error bodies. Without it a malformed request (400) was reported as a network
-        // error — retryable — so the strategy retried it and every fallback in a failover
-        // pool was tried in turn, for a request that could not succeed on any of them.
-        LlmException typed = ProviderErrorMapper.fromTypedException(PROVIDER, ex);
-        if (typed != null) return typed;
-        return LlmException.networkError(PROVIDER, msg, ex);
+        return fallbackClassify(PROVIDER, msg, ex);
     }
 
     // ── Builder ───────────────────────────────────────────────────────────────
@@ -276,45 +193,21 @@ public class AnthropicLlmClient implements LlmClient {
     /**
      * Builder for {@link AnthropicLlmClient}.
      *
-     * <p>The only required field is {@link #apiKey(String)}. All other fields have
-     * sensible defaults ({@link Models#CLAUDE_SONNET_4_6}, temperature 0.7, 4096 max tokens).
+     * <p>Shared configuration (API key, base URL, model, temperature, max tokens, timeout,
+     * logging) lives in {@link AbstractLlmClientBuilder}; this class adds the {@link Models}
+     * catalogue and overrides the shared defaults max-tokens {@code 4096} (vs the base
+     * {@code 2000}) and model {@link Models#CLAUDE_SONNET_4_6}. The only required field is
+     * {@code apiKey}.
      */
-    public static final class Builder {
-        private String   apiKey;
-        private String   baseUrl;
-        private String   modelName   = Models.CLAUDE_SONNET_4_6.id;
-        private Double   temperature = 0.7;
-        private Integer  maxTokens   = 4096;
-        private Duration timeout     = Duration.ofSeconds(60);
-        private boolean  logRequests = false;
-        private boolean  logResponses= false;
+    public static final class Builder extends AbstractLlmClientBuilder<Builder> {
 
-        /** Sets the Anthropic API key (required). */
-        public Builder apiKey(String apiKey)       { this.apiKey = apiKey; return this; }
-
-        /** Overrides the default API base URL (useful for proxies and testing). */
-        public Builder baseUrl(String baseUrl)     { this.baseUrl = baseUrl; return this; }
-
-        /** Sets the model by string ID (use for non-catalogued or preview models). */
-        public Builder modelName(String modelName) { this.modelName = modelName; return this; }
+        public Builder() {
+            modelName = Models.CLAUDE_SONNET_4_6.id;
+            maxTokens = 4096;
+        }
 
         /** Sets the model from the {@link Models} catalogue (preferred). */
         public Builder model(Models model)         { this.modelName = model.id; return this; }
-
-        /** Sampling temperature. Defaults to {@code 0.7}. */
-        public Builder temperature(double t)       { this.temperature = t; return this; }
-
-        /** Maximum output tokens. Defaults to {@code 4096}. */
-        public Builder maxTokens(int maxTokens)    { this.maxTokens = maxTokens; return this; }
-
-        /** HTTP request timeout. Defaults to {@code 60s}. */
-        public Builder timeout(Duration timeout)   { this.timeout = timeout; return this; }
-
-        /** Enables LangChain4j request logging to SLF4J. */
-        public Builder logRequests(boolean v)      { this.logRequests = v; return this; }
-
-        /** Enables LangChain4j response logging to SLF4J. */
-        public Builder logResponses(boolean v)     { this.logResponses = v; return this; }
 
         /**
          * Builds the {@link AnthropicLlmClient}.

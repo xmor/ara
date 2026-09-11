@@ -1,6 +1,7 @@
 package io.ara.runtime.memory;
 
 import io.ara.core.memory.MemoryEntry;
+import io.ara.core.memory.SemanticEntry;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -65,6 +66,36 @@ class QdrantSemanticStoreTest {
 
             assertEquals(1, xResults.size());
             assertEquals("x's memory", xResults.get(0).content());
+        }
+    }
+
+    @Test
+    void batchUpsert_roundTripsTheWholeBatchForTheSameAgent() throws Exception {
+        try (FakeQdrantServer fake = FakeQdrantServer.start()) {
+            QdrantSemanticStore store = storeFor(fake);
+            store.ensureCollection();
+            store.upsertAll("agent-1", List.of(
+                    new SemanticEntry("episode", "task_completed", "first memory", vector(0.1f, 0.2f, 0.3f)),
+                    new SemanticEntry("episode", "task_completed", "second memory", vector(0.1f, 0.2f, 0.3f))));
+
+            List<MemoryEntry> results = store.search("agent-1", vector(0.1f, 0.2f, 0.3f), 10);
+
+            assertEquals(2, results.size(),
+                    "a batched upload must round-trip every entry, not just one");
+            assertEquals(List.of("first memory", "second memory"),
+                    results.stream().map(MemoryEntry::content).toList());
+        }
+    }
+
+    @Test
+    void batchUpsertWithNoEntries_makesNoRequest() throws Exception {
+        try (FakeQdrantServer fake = FakeQdrantServer.start()) {
+            QdrantSemanticStore store = storeFor(fake);
+            store.ensureCollection();
+            store.upsertAll("agent-1", List.of());
+
+            assertEquals(List.of(), store.search("agent-1", vector(0.1f, 0.2f, 0.3f), 10),
+                    "an empty batch must not write anything");
         }
     }
 

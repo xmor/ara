@@ -7,6 +7,7 @@ import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
+import io.ara.core.agent.SessionId;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
@@ -27,17 +28,32 @@ import java.util.concurrent.Flow;
  * A tiny web front-end for ARA token streaming — the browser equivalent of
  * {@code io.ara.examples.basics.SimpleStreamingExample}.
  *
- * <p>Serves an ARA-styled chat page and one Server-Sent-Events endpoint. Each request
- * runs a one-turn streaming agent ({@code streamingEnabled(true)} +
- * {@code AgentTask.ofStreaming(...)}); the {@code tokenCallback} writes every token to the
- * response as an SSE {@code token} event, and the page appends it to the bot bubble as it
- * arrives — exactly the gateway → SSE pattern named in {@code AgentTask}'s javadoc.
+ * <p>Serves an ARA-styled chat page and one Server-Sent-Events endpoint. A single
+ * long-lived agent handles every request, each one running a one-turn streaming task
+ * ({@code streamingEnabled(true)} + {@code AgentTask.ofStreaming(...)}); the {@code
+ * tokenCallback} writes every token to the response as an SSE {@code token} event, and
+ * the page appends it to the bot bubble as it arrives — exactly the gateway → SSE pattern
+ * named in {@code AgentTask}'s javadoc.
+ *
+ * <p>Two optimisations over a naive translate-every-request server, both deliberate
+ * demonstrations of the framework's habits: the {@link AgentConfig} is a final immutable
+ * record built once and shared by every request (a chat endpoint must not rebuild its
+ * agent wiring per message), and apart from the stateless per-task setup the agent is
+ * created once at startup — each request rides its own session and the runtime's idle-TTL
+ * sweep cleans them up, instead of paying create/destroy agent machinery per request.
+ *
+ * <p>The chat page keeps a stable per-browser session id and sends it along, so a
+ * conversation lives<b> inside the agent's working memory</b> across messages instead of
+ * being forgotten after one turn: this is what actually exercises the example's
+ * {@link io.ara.runtime.memory.SlidingWindowMemoryManager} budget — past the threshold the
+ * oldest turns are evicted (drop_middle) rather than replayed and re-sent on every call.
  *
  * <p>Run {@code main()} (from the IDE, or on the {@code ara-examples} runtime classpath),
- * then open <a href="http://localhost:8080">http://localhost:8080</a>. Options:
+ * then open <a href="http://localhost:8080">http://localhost:8080</a>. The page carries a
+ * <em>offline / live</em> toggle: the offline stub needs nothing, the live mode hits the
+ * model at {@link #LIVE_BASE_URL} (and shows an SSE error if the gateway is unreachable).
+ * Options:
  * <ul>
- *   <li>{@code live} as the first arg, or {@code -Dara.example.live=true} — use the real
- *       model at {@link #LIVE_BASE_URL} instead of the offline stub;</li>
  *   <li>{@code -Dara.web.port=9000} — change the port;</li>
  *   <li>{@code -Dara.api.key=…} / {@code ARA_API_KEY} — API key, if your gateway checks it.</li>
  * </ul>
@@ -52,53 +68,129 @@ public final class StreamingChatWebExample {
     private static final String LIVE_API_KEY  = firstNonBlank(
             System.getProperty("ara.api.key"), System.getenv("ARA_API_KEY"), "not-required");
 
+    /**
+     * The working-memory budget both agents are wired with — also the max the page's
+     * memory meter reports against. Past this many estimated tokens the
+     * {@link io.ara.runtime.memory.SlidingWindowMemoryManager} evicts old turns into
+     * the context instead of growing without bound.
+     */
+    private static final int MEMORY_TOKEN_BUDGET = 2000;
+
+    /**
+     * The immutable agent definition, built once and shared by every request. A record of
+     * records — constructing one per request would re-run all its validation for nothing.
+     * Two are built at startup, identical except for the LLM transport: {@code offline}
+     * words come from the local stub, {@code live} comes from {@link #LIVE_BASE_URL}. The
+     * page's offline/live toggle just picks which agent to route the request to.
+     */
+    private static final AgentConfig OFFLINE_AGENT = agentConfig("offline");
+    private static final AgentConfig LIVE_AGENT    = agentConfig("live");
+
+    private static AgentConfig agentConfig(String transportId) {
+        return AgentConfig.defaults()
+                .agentType("doc-assistant")
+                .systemPrompt("Sei l'assistente della documentazione di ARA. "
+                        + "Rispondi in italiano, in modo conciso e tecnico.")
+                .primaryLlm(LlmProfile.builder()
+                        .transportId(transportId)
+                        .streamingEnabled(true)
+                        .build())
+                .plannerStrategy("react")
+                .maxIterations(4)
+                // A working-memory budget activates the SlidingWindowMemoryManager
+                // (AraRuntime default wiring, ADR-0086): past the threshold the oldest
+                // turns are evicted instead of growing the context without bound.
+                // No summarizer agent is registered here, and "summarize" would degrade
+                // to drop_middle with a WARN — so ask for drop_middle explicitly.
+                // maxConversationTurns stays deliberately loose so the *token* budget
+                // (not a turn count) bounds the history: on a long conversation the
+                // memory meter climbs green → yellow → red, then plateaus where
+                // drop_middle starts evicting old turns.
+                .workingMemoryTokenBudget(MEMORY_TOKEN_BUDGET)
+                .workingMemoryEviction("drop_middle")
+                .maxConversationTurns(200)
+                .build();
+    }
+
+    /** The chat page, read once and served from memory instead of the classpath per hit. */
+    private static final byte[] STATIC_PAGE = loadStaticPage();
+
     public static void main(String[] args) throws IOException {
 
-        boolean live = Boolean.getBoolean("ara.example.live")
-                || (args.length > 0 && args[0].equalsIgnoreCase("live"));
-
-        LlmClient llm = live
-                ? OpenAiLlmClient.builder()
-                        .baseUrl(LIVE_BASE_URL).apiKey(LIVE_API_KEY).modelName(LIVE_MODEL).build()
-                : new WordStreamLlmClient();
-
-        AraRuntime runtime = AraRuntime.builder().llmClient("model", llm).build();
+        AraRuntime runtime = AraRuntime.builder()
+                // Both transports are registered up front, so the mode can be switched
+                // live from the page with no restart. The OpenAI client is just HTTP
+                // config until a call is made — a wrong gateway only fails per-request.
+                .llmClient("offline", new WordStreamLlmClient())
+                .llmClient("live", OpenAiLlmClient.builder()
+                        .baseUrl(LIVE_BASE_URL).apiKey(LIVE_API_KEY).modelName(LIVE_MODEL).build())
+                .build();
         runtime.start();
+
+        // One long-lived agent per mode for the whole server: each request gets its own
+        // session and one-turn task, so the shared agent is never left with stale state —
+        // and the runtime's session TTL sweep reclaims the sessions instead of the
+        // create/destroy-per-request churn of a naive server.
+        AraAgent offlineAgent = runtime.createAgent(OFFLINE_AGENT);
+        AraAgent liveAgent    = runtime.createAgent(LIVE_AGENT);
 
         HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 0);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.createContext("/", StreamingChatWebExample::serveStatic);
-        server.createContext("/chat", ex -> streamChat(ex, runtime));
+        server.createContext("/chat", ex -> streamChat(ex, offlineAgent, liveAgent));
         server.start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.stop(0);
-            runtime.close();
+            runtime.close();   // stop() destroys the registered agents
         }));
 
-        System.out.printf("ARA streaming chat  —  LLM: %s%n",
-                live ? "LIVE " + LIVE_MODEL + " @ " + LIVE_BASE_URL : "offline word-by-word stub");
+        System.out.printf("ARA streaming chat  —  LLM: offline stub / live %s @ %s (switchable from the page)%n",
+                LIVE_MODEL, LIVE_BASE_URL);
         System.out.printf("open  http://localhost:%d%n", PORT);
     }
 
     // ── static page ───────────────────────────────────────────────────────────
 
     private static void serveStatic(HttpExchange ex) throws IOException {
-        String path = ex.getRequestURI().getPath();
-        if ("/".equals(path)) path = "/streaming-chat.html";
-        try (InputStream in = StreamingChatWebExample.class.getResourceAsStream("/web" + path)) {
+        if ("/".equals(ex.getRequestURI().getPath()) || "/streaming-chat.html".equals(ex.getRequestURI().getPath())) {
+            ex.getResponseHeaders().add("Content-Type", "text/html; charset=utf-8");
+            ex.sendResponseHeaders(200, STATIC_PAGE.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(STATIC_PAGE); }
+            return;
+        }
+        try (InputStream in = StreamingChatWebExample.class.getResourceAsStream("/web" + ex.getRequestURI().getPath())) {
             if (in == null) { ex.sendResponseHeaders(404, -1); ex.close(); return; }
             byte[] body = in.readAllBytes();
-            ex.getResponseHeaders().add("Content-Type", contentType(path));
+            ex.getResponseHeaders().add("Content-Type", contentType(ex.getRequestURI().getPath()));
             ex.sendResponseHeaders(200, body.length);
             try (OutputStream os = ex.getResponseBody()) { os.write(body); }
         }
     }
 
+    /** Loads the single chat page at startup — fail fast if the resource is missing. */
+    private static byte[] loadStaticPage() {
+        try (InputStream in = StreamingChatWebExample.class.getResourceAsStream("/web/streaming-chat.html")) {
+            if (in == null) {
+                throw new IllegalStateException("missing classpath resource /web/streaming-chat.html");
+            }
+            return in.readAllBytes();
+        } catch (IOException e) {
+            throw new IllegalStateException("failed to load /web/streaming-chat.html", e);
+        }
+    }
+
     // ── SSE token stream ──────────────────────────────────────────────────────
 
-    private static void streamChat(HttpExchange ex, AraRuntime runtime) throws IOException {
-        String query = queryParam(ex.getRequestURI().getRawQuery(), "q");
+    private static void streamChat(HttpExchange ex, AraAgent offlineAgent, AraAgent liveAgent) throws IOException {
+        String query   = queryParam(ex.getRequestURI().getRawQuery(), "q");
+        String session = queryParam(ex.getRequestURI().getRawQuery(), "s");
+        String mode    = queryParam(ex.getRequestURI().getRawQuery(), "mode");
+
+        // The page's offline/live toggle selects the transport per request; the two
+        // agents are otherwise identical. Their session stores are separate, so the
+        // same session id keeps independent windows per mode.
+        AraAgent agent = "live".equalsIgnoreCase(mode) ? liveAgent : offlineAgent;
 
         ex.getResponseHeaders().add("Content-Type", "text/event-stream; charset=utf-8");
         ex.getResponseHeaders().add("Cache-Control", "no-cache");
@@ -112,30 +204,27 @@ public final class StreamingChatWebExample {
             return;
         }
 
-        AraAgent agent = runtime.createAgent(AgentConfig.defaults()
-                .agentType("doc-assistant")
-                .systemPrompt("Sei l'assistente della documentazione di ARA. "
-                        + "Rispondi in italiano, in modo conciso e tecnico.")
-                .primaryLlm(LlmProfile.builder()
-                        .transportId("model")
-                        .streamingEnabled(true)
-                        .build())
-                .plannerStrategy("react")
-                .maxIterations(4)
-                .build());
+        int[] chunks = {0};
+
+        // A browser-sent session id turns the one-shot stream into a multi-turn
+        // conversation: consecutive messages share the same working-memory window
+        // (and its token-budget eviction). No id — the task rides an ephemeral session.
+        AgentTask task = AgentTask.ofStreaming(query, token -> {
+            chunks[0]++;
+            try {
+                sse(os, "token", "{\"t\":" + jsonString(token) + "}");
+            } catch (IOException io) {
+                throw new RuntimeException(io);   // client went away — abort the run
+            }
+        });
+        if (session != null && !session.isBlank()) {
+            task = task.withSessionId(SessionId.of("web::" + session));
+        }
 
         try {
-            long   t0     = System.nanoTime();
-            int[]  chunks = {0};
+            long t0 = System.nanoTime();
 
-            AgentResponse resp = agent.execute(AgentTask.ofStreaming(query, token -> {
-                chunks[0]++;
-                try {
-                    sse(os, "token", "{\"t\":" + jsonString(token) + "}");
-                } catch (IOException io) {
-                    throw new RuntimeException(io);   // client went away — abort the run
-                }
-            }));
+            AgentResponse resp = agent.execute(task);
 
             long ms = (System.nanoTime() - t0) / 1_000_000;
             sse(os, "done", "{"
@@ -143,12 +232,18 @@ public final class StreamingChatWebExample {
                     + ",\"chunks\":" + chunks[0]
                     + ",\"ms\":" + ms
                     + ",\"tokens\":" + resp.totalTokens()
+                    // inputTokens is what actually reached the model this turn — for the
+                    // streaming path the runtime estimates it ~4 chars/token over the
+                    // window, the same rule the sliding-window budget uses. The page
+                    // renders both numbers as the server sends them (current + budget),
+                    // so editing MEMORY_TOKEN_BUDGET here needs no page-side change.
+                    + ",\"mem\":" + resp.inputTokens()
+                    + ",\"memMax\":" + MEMORY_TOKEN_BUDGET
                     + ",\"answer\":" + jsonString(resp.content())
                     + "}");
         } catch (RuntimeException e) {
             safeSse(os, "error", "{\"message\":" + jsonString(rootMessage(e)) + "}");
         } finally {
-            runtime.destroyAgent(agent);
             try { os.close(); } catch (IOException ignored) { }
         }
     }

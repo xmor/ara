@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.ara.core.memory.EpisodeLabel;
 import io.ara.core.memory.MemoryEntry;
+import io.ara.core.memory.SemanticEntry;
 import io.ara.core.memory.SemanticStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -128,26 +129,12 @@ public final class QdrantSemanticStore implements SemanticStore {
     public void upsert(String agentId, String role, String type,
                        String content, List<Float> vector) {
         try {
-            ObjectNode payload = MAPPER.createObjectNode();
-            payload.put("agent_id",  agentId);
-            payload.put("content",   content);
-            payload.put("role",      role);
-            payload.put("type",      type);
-            payload.put("timestamp", Instant.now().toString());
-
-            ObjectNode point = MAPPER.createObjectNode();
-            point.put("id", UUID.randomUUID().toString());
-            point.set("vector",  floatArray(vector));
-            point.set("payload", payload);
-
-            ArrayNode points = MAPPER.createArrayNode();
-            points.add(point);
-
-            ObjectNode body = MAPPER.createObjectNode();
-            body.set("points", points);
+            ArrayNode points = new ArrayNode(MAPPER.getNodeFactory());
+            points.add(buildPoint(agentId, new SemanticEntry(role, type, content, vector)));
 
             HttpResponse<String> r = send("PUT",
-                    "/collections/" + config.collectionName() + "/points", body);
+                    "/collections/" + config.collectionName() + "/points",
+                    body(points));
 
             if (r.statusCode() != 200) {
                 log.warn("[Qdrant] Upsert returned HTTP {} for agent={}: {}",
@@ -161,6 +148,57 @@ public final class QdrantSemanticStore implements SemanticStore {
         } catch (Exception e) {
             throw new RuntimeException("Qdrant upsert failed: " + e.getMessage(), e);
         }
+    }
+
+    @Override
+    public void upsertAll(String agentId, List<SemanticEntry> entries) {
+        if (entries.isEmpty()) {
+            return;   // a batch of zero is a wasted request
+        }
+        try {
+            ArrayNode points = MAPPER.createArrayNode();
+            for (SemanticEntry e : entries) {
+                points.add(buildPoint(agentId, e));
+            }
+
+            HttpResponse<String> r = send("PUT",
+                    "/collections/" + config.collectionName() + "/points",
+                    body(points));
+
+            if (r.statusCode() != 200) {
+                log.warn("[Qdrant] Batch upsert returned HTTP {} for agent={}: {}",
+                        r.statusCode(), agentId, r.body());
+            } else {
+                log.debug("[Qdrant] Batch upsert of {} point(s) for agent={}", entries.size(), agentId);
+            }
+
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Qdrant batch upsert failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** One Qdrant point: a fresh id, the vector, and the payload schema of the class javadoc. */
+    private ObjectNode buildPoint(String agentId, SemanticEntry e) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("agent_id",  agentId);
+        payload.put("content",   e.content());
+        payload.put("role",      e.role());
+        payload.put("type",      e.type());
+        payload.put("timestamp", Instant.now().toString());
+
+        ObjectNode point = MAPPER.createObjectNode();
+        point.put("id", UUID.randomUUID().toString());
+        point.set("vector",  floatArray(e.vector()));
+        point.set("payload", payload);
+        return point;
+    }
+
+    private ObjectNode body(ArrayNode points) {
+        ObjectNode body = MAPPER.createObjectNode();
+        body.set("points", points);
+        return body;
     }
 
     // ── Read ──────────────────────────────────────────────────────────────────

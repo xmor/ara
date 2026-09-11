@@ -5,6 +5,7 @@ import io.ara.core.agent.AgentTask;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
+import java.util.List;
 
 /**
  * Verifies that {@code temperature}/{@code topP} stay {@code null} end-to-end
@@ -86,5 +87,43 @@ class LlmCallContextTest {
         assertDoesNotThrow(() -> LlmProfile.builder().transportId("m").build());   // temperature left null
         assertThrows(IllegalArgumentException.class,
                 () -> LlmProfile.builder().transportId("m").temperature(3.0).build());
+    }
+
+    @Test
+    void withMediaResolver_sharesImmutableListsInsteadOfRecopying() {
+        AgentConfig config = configWith(LlmProfile.builder().transportId("gpt-4o").temperature(0.9));
+        LlmCallContext ctx = LlmCallContext.of(config, AgentTask.of("hi"))
+                .withStopSequences("\n", "\n\n");
+
+        LlmCallContext withResolver = ctx.withMediaResolver(ref -> new byte[0]);
+
+        assertSame(withResolver.stopSequences(), ctx.stopSequences(),
+                "the already-immutable stopSequences must be shared, not re-copied per call");
+        assertEquals(0.9, withResolver.temperature(), "all other fields must survive the copy");
+        assertEquals(ctx.maxOutputTokens(), withResolver.maxOutputTokens());
+        assertTrue(withResolver.hasMediaResolver(), "the resolver must be set on the copy");
+        assertFalse(ctx.hasMediaResolver(), "the source must stay untouched — with*() returns a new context");
+    }
+
+    @Test
+    void withMediaResolver_replacesAnExistingResolver() {
+        LlmCallContext ctx = LlmCallContext.of(
+                        configWith(LlmProfile.builder().transportId("gpt-4o")), AgentTask.of("hi"))
+                .withMediaResolver(ref -> new byte[0]);
+
+        LlmCallContext replaced = ctx.withMediaResolver(ref -> new byte[] {1});
+
+        assertTrue(replaced.hasMediaResolver());
+        assertNotSame(replaced.mediaResolver(), ctx.mediaResolver());
+    }
+
+    @Test
+    void withMediaResolver_nullFallsBackToNone() {
+        LlmCallContext ctx = LlmCallContext.of(
+                configWith(LlmProfile.builder().transportId("gpt-4o")), AgentTask.of("hi"));
+
+        LlmCallContext withNull = ctx.withMediaResolver(null);
+
+        assertFalse(withNull.hasMediaResolver(), "a null resolver must land on MediaResolver.none()");
     }
 }

@@ -91,6 +91,26 @@
     .theme-toggle:hover { color:var(--ink); border-color:var(--ink-soft); }
     .theme-toggle svg { width:14px; height:14px; }
     .theme-toggle svg[hidden] { display:none; }
+    /* offline/live pill: un click passa dal stub locale al modello reale (o viceversa) */
+    .mode-toggle {
+      display:inline-flex; align-items:center; gap:6px;
+      padding:3px 10px; cursor:pointer;
+      font-family:var(--mono); font-size:11px; color:var(--muted);
+      background:transparent; border:1px solid var(--line-strong); border-radius:999px;
+      transition:color .15s ease, border-color .15s ease, background .15s ease;
+    }
+    .mode-toggle:hover { color:var(--ink); border-color:var(--ink-soft); }
+    .mode-toggle .dot { width:7px; height:7px; border-radius:50%; background:var(--muted); transition:background .15s ease; }
+    .mode-toggle[aria-pressed="true"] { color:var(--ink); border-color:var(--ok); }
+    .mode-toggle[aria-pressed="true"] .dot { background:var(--ok); box-shadow:0 0 6px var(--ok); }
+    /* memory meter: what was really sent to the model this turn vs the window budget.
+       green → free, amber → fairly full, red → almost full (drop_middle holds the line). */
+    .mem { display:none; align-items:center; gap:7px; font-family:var(--mono); font-size:11px; color:var(--muted); white-space:nowrap; }
+    .mem.show { display:inline-flex; }
+    .mem-bar { width:64px; height:5px; border-radius:999px; background:var(--line); overflow:hidden; }
+    .mem-bar i { display:block; height:100%; width:0; border-radius:inherit; background:var(--ok); transition:width .35s ease, background .35s ease; }
+    .mem.hot .mem-bar i { background:#E8B64C; }
+    .mem.full .mem-bar i { background:var(--danger); }
 
     main {
       flex:1; width:100%; max-width:900px; margin:0 auto; padding:22px 20px;
@@ -224,7 +244,7 @@
     .jump svg { width:12px; height:12px; }
 
     .foot { text-align:center; font-family:var(--mono); font-size:11px; color:var(--muted); margin:10px 0 0; }
-    @media (max-width:560px){ .msg{max-width:90%;} main{padding:14px 12px;} }
+    @media (max-width:560px){ .msg{max-width:90%;} main{padding:14px 12px;} .mem-txt{display:none;} }
   </style>
 </head>
 <body>
@@ -233,6 +253,9 @@
   <div class="nav">
     <span class="brand"><span class="mark">ARA</span> <small>Java&nbsp;21</small></span>
     <span class="status" id="status">sessione non avviata</span>
+    <button class="mode-toggle" id="mode-toggle" type="button" aria-pressed="false" title="Passa alla modalità live">
+      <span class="dot"></span><span id="mode-label">offline</span>
+    </button>
     <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false" aria-label="Passa al tema chiaro">
       <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
       <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>
@@ -245,6 +268,10 @@
     <div class="card-bar">
       <span class="dots"><i></i><i></i><i></i></span>
       <span class="card-title">assistente documentazione — risposta in streaming (SSE)</span>
+      <span class="mem" id="mem" title="Working memory trasmessa al modello: valori inviati dal server a ogni turno. Verde = libera, giallo = ben occupata, rosso = quasi piena: oltre il budget scatta l'eviction drop_middle.">
+        <span class="mem-bar"><i id="mem-fill"></i></span>
+        <span id="mem-txt">mem – tok</span>
+      </span>
       <div class="bar-actions">
         <button class="bar-btn" id="clear-btn" type="button">pulisci</button>
       </div>
@@ -254,7 +281,8 @@
       <div class="intro" id="intro">
         <p>Ciao. Ogni risposta arriva token per token dal <code>tokenCallback</code> di un agente ARA
           (<code>streamingEnabled(true)</code> + <code>AgentTask.ofStreaming</code>), inoltrato via
-          Server-Sent-Events.</p>
+          Server-Sent-Events. Col pulsante in alto cambi modalità: <em>offline</em> usa lo stub locale,
+          <em>live</em> chiama il modello reale (richiede il gateway ARA).</p>
         <div class="sugg">
           <button type="button">Cos'è un contratto I/O a costo zero?</button>
           <button type="button">Quali strategie di esecuzione esistono?</button>
@@ -279,7 +307,7 @@
       </div>
     </form>
   </div>
-  <p class="foot">ARA streaming demo · un turno per richiesta · l'agente viene creato e distrutto per ogni domanda</p>
+  <p class="foot">ARA streaming demo · un agente condiviso · la conversazione vive nella working memory del browser (SlidingWindowMemoryManager — budget configurato lato server, riportato dal meter) · modalità offline/live dal pulsante in alto</p>
 </main>
 
 <script>
@@ -293,6 +321,9 @@
     var status     = document.getElementById("status");
     var clearBtn   = document.getElementById("clear-btn");
     var jumpBtn    = document.getElementById("jump");
+    var mem        = document.getElementById("mem");
+    var memFill    = document.getElementById("mem-fill");
+    var memTxt     = document.getElementById("mem-txt");
     var busy       = false;
     var es         = null;
     var timeoutId  = null;
@@ -331,6 +362,29 @@
       btn.className = "retry-btn";
       btn.textContent = "Riprova";
       parent.appendChild(btn);
+    }
+
+// Memory meter: both numbers come from the server on every turn — the current tokens
+// that reached the model (d.mem = inputTokens; for the streaming path the runtime
+// estimates them ~4 chars/token over the window, the same rule SlidingWindowMemoryManager
+// uses for its budget) and the budget itself (d.memMax). Nothing is hardcoded here:
+// change the budget server-side and the page follows. The bar is green while memory is
+// free, amber past 70%, red past 90% — meaning the drop_middle eviction is the only
+// thing keeping the window under budget.
+var memCur = 0, memMax = 0;
+    function updateMem(cur, max) {
+      if (typeof cur !== "number") return;
+      memCur = cur;
+      if (typeof max === "number" && max > 0) memMax = max;
+      var pct = memMax > 0 ? Math.max(0, Math.min(100, memCur / memMax * 100)) : 0;
+      memFill.style.width = pct.toFixed(1) + "%";
+      memTxt.textContent = "mem " + memCur + (memMax > 0 ? " / " + memMax : "") + " tok";
+      mem.classList.add("show");
+      mem.classList.toggle("hot", pct >= 70 && pct < 90);
+      mem.classList.toggle("full", pct >= 90);
+      mem.title = "Working memory trasmessa al modello: " + memCur + (memMax > 0 ? " / " + memMax : "") + " token ("
+          + (pct >= 90 ? "quasi piena — scatta drop_middle" : pct >= 70 ? "ben occupata" : "memoria libera")
+          + ")";
     }
 
     function setBusy(on) {
@@ -386,6 +440,9 @@
       forceScroll();
       status.textContent = "sessione non avviata";
       status.classList.remove("live");
+      mem.classList.remove("show", "hot", "full");
+      memFill.style.width = "0";
+      memTxt.textContent = "mem – tok";
       lastQuestion = "";
     }
 
@@ -403,7 +460,22 @@
       setBusy(true);
 
       var done = false;
-      es = new EventSource("chat?q=" + encodeURIComponent(q));
+      // A stable per-browser session id: consecutive messages share the same
+      // working-memory window on the server, so the conversation is remembered
+      // and its token-budget eviction (drop_middle) actually has something to do.
+      var sessionId;
+      try {
+        sessionId = localStorage.getItem("ara-session");
+        if (!sessionId) {
+          sessionId = (crypto.randomUUID && crypto.randomUUID()) || "tab" + Math.random().toString(36).slice(2);
+          localStorage.setItem("ara-session", sessionId);
+        }
+      } catch (e) {
+        sessionId = null;   // no storage (private mode?) — fall back to one-shot turns
+      }
+      es = new EventSource("chat?q=" + encodeURIComponent(q)
+          + (sessionId ? "&s=" + encodeURIComponent(sessionId) : "")
+          + "&mode=" + encodeURIComponent(mode));
 
       timeoutId = setTimeout(function () {
         if (!done) {
@@ -441,8 +513,9 @@
         bot.classList.remove("streaming");
         autoScroll();
         status.textContent = (d.chunks || 0) + " chunk · " + (d.ms || 0) + " ms · " + (d.tokens || 0) + " tok";
-        status.classList.remove("live");
-        stop();
+status.classList.remove("live");
+      updateMem(d.mem, d.memMax);
+      stop();
       });
 
       es.addEventListener("error", function (e) {
@@ -524,6 +597,30 @@
     // Il pulsante invio fa da stop mentre lo stream è in corso.
     send.addEventListener("click", function (e) {
       if (busy) { e.preventDefault(); onStopClick(); }
+    });
+
+    // offline/live toggle: the server runs one agent per transport, the page picks
+    // which one answers per request. Persisted like the theme, so the choice survives
+    // a reload. Each transport has its own working-memory window for the same session
+    // id, so switching mode mid-conversation starts a fresh window on the other side.
+    var modeBtn = document.getElementById("mode-toggle");
+    var modeLbl = document.getElementById("mode-label");
+    var mode;
+    try { mode = localStorage.getItem("ara-mode"); } catch (e) {}
+    if (mode !== "live") mode = "offline";
+    function applyMode(m) {
+      mode = m;
+      modeLbl.textContent = m;
+      modeBtn.setAttribute("aria-pressed", String(m === "live"));
+      modeBtn.setAttribute("title", m === "live"
+          ? "Passa alla modalità offline (stub locale)"
+          : "Passa alla modalità live (richiede il gateway ARA)");
+      try { localStorage.setItem("ara-mode", m); } catch (x) {}
+    }
+    applyMode(mode);
+    modeBtn.addEventListener("click", function () {
+      if (busy) return;             // non cambiare trasporto a stream aperto
+      applyMode(mode === "live" ? "offline" : "live");
     });
 
     // theme toggle

@@ -2,11 +2,13 @@ package io.ara.adapters.mcp;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.client.McpClient;
+import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.client.transport.HttpClientSseClientTransport;
 import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
 import io.modelcontextprotocol.client.transport.ServerParameters;
 import io.modelcontextprotocol.client.transport.StdioClientTransport;
 import io.modelcontextprotocol.json.jackson2.JacksonMcpJsonMapper;
+import io.modelcontextprotocol.spec.McpClientTransport;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -56,6 +58,19 @@ public final class McpClientFactory {
         return Executors.newVirtualThreadPerTaskExecutor();
     }
 
+    /**
+     * Builds a synchronous SDK client over an already-configured transport, performs the
+     * mandatory MCP {@code initialize()} handshake, and wraps it as an {@link AraMcpClientAdapter}.
+     * Every factory method shares this tail — only the transport construction differs.
+     */
+    private static AraMcpClientAdapter connect(McpClientTransport transport, Executor executor) {
+        McpSyncClient sdkClient = McpClient.sync(transport)
+                .requestTimeout(DEFAULT_TIMEOUT)
+                .build();
+        sdkClient.initialize();
+        return new AraMcpClientAdapter(sdkClient, executor);
+    }
+
     // ── SSE transport ─────────────────────────────────────────────────────────
 
     /**
@@ -74,11 +89,7 @@ public final class McpClientFactory {
         var transport = HttpClientSseClientTransport.builder(serverUrl)
                 .jsonMapper(DEFAULT_JSON_MAPPER)
                 .build();
-        var sdkClient = McpClient.sync(transport)
-                .requestTimeout(DEFAULT_TIMEOUT)
-                .build();
-        sdkClient.initialize();
-        return new AraMcpClientAdapter(sdkClient, executor);
+        return connect(transport, executor);
     }
 
     // ── Streamable HTTP transport ────────────────────────────────────────────
@@ -119,11 +130,7 @@ public final class McpClientFactory {
             transportBuilder.customizeRequest(request -> request.header("Authorization", "Bearer " + bearerToken));
         }
         var transport = transportBuilder.build();
-        var sdkClient = McpClient.sync(transport)
-                .requestTimeout(DEFAULT_TIMEOUT)
-                .build();
-        sdkClient.initialize();
-        return new AraMcpClientAdapter(sdkClient, executor);
+        return connect(transport, executor);
     }
 
     // ── STDIO transport ───────────────────────────────────────────────────────
@@ -150,10 +157,6 @@ public final class McpClientFactory {
                 .args(fullCommand.subList(1, fullCommand.size()))
                 .build();
         var transport = new StdioClientTransport(params, DEFAULT_JSON_MAPPER);
-        var sdkClient = McpClient.sync(transport)
-                .requestTimeout(DEFAULT_TIMEOUT)
-                .build();
-        sdkClient.initialize();
-        return new AraMcpClientAdapter(sdkClient, executor);
+        return connect(transport, executor);
     }
 }

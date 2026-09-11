@@ -135,9 +135,22 @@ public final class ReflActStrategy implements ExecutionStrategy {
         LlmCallContext ctx = LlmCallContext.of(config, task);
         List<AraTool> resolvedTools = tools.resolveEnabled(config.enabledTools());
 
-        log.debug("ReflActStrategy starting for task [{}] maxIterations={} maxReflections={} tools={}",
-                task.taskId(), config.maxIterations(), rc.maxReflections(),
-                resolvedTools.stream().map(AraTool::toolId).toList());
+        // Same as ReactStrategy: stepCtx only varies by which tools are exposed (full set
+        // normally, empty on forced-final iterations), so precompute both variants once.
+        LlmCallContext stepCtx  = ctx.withResolvedTools(resolvedTools);
+        LlmCallContext forcedCtx = ctx.withResolvedTools(List.of());
+
+        // Same hoisting for the text catalog (see ReactStrategy): recomputing
+        // ToolCatalogFormatter.format per iteration would re-serialise every tool schema.
+        String toolCatalog = ReactExecutionSupport.toolCatalog(resolvedTools, nativeTools);
+        // The message list grows incrementally across iterations — see MessageBuffer.
+        ReactExecutionSupport.MessageBuffer messageBuffer = new ReactExecutionSupport.MessageBuffer();
+
+        if (log.isDebugEnabled()) {
+            log.debug("ReflActStrategy starting for task [{}] maxIterations={} maxReflections={} tools={}",
+                    task.taskId(), config.maxIterations(), rc.maxReflections(),
+                    resolvedTools.stream().map(AraTool::toolId).toList());
+        }
 
         while (iterations < config.maxIterations()) {
             if (Thread.currentThread().isInterrupted()) {
@@ -159,13 +172,13 @@ public final class ReflActStrategy implements ExecutionStrategy {
                     memory, config, task, iterations, synthesisModeActive, resolvedTools, nativeTools);
 
             boolean forceFinal = iterations >= config.maxIterations() - 1;
-            List<AraTool> activeTools = forceFinal ? List.of() : resolvedTools;
-            List<LlmMessage> messages = ReactExecutionSupport.buildMessages(memory, activeTools, nativeTools);
-            LlmCallContext stepCtx = ctx.withResolvedTools(activeTools);
+            List<LlmMessage> messages = messageBuffer.build(memory, forceFinal ? "" : toolCatalog,
+                    ReactExecutionSupport.REACT_SYSTEM_SUFFIX);
+            LlmCallContext iterationCtx = forceFinal ? forcedCtx : stepCtx;
 
             LlmCompletion completion;
             try {
-                completion = ReactExecutionSupport.callLlm(llm, messages, stepCtx, task, deadline, config);
+                completion = ReactExecutionSupport.callLlm(llm, messages, iterationCtx, task, deadline, config);
             } catch (ExecutionTimeoutException te) {
                 throw te;
             } catch (InterruptedException ie) {

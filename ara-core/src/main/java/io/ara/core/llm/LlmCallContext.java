@@ -115,6 +115,36 @@ public final class LlmCallContext {
      */
     private final String sessionId;   // nullable
 
+    /**
+     * Cheap replay of {@code source}'s fields that replaces only the media resolver.
+     *
+     * <p>Unlike {@link #toBuilder()}{@code +build()} — which rebuilds and re-{@code
+     * List.copyOf}s {@code stopSequences}/{@code resolvedTools} — this shares those
+     * already-immutable references. {@code withMediaResolver} runs on every LLM call
+     * through {@code MediaResolvingLlmClient}, so the two defensive copies would
+     * otherwise be paid per call on the hot path.
+     */
+    private LlmCallContext(LlmCallContext source, MediaResolver mediaResolver) {
+        this.agentId             = source.agentId;
+        this.agentType           = source.agentType;
+        this.maxOutputTokens     = source.maxOutputTokens;
+        this.temperature         = source.temperature;
+        this.topP                = source.topP;
+        this.outputJsonSchema    = source.outputJsonSchema;
+        this.outputSchemaName    = source.outputSchemaName;
+        this.strictSchema        = source.strictSchema;
+        this.temperatureOverride = source.temperatureOverride;
+        this.stopSequences       = source.stopSequences;
+        this.seed                = source.seed;
+        this.llmProviderOverride = source.llmProviderOverride;
+        this.logLlmIo            = source.logLlmIo;
+        this.logLlmIoMaxChars    = source.logLlmIoMaxChars;
+        this.nativeJsonSchema    = source.nativeJsonSchema;
+        this.resolvedTools       = source.resolvedTools;
+        this.mediaResolver       = mediaResolver;
+        this.sessionId           = source.sessionId;
+    }
+
     private LlmCallContext(Builder b) {
         this.agentId             = b.agentId;
         this.agentType           = b.agentType;
@@ -259,7 +289,7 @@ public final class LlmCallContext {
     }
 
     public LlmCallContext withMediaResolver(MediaResolver resolver) {
-        return toBuilder().mediaResolver(resolver).build();
+        return new LlmCallContext(this, resolver != null ? resolver : MediaResolver.none());
     }
 
     private Builder toBuilder() {

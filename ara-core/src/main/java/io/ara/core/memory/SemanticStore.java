@@ -28,6 +28,24 @@ public interface SemanticStore {
     void upsert(String agentId, String role, String type, String content, List<Float> vector);
 
     /**
+     * Inserts or updates several memory vectors for the given agent in one batch.
+     *
+     * <p>A store whose backend supports batched writes (e.g. Qdrant) should override this
+     * so an eviction pass that offloads a whole range costs a single round-trip instead of
+     * one {@link #upsert} call per entry. The default delegates to {@link #upsert} one entry
+     * at a time, so existing implementations keep compiling and behaving and only gain a
+     * reason to override when they have a backend that batches.
+     *
+     * @param agentId the owning agent's identifier
+     * @param entries the entries to insert or update; never {@code null}
+     */
+    default void upsertAll(String agentId, List<SemanticEntry> entries) {
+        for (SemanticEntry e : entries) {
+            upsert(agentId, e.role(), e.type(), e.content(), e.vector());
+        }
+    }
+
+    /**
      * Searches for the most semantically similar entries for the given agent.
      *
      * @param agentId     the owning agent's identifier

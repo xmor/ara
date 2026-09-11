@@ -1,22 +1,17 @@
 package io.ara.adapters.llm.ollama;
 
-import io.ara.adapters.llm.CallParameterUtils;
-import io.ara.adapters.llm.ProviderErrorMapper;
-import io.ara.adapters.llm.TokenStreamPublisher;
-import io.ara.adapters.llm.ToolConversionUtils;
+import io.ara.adapters.llm.AbstractLangChain4jLlmClient;
 import io.ara.core.llm.*;
 import io.ara.core.media.MediaTypes;
 import io.ara.core.media.MediaTypes.MediaKind;
-import dev.langchain4j.data.message.*;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.ollama.OllamaChatModel;
 import dev.langchain4j.model.ollama.OllamaStreamingChatModel;
 
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.Flow;
-import java.util.stream.Collectors;
 
 /**
  * {@link LlmClient} adapter for <a href="https://ollama.com/">Ollama</a>,
@@ -62,7 +57,7 @@ import java.util.stream.Collectors;
  * @see LlmClient
  * @see OllamaLlmClient.Models
  */
-public class OllamaLlmClient implements LlmClient {
+public class OllamaLlmClient extends AbstractLangChain4jLlmClient {
 
     private static final String PROVIDER = "Ollama";
 
@@ -70,6 +65,11 @@ public class OllamaLlmClient implements LlmClient {
     private final OllamaStreamingChatModel streamingModel;
     private final String                   modelName;
     private final boolean                  nativeTools;
+    /**
+     * Precomputed once: a pure function of the adapter's capabilities, which never change
+     * after construction — rebuilding the set on every request only allocates needlessly.
+     */
+    private final Set<String> supportedMediaTypes;
 
     // ── Model catalogue ───────────────────────────────────────────────────────
 
@@ -121,6 +121,7 @@ public class OllamaLlmClient implements LlmClient {
     private OllamaLlmClient(Builder builder) {
         this.modelName     = builder.modelName;
         this.nativeTools   = builder.nativeTools;
+        this.supportedMediaTypes = MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.TEXT);
         this.chatModel     = OllamaChatModel.builder()
                 .baseUrl(builder.baseUrl)
                 .modelName(builder.modelName)
@@ -159,134 +160,27 @@ public class OllamaLlmClient implements LlmClient {
      */
     @Override
     public Set<String> supportedMediaTypes() {
-        return MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.TEXT);
+        return supportedMediaTypes;
+    }
+
+    @Override
+    protected ChatResponse chat(ChatRequest request) {
+        return chatModel.chat(request);
     }
 
     /**
-     * Sends {@code messages} to the local Ollama instance and blocks until completion.
-     *
-     * <p>Tools from {@link LlmCallContext} are forwarded only when the client was built with
-     * {@link Builder#nativeTools(boolean)}; otherwise they are ignored and the strategy's
-     * prompt-based tool routing applies.
-     *
-     * @param messages the conversation history (system → user → assistant turns)
-     * @param context  per-call parameters (temperature, max tokens)
-     * @return the model's completion
-     * @throws LlmException on network errors or unexpected Ollama server failures
+     * Streaming call into the shared {@code stream()} pipeline. Each token is emitted
+     * individually; the publisher completes when Ollama sends a {@code done} signal, or
+     * exceptionally on connection errors.
      */
     @Override
-    public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) throws LlmException {
-        try {
-            ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages, context));
-            CallParameterUtils.applyTo(reqBuilder, context);
-            applyToolsIfEnabled(reqBuilder, context);
-
-            ChatResponse response = chatModel.chat(reqBuilder.build());
-            return toLlmCompletion(response);
-
-        } catch (LlmException ex) {
-            throw ex;
-        } catch (Exception ex) {
-            throw mapException(ex);
-        }
+    protected void streamChat(ChatRequest request, StreamingChatResponseHandler handler) {
+        streamingModel.chat(request, handler);
     }
 
-    /**
-     * Streams tokens from the Ollama streaming endpoint.
-     *
-     * <p>Each token is emitted individually via {@link Flow.Publisher}. The stream completes
-     * when Ollama sends a {@code done} signal, or exceptionally on connection errors.
-     *
-     * @param messages the conversation history
-     * @param context  per-call parameters
-     * @return a {@link Flow.Publisher} of token strings
-     */
     @Override
-    public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-        return TokenStreamPublisher.of(
-                handler -> {
-                    ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                            .messages(toLC4jMessages(messages, context));
-                    CallParameterUtils.applyTo(reqBuilder, context);
-                    applyToolsIfEnabled(reqBuilder, context);
-
-                    streamingModel.chat(reqBuilder.build(), handler);
-                },
-                this::mapException);
-    }
-
-    /**
-     * Forwards the call's tools, but only when this client was built for a tool-capable model.
-     *
-     * <p>The {@code nativeTools} guard is not redundant with {@code hasResolvedTools()}:
-     * {@code ReactStrategy} attaches resolved tools to the context unconditionally, for every
-     * client, so keying off the context alone would send tool specifications to a model that
-     * cannot use them the moment any agent has tools registered.
-     */
-    private void applyToolsIfEnabled(ChatRequest.Builder reqBuilder, LlmCallContext context) {
-        if (nativeTools && context != null && context.hasResolvedTools()) {
-            reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
-        }
-    }
-
-    // ── Conversion helpers ────────────────────────────────────────────────────
-
-    private List<ChatMessage> toLC4jMessages(List<LlmMessage> messages, LlmCallContext context) {
-        // Native tool-call and tool-result turns reach this client from two directions: its
-        // own, once nativeTools is on, and another provider's — a session using
-        // ROUND_ROBIN/FAILOVER can hand it a history whose earlier turns were answered by
-        // OpenAI or Anthropic. Delegating here keeps both intact instead of degrading them to
-        // a confusing generic user turn, and applies the shared media check and flattening —
-        // see ToolConversionUtils.toNativeAwareChatMessages.
-        return ToolConversionUtils.toNativeAwareChatMessages(messages, context, this);
-    }
-
-    private LlmCompletion toLlmCompletion(ChatResponse response) {
-        // Both halves matter: AiMessage.text() is null on a response that carries no text
-        // (a tool-call-only turn), and LlmCompletion rejects a null text outright — so
-        // guarding only the message, as this did, moved the failure to the record's
-        // constructor instead of preventing it. Same shape as the other two adapters.
-        var ai = response.aiMessage();
-        String text = (ai != null && ai.text() != null) ? ai.text() : "";
-        String finishReason = null;
-        int inputTokens  = 0;
-        int outputTokens = 0;
-
-        if (response.metadata() != null) {
-            if (response.metadata().finishReason() != null) {
-                finishReason = response.metadata().finishReason().toString().toLowerCase();
-            }
-            if (response.metadata().tokenUsage() != null) {
-                inputTokens  = response.metadata().tokenUsage().inputTokenCount();
-                outputTokens = response.metadata().tokenUsage().outputTokenCount();
-            }
-        }
-
-        if (finishReason == null) finishReason = "stop";
-
-        String toolCallJson = null;
-        String toolCallId   = null;
-        List<ToolCallEntry> toolCalls = List.of();
-        if (ai != null && ai.hasToolExecutionRequests()) {
-            // Mapped whether or not nativeTools is on: a model only emits these when tools
-            // were sent, so there is nothing to gate, and dropping them if one ever arrived
-            // would lose the call silently. Ollama identifies tool calls by name and sends no
-            // call id, so toolCallId stays null here — ToolCallEntry documents it as nullable
-            // and the runtime checks before using it.
-            var requests = ai.toolExecutionRequests();
-            toolCalls    = ToolConversionUtils.toToolCallEntries(requests);
-            toolCallJson = ToolConversionUtils.toLegacyToolCallJson(requests.get(0));
-            toolCallId   = requests.get(0).id();
-            finishReason = "tool_calls";
-        }
-
-        return new LlmCompletion(text, inputTokens, outputTokens, finishReason,
-                toolCallJson, toolCallId, toolCalls);
-    }
-
-    private LlmException mapException(Throwable ex) {
-        String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+    protected LlmException mapException(Throwable ex) {
+        String msg = errorMessage(ex);
         if (msg.contains("Connection refused") || msg.contains("connect")) {
             return LlmException.networkError(PROVIDER,
                     "Cannot reach Ollama at the configured base URL. Is Ollama running?", ex);
@@ -294,15 +188,7 @@ public class OllamaLlmClient implements LlmClient {
         if (msg.contains("404") || msg.contains("model not found") || msg.contains("pull model")) {
             return LlmException.modelNotFound(PROVIDER, modelName);
         }
-        // Before falling through to a retryable network error: langchain4j classifies HTTP
-        // failures onto its own retriable/non-retriable hierarchy, and reading that is both
-        // more accurate than the substring checks above and immune to a provider rewording
-        // its error bodies. Without it a malformed request (400) was reported as a network
-        // error — retryable — so the strategy retried it and every fallback in a failover
-        // pool was tried in turn, for a request that could not succeed on any of them.
-        LlmException typed = ProviderErrorMapper.fromTypedException(PROVIDER, ex);
-        if (typed != null) return typed;
-        return LlmException.networkError(PROVIDER, msg, ex);
+        return fallbackClassify(PROVIDER, msg, ex);
     }
 
     // ── Builder ───────────────────────────────────────────────────────────────

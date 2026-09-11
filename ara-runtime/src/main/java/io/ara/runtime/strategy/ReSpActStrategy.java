@@ -11,7 +11,6 @@ import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.memory.MemoryManager;
-import io.ara.core.memory.ToolCallMetadata;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import org.slf4j.Logger;
@@ -142,9 +141,22 @@ public final class ReSpActStrategy implements ExecutionStrategy {
         LlmCallContext ctx = LlmCallContext.of(config, task);
         List<AraTool> resolvedTools = tools.resolveEnabled(config.enabledTools());
 
-        log.debug("ReSpActStrategy starting for task [{}] maxIterations={} tools={}",
-                task.taskId(), config.maxIterations(),
-                resolvedTools.stream().map(AraTool::toolId).toList());
+        // Same pattern as ReactStrategy: stepCtx only varies by which tools are exposed
+        // (full set normally, empty on forced-final iterations), so precompute the two
+        // variants once instead of copying every field per iteration.
+        LlmCallContext stepCtx  = ctx.withResolvedTools(resolvedTools);
+        LlmCallContext forcedCtx = ctx.withResolvedTools(List.of());
+
+        // Same hoisting for the text catalog (see ReactStrategy).
+        String toolCatalog = ReactExecutionSupport.toolCatalog(resolvedTools, nativeTools);
+        // The message list grows incrementally across iterations — see MessageBuffer.
+        ReactExecutionSupport.MessageBuffer messageBuffer = new ReactExecutionSupport.MessageBuffer();
+
+        if (log.isDebugEnabled()) {
+            log.debug("ReSpActStrategy starting for task [{}] maxIterations={} tools={}",
+                    task.taskId(), config.maxIterations(),
+                    resolvedTools.stream().map(AraTool::toolId).toList());
+        }
 
         while (iterations < config.maxIterations()) {
             if (Thread.currentThread().isInterrupted()) {
@@ -168,13 +180,13 @@ public final class ReSpActStrategy implements ExecutionStrategy {
             // implicit-SPEAK fallback then guarantees termination even for a model that
             // never emits either sentinel. Same rationale as ReactStrategy's forceFinal.
             boolean forceFinal = iterations >= config.maxIterations() - 1;
-            List<AraTool> activeTools = forceFinal ? List.of() : resolvedTools;
-            List<LlmMessage> messages = buildMessages(memory, activeTools, nativeTools);
-            LlmCallContext stepCtx = ctx.withResolvedTools(activeTools);
+            List<LlmMessage> messages = messageBuffer.build(memory, forceFinal ? "" : toolCatalog,
+                    RESPACT_SYSTEM_SUFFIX);
+            LlmCallContext iterationCtx = forceFinal ? forcedCtx : stepCtx;
 
             LlmCompletion completion;
             try {
-                completion = ReactExecutionSupport.callLlm(llm, messages, stepCtx, task, deadline, config);
+                completion = ReactExecutionSupport.callLlm(llm, messages, iterationCtx, task, deadline, config);
             } catch (ExecutionTimeoutException te) {
                 throw te;
             } catch (InterruptedException ie) {
@@ -392,36 +404,5 @@ public final class ReSpActStrategy implements ExecutionStrategy {
             return output.substring(sentinelIdx + sentinel.length()).strip();
         }
         return output.strip();
-    }
-
-    /**
-     * Converts working memory to the LLM message list, enhancing the first system
-     * message with the tool catalog and the ReSpAct format instructions — same
-     * structure as {@link ReactExecutionSupport#buildMessages}, with {@link
-     * #RESPACT_SYSTEM_SUFFIX} in place of {@code REACT_SYSTEM_SUFFIX}.
-     */
-    private List<LlmMessage> buildMessages(
-            MemoryManager memory, List<AraTool> resolvedTools, boolean nativeTools) {
-        var entries = memory.workingMemory();
-        List<LlmMessage> messages = new ArrayList<>(entries.size());
-        String toolCatalog = (nativeTools || resolvedTools.isEmpty())
-                ? "" : ToolCatalogFormatter.format(resolvedTools);
-        String respactSuffix = (nativeTools || resolvedTools.isEmpty()) ? "" : RESPACT_SYSTEM_SUFFIX;
-        for (int i = 0; i < entries.size(); i++) {
-            var e = entries.get(i);
-            if (i == 0 && "system".equals(e.role())) {
-                messages.add(new LlmMessage("system", e.content() + toolCatalog + respactSuffix));
-            } else if (e.metadata() instanceof ToolCallMetadata meta
-                    && ("tool".equals(e.role()) || "assistant_tool_call".equals(e.role()))) {
-                messages.add(new LlmMessage(e.role(), e.content(), meta.callId(), meta.toolName()));
-            } else {
-                // Entry media rides along: this is the only path from the task's attachments
-                // to the outgoing request, and the adapter is what turns the references into
-                // provider content. A text-only entry produces exactly the message it did
-                // before media existed.
-                messages.add(new LlmMessage(e.role(), e.content(), null, null, e.media()));
-            }
-        }
-        return messages;
     }
 }

@@ -6,7 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Pure in-memory document store for RAG — no external infrastructure required.
@@ -26,7 +26,16 @@ public final class InMemoryDocumentStore implements KbStore {
 
     private final String          kbId;
     private final EmbeddingClient embeddingClient;
-    private final List<Entry>     entries = new CopyOnWriteArrayList<>();
+    /**
+     * Backing store of scored chunks. An {@link ArrayList} guarded by {@link #lock} rather
+     * than a {@code CopyOnWriteArrayList}: indexing a document split into N chunks with COW
+     * copies the whole backing array once per chunk — O(N²) copy work on ingest — for a
+     * structure whose writes, while infrequent, are bulk. Reads (search, delete scans) take
+     * the read lock; the write lock is held only for the duration of one document's indexing
+     * or deletion.
+     */
+    private final List<Entry> entries = new ArrayList<>();
+    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
     /** In-memory registry of indexed documents: docId → title. */
     private final Map<String, String> docRegistry = new LinkedHashMap<>();
@@ -53,18 +62,28 @@ public final class InMemoryDocumentStore implements KbStore {
         List<String> chunks = DocumentStore.chunk(content);
         log.info("[InMemoryDocumentStore] Indexing '{}' → {} chunks", title, chunks.size());
 
-        for (String chunkText : chunks) {
-            List<Float> vector = embeddingClient.embed(chunkText);
-            entries.add(new Entry(docId, title, chunkText, toFloatArray(vector)));
+        lock.writeLock().lock();
+        try {
+            for (String chunkText : chunks) {
+                List<Float> vector = embeddingClient.embed(chunkText);
+                entries.add(new Entry(docId, title, chunkText, normalize(toFloatArray(vector))));
+            }
+            docRegistry.put(docId, title);
+        } finally {
+            lock.writeLock().unlock();
         }
-        synchronized (docRegistry) { docRegistry.put(docId, title); }
         log.info("[InMemoryDocumentStore] Indexed '{}' ({} chunks)", title, chunks.size());
         return chunks.size();
     }
 
     public boolean deleteDocument(String docId) {
         Objects.requireNonNull(docId, "docId must not be null");
-        entries.removeIf(e -> e.docId().equals(docId));
+        lock.writeLock().lock();
+        try {
+            entries.removeIf(e -> e.docId().equals(docId));
+        } finally {
+            lock.writeLock().unlock();
+        }
         boolean known;
         synchronized (docRegistry) { known = docRegistry.remove(docId) != null; }
         log.info("[InMemoryDocumentStore] Deleted document '{}'", docId);
@@ -74,26 +93,34 @@ public final class InMemoryDocumentStore implements KbStore {
     // ── Read ──────────────────────────────────────────────────────────────────
 
     public List<DocumentChunk> search(String query, int maxResults) {
-        if (query == null || query.isBlank()) return List.of();
+        if (query == null || query.isBlank() || maxResults <= 0) return List.of();
 
-        float[] qVec = toFloatArray(embeddingClient.embed(query));
+        float[] qNorm = normalize(toFloatArray(embeddingClient.embed(query)));
 
-        record Scored(Entry entry, float score) {}
-        List<Scored> scored = new ArrayList<>(entries.size());
-        for (Entry e : entries) {
-            scored.add(new Scored(e, cosine(qVec, e.vector())));
+        // Bounded top-k via a min-heap: O(n log k) rather than the O(n log n) full sort
+        // the old list-and-sort paid — k is typically ≤ 20 while n can be thousands.
+        lock.readLock().lock();
+        try {
+            record Scored(Entry entry, float score) {}
+            PriorityQueue<Scored> heap =
+                    new PriorityQueue<>(maxResults + 1, Comparator.comparingDouble(Scored::score));
+            for (Entry e : entries) {
+                float score = dot(qNorm, e.vector());
+                if (heap.size() < maxResults) {
+                    heap.offer(new Scored(e, score));
+                } else if (score > heap.peek().score()) {
+                    heap.poll();
+                    heap.offer(new Scored(e, score));
+                }
+            }
+            return heap.stream()
+                    .sorted(Comparator.comparingDouble(Scored::score).reversed())
+                    .map(s -> new DocumentChunk(
+                            s.entry().docId(), s.entry().title(), s.entry().content(), 0, s.score()))
+                    .toList();
+        } finally {
+            lock.readLock().unlock();
         }
-        scored.sort(Comparator.comparingDouble(Scored::score).reversed());
-
-        return scored.stream()
-                .limit(maxResults)
-                .map(s -> new DocumentChunk(
-                        s.entry().docId(),
-                        s.entry().title(),
-                        s.entry().content(),
-                        0,
-                        s.score()))
-                .toList();
     }
 
     @Override
@@ -109,16 +136,31 @@ public final class InMemoryDocumentStore implements KbStore {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private static float cosine(float[] a, float[] b) {
-        float dot = 0, na = 0, nb = 0;
+    /**
+     * Cosine over L2-normalised vectors. Storing and querying normalised vectors turns
+     * cosine similarity into a plain dot product — the old {@code cosine} recomputed both
+     * norms again for every entry, and the query norm once per entry, on every search.
+     * A zero vector normalises to itself and then scores 0 against everything, matching the
+     * old {@code na == 0 || nb == 0} guard's outcome without the per-entry branching.
+     *
+     * <p>Everything else in the class is unchanged by the swap: ranking is the same cosine
+     * distance, to the precision of a single float dot product.
+     */
+    private static float dot(float[] a, float[] b) {
+        float sum = 0;
         int len = Math.min(a.length, b.length);
-        for (int i = 0; i < len; i++) {
-            dot += a[i] * b[i];
-            na  += a[i] * a[i];
-            nb  += b[i] * b[i];
-        }
-        if (na == 0 || nb == 0) return 0f;
-        return dot / ((float) Math.sqrt(na) * (float) Math.sqrt(nb));
+        for (int i = 0; i < len; i++) sum += a[i] * b[i];
+        return sum;
+    }
+
+    private static float[] normalize(float[] v) {
+        double norm = 0;
+        for (float x : v) norm += (double) x * x;
+        norm = Math.sqrt(norm);
+        if (norm == 0) return v;
+        float[] out = new float[v.length];
+        for (int i = 0; i < v.length; i++) out[i] = (float) (v[i] / norm);
+        return out;
     }
 
     private static float[] toFloatArray(List<Float> list) {

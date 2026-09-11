@@ -155,6 +155,30 @@ public final class ToolCallParser {
         } catch (Exception e) { return "{}"; }
     }
 
+    /**
+     * Extracts the tool name and arguments from ARA tool-call JSON in a single parse.
+     *
+     * <p>Behaviour-identical merge of {@link #extractToolName} and {@link #extractToolArgs}
+     * into one Jackson {@code readTree} — both fields are needed together by the hot path
+     * (recordAssistantOutput), which would otherwise parse the same JSON twice.
+     */
+    static ToolCallRequest extractNameAndArgs(String toolCallJson) {
+        if (toolCallJson == null) {
+            return new ToolCallRequest("", "{}");
+        }
+        try {
+            JsonNode node = MAPPER.readTree(toolCallJson);
+            String id = node.has("tool_id") ? node.get("tool_id").asText() : node.path("name").asText("");
+            int dot = id.lastIndexOf('.');
+            if (dot >= 0) id = id.substring(dot + 1);
+            JsonNode args = node.path("arguments");
+            String argsJson = args.isMissingNode() ? "{}" : MAPPER.writeValueAsString(args);
+            return new ToolCallRequest(id, argsJson);
+        } catch (Exception e) {
+            return new ToolCallRequest("", "{}");
+        }
+    }
+
     // ── Private helpers ────────────────────────────────────────────────────────
 
     private static ToolCallRequest parseNative(String json, String toolCallId) {

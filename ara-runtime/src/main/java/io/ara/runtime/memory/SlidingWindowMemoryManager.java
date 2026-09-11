@@ -8,6 +8,7 @@ import io.ara.core.media.MediaTypes.MediaKind;
 import io.ara.core.memory.EmbeddingClient;
 import io.ara.core.memory.EpisodeLabel;
 import io.ara.core.memory.MemoryEntry;
+import io.ara.core.memory.SemanticEntry;
 import io.ara.core.memory.SemanticStore;
 import io.ara.core.memory.ToolCallMetadata;
 import io.ara.core.telemetry.AraTelemetry;
@@ -29,6 +30,12 @@ import java.util.stream.Collectors;
  * Uses a char-based approximation for text: {@code tokens ≈ chars / 4}. This matches
  * GPT-family tokenisers within ~15 % for Latin-script text — accurate enough for budget
  * enforcement.
+ *
+ * <p>The estimate is maintained as a running counter (chars + flat media constants)
+ * charged on every mutation and discharged on eviction — {@code O(1)} per append instead
+ * of a full-window recount per append, which made a long conversation quadratic in the
+ * number of entries. {@link #estimatedTokens()} is package-private so tests can verify the
+ * counter against a fresh full recount.
  *
  * <p>Media on an entry adds a <em>flat constant per category</em>, not a function of the
  * payload size. That is a deliberately coarse choice, and it is safe because the collapse it
@@ -88,6 +95,11 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
 
     private final int            maxTokens;
     private final EvictionPolicy policy;
+
+    /** Running {@code (role+content)} char count across the window, for {@link #estimatedTokens()}. */
+    private int charCount;
+    /** Running sum of the flat per-media constants across the window, for {@link #estimatedTokens()}. */
+    private int mediaTokenCount;
 
     // ADR-0078 — all nullable; a manager built without them behaves exactly as before:
     // SUMMARIZE degrades to DROP_MIDDLE (D2), no offload (D3), no recall (D4).
@@ -150,20 +162,52 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
 
     @Override
     public void appendToWorkingMemory(String role, String content) {
-        working.add(MemoryEntry.of(role, content));
-        if (maxTokens > 0) evictIfNeeded();
+        add(MemoryEntry.of(role, content));
     }
 
     @Override
     public void appendToWorkingMemory(String role, String content, ToolCallMetadata metadata) {
-        working.add(MemoryEntry.of(role, content, metadata));
-        if (maxTokens > 0) evictIfNeeded();
+        add(MemoryEntry.of(role, content, metadata));
     }
 
     @Override
     public void appendToWorkingMemory(String role, String content, java.util.List<MediaRef> media) {
-        working.add(MemoryEntry.of(role, content, media));
+        add(MemoryEntry.of(role, content, media));
+    }
+
+    @Override
+    public void clearWorkingMemory() {
+        working.clear();
+        charCount       = 0;
+        mediaTokenCount = 0;
+    }
+
+    /** Appends {@code e}, charging it against the running token estimate, then checks the budget. */
+    private void add(MemoryEntry e) {
+        working.add(e);
+        charge(e);
         if (maxTokens > 0) evictIfNeeded();
+    }
+
+    /**
+     * Adds {@code e}'s contribution to the running estimate. Charging here and discharging
+     * in {@link #removeRange} keeps {@link #estimatedTokens()} {@code O(1)} per append
+     * rather than a full-window recount — see class javadoc.
+     */
+    private void charge(MemoryEntry e) {
+        charCount += (e.role()    != null ? e.role().length()    : 0)
+                   + (e.content() != null ? e.content().length() : 0);
+        for (MediaRef ref : e.media()) {
+            mediaTokenCount += tokensFor(ref);
+        }
+    }
+
+    private void discharge(MemoryEntry e) {
+        charCount -= (e.role()    != null ? e.role().length()    : 0)
+                   + (e.content() != null ? e.content().length() : 0);
+        for (MediaRef ref : e.media()) {
+            mediaTokenCount -= tokensFor(ref);
+        }
     }
 
     // ── Eviction ──────────────────────────────────────────────────────────────
@@ -242,8 +286,12 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
             removeRange(start, end);
             boolean summarized = summary.isSuccess() && summary.content() != null && !summary.content().isBlank();
             if (summarized) {
-                working.add(start,
-                        MemoryEntry.of("system", summary.content(), new EpisodeLabel("context_summary")));
+                MemoryEntry summaryEntry =
+                        MemoryEntry.of("system", summary.content(), new EpisodeLabel("context_summary"));
+                // The removed range was discharged by removeRange; the replacement entry
+                // enters the budget like any other append.
+                working.add(start, summaryEntry);
+                charge(summaryEntry);
             } else {
                 log.warn("SlidingWindowMemoryManager: summarizer agent produced no usable summary "
                         + "— dropped the range instead");
@@ -263,24 +311,39 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
      * ADR-0078 D3 — before a range is discarded, upsert each entry into the episodic
      * {@link SemanticStore} so it can be recalled later ({@link #recallRelevant}). A no-op
      * unless {@code offloadStore}/{@code embeddingClient}/{@code agentId} are all set —
-     * every ARA system today. A failed upsert is logged and swallowed: offload is
-     * best-effort, it must never break eviction.
+     * every ARA system today.
+     *
+     * <p>The whole range goes out as a single {@code upsertAll} call: a per-entry upsert
+     * meant one HTTP round-trip to Qdrant per evicted entry, synchronously on the strategy
+     * thread — a 10-entry eviction cost 10 RTTs before the agent could continue. Per-entry
+     * embedding failures are still swallowed individually (embedding can be a remote call
+     * too); a failed batch write is logged and swallowed — offload is best-effort, it must
+     * never break eviction.
      */
     private void offloadBeforeDiscard(int fromInclusive, int toExclusive) {
         if (!offloadEnabled()) {
             return;
         }
+        List<SemanticEntry> batch = new ArrayList<>();
         for (int i = fromInclusive; i < toExclusive && i < working.size(); i++) {
             MemoryEntry e = working.get(i);
             if (e.content() == null || e.content().isBlank()) {
                 continue;
             }
             try {
-                offloadStore.upsert(agentId, e.role(), "evicted_context",
-                        e.content(), embeddingClient.embed(e.content()));
+                batch.add(new SemanticEntry(e.role(), "evicted_context",
+                        e.content(), embeddingClient.embed(e.content())));
             } catch (RuntimeException ex) {
                 log.warn("SlidingWindowMemoryManager: offload of an evicted entry failed ({})", ex.getMessage());
             }
+        }
+        if (batch.isEmpty()) {
+            return;
+        }
+        try {
+            offloadStore.upsertAll(agentId, batch);
+        } catch (RuntimeException ex) {
+            log.warn("SlidingWindowMemoryManager: offload of an evicted range failed ({})", ex.getMessage());
         }
     }
 
@@ -308,11 +371,31 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
                     .map(h -> MemoryEntry.of(h.role() != null ? h.role() : "system",
                             h.content(), new EpisodeLabel("recalled")))
                     .collect(Collectors.toCollection(ArrayList::new));
-            working.addAll(0, recalled);
+            working.addAll(recallInsertIndex(), recalled);
+            for (MemoryEntry e : recalled) {
+                charge(e);
+            }
             span.setAttribute("recalled_count", (long) recalled.size()).setStatus(SpanStatus.OK);
         } finally {
             span.end();
         }
+    }
+
+    /**
+     * Where recalled episodes land in the window. Index 0 holds the agent's system prompt,
+     * so prepending at 0 would push the system entry below the recalled ones and — via the
+     * strategies' first-system-message enhancement — silently drop the tool catalog and
+     * format instructions from every LLM call of the turn. Recall therefore slots its hits
+     * just after the opening system entry, keeping the system prompt first and the recalled
+     * context ahead of the replayed/new conversation.
+     */
+    private int recallInsertIndex() {
+        for (int i = 0; i < working.size(); i++) {
+            if ("system".equals(working.get(i).role())) {
+                return i + 1;
+            }
+        }
+        return 0;
     }
 
     private String concatEntries(int fromInclusive, int toExclusive) {
@@ -357,21 +440,23 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
     }
 
     private void removeRange(int fromInclusive, int toExclusive) {
-        for (int i = toExclusive - 1; i >= fromInclusive; i--) {
-            working.remove(i);
+        if (fromInclusive >= toExclusive) {
+            return;
         }
+        // Discharge first: the sublist view is tied to the list contents, so it must be
+        // read before the single range-removal below invalidates it.
+        for (MemoryEntry e : working.subList(fromInclusive, toExclusive)) {
+            discharge(e);
+        }
+        working.subList(fromInclusive, toExclusive).clear();
     }
 
-    private int estimatedTokens() {
-        int chars = working.stream()
-                .mapToInt(e -> (e.role()    != null ? e.role().length()    : 0)
-                             + (e.content() != null ? e.content().length() : 0))
-                .sum();
-        int mediaTokens = working.stream()
-                .flatMap(e -> e.media().stream())
-                .mapToInt(SlidingWindowMemoryManager::tokensFor)
-                .sum();
-        return chars / CHARS_PER_TOKEN + mediaTokens;
+    /**
+     * Returns the running token estimate for the whole window — chars/4 plus the flat
+     * media constants. Package-private so tests can assert it equals a fresh full recount.
+     */
+    int estimatedTokens() {
+        return charCount / CHARS_PER_TOKEN + mediaTokenCount;
     }
 
     private static int tokensFor(MediaRef ref) {

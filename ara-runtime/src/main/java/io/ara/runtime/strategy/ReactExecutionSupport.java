@@ -15,6 +15,7 @@ import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmException;
 import io.ara.core.llm.LlmMessage;
+import io.ara.core.memory.MemoryEntry;
 import io.ara.core.memory.MemoryManager;
 import io.ara.core.memory.ToolCallMetadata;
 import io.ara.core.tool.AraTool;
@@ -32,10 +33,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Flow;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -278,7 +279,7 @@ final class ReactExecutionSupport {
      *                       file-write persist clause applies to this agent
      * @param nativeTools    whether the LLM client speaks native function-calling —
      *                       gates the text {@code FINAL_ANSWER} sentinel, same condition
-     *                       {@link #buildMessages} uses for {@link #REACT_SYSTEM_SUFFIX}
+     *                       {@link #toolCatalog} uses for {@link #REACT_SYSTEM_SUFFIX}
      * @return whether the nudge is now active — either it just fired, or {@code
      *         wasActive} already was; the caller uses this to update its own flag
      */
@@ -302,46 +303,141 @@ final class ReactExecutionSupport {
     }
 
     /**
-     * Converts working memory to the LLM message list, enhancing the first
-     * system message with the list of available tools and the ReAct format
-     * instructions.
+     * Incremental materialisation of the LLM message list for one execution.
      *
-     * <p>Both are omitted when {@code nativeTools} is {@code true}: the client already
-     * receives {@code resolvedTools} as structured provider tool specifications, so the
-     * text catalog and the inline {@code {"tool_id":...}}/{@code FINAL_ANSWER}
-     * instructions would only duplicate — and can compete against — that channel.
+     * <p>Rebuilding the whole list from working memory on every iteration was O(context
+     * size) of object + string allocation per loop turn, even though each iteration only
+     * appends a couple of entries to the tail (the assistant turn and the tool
+     * observation) — and a single execution can run many iterations over a growing
+     * conversation. This buffer keeps the messages already built and reuses them whenever
+     * the working-memory prefix they were built from is untouched, appending only the
+     * entries that are new.
      *
-     * <p>The enhancement is applied to the in-flight message list only — the
-     * working memory stored in {@link MemoryManager} is never modified here.
-     */
-    static List<LlmMessage> buildMessages(
-            MemoryManager memory, List<io.ara.core.tool.AraTool> resolvedTools, boolean nativeTools) {
-        var entries = memory.workingMemory();
-        List<LlmMessage> messages = new ArrayList<>(entries.size());
-        String toolCatalog = (nativeTools || resolvedTools.isEmpty())
-                ? "" : ToolCatalogFormatter.format(resolvedTools);
-        String reactSuffix = (nativeTools || resolvedTools.isEmpty()) ? "" : REACT_SYSTEM_SUFFIX;
-        for (int i = 0; i < entries.size(); i++) {
-            var e = entries.get(i);
-            if (i == 0 && "system".equals(e.role())) {
-                messages.add(new LlmMessage("system", e.content() + toolCatalog + reactSuffix));
-            } else if (e.metadata() instanceof ToolCallMetadata meta
+* <p>Reuse is allowed only when two conditions hold:
+         * <ul>
+         *   <li><b>the tool-catalog variant is unchanged</b> — the first-system-message
+         *       enhancement differs between normal iterations and forced-final ones (empty
+         *       catalog), so a switch between them rebuilds everything once;</li>
+         *   <li><b>the working-memory prefix is identity-equal to what was materialised</b> —
+         *       eviction or recall replace/remove entries mid-list, which would silently
+         *       shift content under the cached messages; an eviction always shrinks the list
+         *       at the moment it fires, but later appends can grow it back past the cached
+         *       size, so the prefix is verified rather than inferred from a size check.</li>
+         * </ul>
+         *
+         * <p>The enhancement goes on the <em>first system entry wherever it sits</em>, not
+         * unconditionally at index 0: episodic recall (ADR-0078 D4) inserts entries at the
+         * head of the window, so a recalled entry — not the agent's system prompt — can be
+         * the first element. Index-0 enhancement would silently skip the real system prompt
+         * and run the iteration without the tool catalog and format instructions.
+         *
+         * <p>Identity rather than value comparison is what keeps the scan cheap: entries are
+         * immutable records that the strategy never re-creates, and tail appends don't disturb
+         * the materialised prefix at all.
+         */
+    static final class MessageBuffer {
+
+        private List<LlmMessage>          messages = List.of();
+        private List<MemoryEntry>         pinned   = List.of();
+        private String                    variant  = null;   // "toolCatalog + suffix" currently held
+
+        /**
+         * Returns the message list for the current working memory, reusing the cached
+         * prefix when safe and appending only the newly added entries.
+         *
+         * @param toolCatalog the text catalog for this iteration — empty on forced-final
+         *                    iterations, which also silences {@code suffix}
+         * @param suffix      the format-instruction suffix appended after the catalog on
+         *                    the first system message; ignored when {@code toolCatalog}
+         *                    is empty
+         */
+        List<LlmMessage> build(MemoryManager memory, String toolCatalog, String suffix) {
+            List<MemoryEntry> entries     = memory.workingMemory();
+            String            effectiveSuffix = toolCatalog.isEmpty() ? "" : suffix;
+            String            desired     = toolCatalog + '\u0001' + effectiveSuffix;
+            int               cached      = pinned.size();
+
+            if (cached <= entries.size() && desired.equals(variant) && prefixIntact(entries)) {
+                List<LlmMessage> result = new ArrayList<>(entries.size());
+                result.addAll(messages);
+                for (int i = cached; i < entries.size(); i++) {
+                    result.add(materialize(entries.get(i)));
+                }
+                messages = result;
+                pinned   = List.copyOf(entries);
+                return result;
+            }
+
+            List<LlmMessage> result = new ArrayList<>(entries.size());
+            int enhanced = -1;
+            for (int i = 0; i < entries.size(); i++) {
+                if ("system".equals(entries.get(i).role())) {
+                    enhanced = i;
+                    break;
+                }
+            }
+            for (int i = 0; i < entries.size(); i++) {
+                MemoryEntry e = entries.get(i);
+                if (i == enhanced) {
+                    result.add(new LlmMessage("system", e.content() + toolCatalog + effectiveSuffix));
+                } else {
+                    result.add(materialize(e));
+                }
+            }
+            messages = result;
+            pinned   = List.copyOf(entries);
+            variant  = desired;
+            return result;
+        }
+
+        /** True when every previously materialised entry is still the same object at the same slot. */
+        private boolean prefixIntact(List<MemoryEntry> entries) {
+            for (int i = 0; i < pinned.size(); i++) {
+                if (entries.get(i) != pinned.get(i)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /**
+         * The plain, un-enhanced form of a memory entry. The metadata branch is what lets
+         * the adapter reconstruct native function-calling turns from the history.
+         */
+        private static LlmMessage materialize(MemoryEntry e) {
+            if (e.metadata() instanceof ToolCallMetadata meta
                     && ("tool".equals(e.role()) || "assistant_tool_call".equals(e.role()))) {
                 // Propagate toolCallId and toolName for native function-calling reconstruction
-                messages.add(new LlmMessage(e.role(), e.content(), meta.callId(), meta.toolName()));
-            } else {
-                // Entry media rides along: this is the only path from the task's attachments
-                // to the outgoing request, and the adapter is what turns the references into
-                // provider content. A text-only entry produces exactly the message it did
-                // before media existed.
-                messages.add(new LlmMessage(e.role(), e.content(), null, null, e.media()));
+                return new LlmMessage(e.role(), e.content(), meta.callId(), meta.toolName());
             }
+            // Entry media rides along: this is the only path from the task's attachments
+            // to the outgoing request, and the adapter is what turns the references into
+            // provider content. A text-only entry produces exactly the message it did
+            // before media existed.
+            return new LlmMessage(e.role(), e.content(), null, null, e.media());
         }
-        return messages;
+    }
+
+    /**
+     * The text tool catalog for one execution pass, computed once before the loop and
+     * reused on every iteration. Empty when tools are withheld entirely (native
+     * function-calling, or no tools resolved) — the same condition that omits the
+     * catalog and format instructions from {@link MessageBuffer}. The system message
+     * it is appended to must stay uncached (see {@link #maybeInjectSynthesis}), but the
+     * catalog string itself depends only on {@code resolvedTools}/{@code nativeTools},
+     * both stable for the whole pass, so rebuilding it per iteration would re-serialize
+     * every tool's argument schema for a string that never changes.
+     */
+    static String toolCatalog(List<io.ara.core.tool.AraTool> resolvedTools, boolean nativeTools) {
+        return (nativeTools || resolvedTools.isEmpty()) ? "" : ToolCatalogFormatter.format(resolvedTools);
     }
 
     /** Logs the outcome of one iteration at DEBUG — tool call requested, or not. */
     static void logIterationResult(LlmCompletion completion, int iterations, int maxIterations, String taskId) {
+        // SLF4J evaluates the log arguments eagerly, so the extractToolName() JSON parse
+        // below would run on every tool-call iteration even with DEBUG off — a full Jackson
+        // readTree per reasoning step for a message nobody reads. Guard the whole body.
+        if (!log.isDebugEnabled()) return;
         if (completion.hasToolCall()) {
             String toolName = ToolCallParser.extractToolName(completion.toolCallJson());
             log.debug("Iteration {}/{} — finishReason={} hasToolCall=true tool={} tokens={}",
@@ -360,9 +456,25 @@ final class ReactExecutionSupport {
      * agent or per call: a watchdog only ever sleeps and then interrupts, so a single
      * timer serves any number of concurrent executions.
      */
-    private static final ScheduledExecutorService DEADLINE_WATCHDOG =
-            Executors.newSingleThreadScheduledExecutor(
-                    Thread.ofVirtual().name("ara-llm-deadline").factory());
+    private static final ScheduledExecutorService DEADLINE_WATCHDOG = deadlineWatchdog();
+
+    /**
+     * Builds the watchdog scheduler with {@code removeOnCancelPolicy(true)}.
+     *
+     * <p>{@link java.util.concurrent.Executors#newSingleThreadScheduledExecutor} returns a delegating wrapper
+     * with no way to set that policy, and the JDK default is {@code false}: every watchdog
+     * cancelled by {@link #completeWithin} would then stay in the singleton's
+     * {@code DelayedWorkQueue} until its original deadline elapsed — holding the caller
+     * thread and gate arrays for up to the full execution timeout, and making every LLM
+     * call in the process contend on that one queue to offer and remove it. The policy is
+     * why this constructs the {@link ScheduledThreadPoolExecutor} directly.
+     */
+    private static ScheduledExecutorService deadlineWatchdog() {
+        ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(
+                1, Thread.ofVirtual().name("ara-llm-deadline").factory());
+        executor.setRemoveOnCancelPolicy(true);
+        return executor;
+    }
 
     /**
      * Attempts for one LLM call: the initial call plus {@value #LLM_MAX_ATTEMPTS} - 1
@@ -590,9 +702,14 @@ final class ReactExecutionSupport {
                 ? result.output()
                 : "Tool [%s] failed — %s".formatted(tcr.toolId(), result.error());
 
-        log.debug("Tool [{}] result — success={} output={}",
-                tcr.toolId(), result.success(),
-                observation.length() > 300 ? observation.substring(0, 300) + "…" : observation);
+        // Guarded because the truncation below allocates a substring on every tool result
+        // even when DEBUG is off — the same eager-argument-evaluation trap warned about in
+        // logIterationResult. The debug line is the only reader of that substring.
+        if (log.isDebugEnabled()) {
+            log.debug("Tool [{}] result — success={} output={}",
+                    tcr.toolId(), result.success(),
+                    observation.length() > 300 ? observation.substring(0, 300) + "…" : observation);
+        }
         if (ctx.logIo()) {
             log.info("TOOL RESULT [{}] success={} output={}",
                     tcr.toolId(), result.success(), truncate(observation, ctx.logIoMaxChars()));
@@ -728,10 +845,12 @@ final class ReactExecutionSupport {
                 memory.appendToWorkingMemory("assistant", output);
             }
         } else if (completion.hasToolCall() && completion.toolCallId() != null) {
-            ToolCallMetadata meta = new ToolCallMetadata(
-                    completion.toolCallId(), ToolCallParser.extractToolName(completion.toolCallJson()));
-            memory.appendToWorkingMemory("assistant_tool_call",
-                    ToolCallParser.extractToolArgs(completion.toolCallJson()), meta);
+            // Legacy single-call shape: grab name and args together — the two separate
+            // accessors above would readTree the same JSON twice to produce one metadata.
+            ToolCallParser.ToolCallRequest parsed =
+                    ToolCallParser.extractNameAndArgs(completion.toolCallJson());
+            ToolCallMetadata meta = new ToolCallMetadata(completion.toolCallId(), parsed.toolId());
+            memory.appendToWorkingMemory("assistant_tool_call", parsed.argumentJson(), meta);
         } else {
             memory.appendToWorkingMemory("assistant", output);
         }

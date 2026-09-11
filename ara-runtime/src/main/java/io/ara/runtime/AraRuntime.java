@@ -73,6 +73,7 @@ import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -764,28 +765,56 @@ public final class AraRuntime implements AutoCloseable {
      * executor reference are NOT tracked.
      */
     public AgentFuture submit(AraAgent agent, AgentTask task) {
-        Executor executor;
-        synchronized (lifecycleLock) {
-            autoStart();
-            executor = agentExecutor;
+        Executor executor = agentExecutor;
+        if (lifecycle != Lifecycle.STARTED) {
+            // Slow path: a started-but-untouched (NEW) or a stopped runtime. The
+            // lifecycle decision must be taken atomically against a concurrent stop(),
+            // which is exactly what the lock does.
+            synchronized (lifecycleLock) {
+                autoStart();
+                executor = agentExecutor;
+            }
         }
 
         // Register BEFORE handing off — prevents a race where the task
         // completes before we even start tracking it
         quiescenceTracker.taskStarted();
         try {
-            AgentFuture future = io.ara.core.agent.AraAgents.executeAsync(agent, task, executor);
-
-            // Release on completion (success OR failure)
-            future.async().whenComplete((response, error) ->
-                    quiescenceTracker.taskFinished());
-            return future;
-
+            return submitTracked(agent, task, executor);
+        } catch (RejectedExecutionException e) {
+            // The fast path's volatile executor read went stale: a concurrent stop() had
+            // already begun draining when we handed the task over, and the virtual-thread-
+            // per-task executor refuses new submissions once shut down. Resolve the race
+            // through the lock — the way the pre-optimization submit always did — so the
+            // outcome is exactly the old one: blocked until stop() finishes, then the
+            // IllegalStateException autoStart() raises for a stopped runtime. The executor
+            // never rejects for any other reason, so this retry cannot loop.
+            quiescenceTracker.taskFinished();
+            synchronized (lifecycleLock) {
+                autoStart();
+                executor = agentExecutor;
+            }
+            quiescenceTracker.taskStarted();
+            try {
+                return submitTracked(agent, task, executor);
+            } catch (RuntimeException f) {
+                quiescenceTracker.taskFinished();
+                throw f;
+            }
         } catch (RuntimeException e) {
-            // Task was never actually submitted (e.g. RejectedExecutionException)
+            // Task was never actually submitted (no completion will ever fire)
             quiescenceTracker.taskFinished();
             throw e;
         }
+    }
+
+    /** Submits {@code task} on {@code executor} and ties quiescence tracking to the future's completion. */
+    private AgentFuture submitTracked(AraAgent agent, AgentTask task, Executor executor) {
+        AgentFuture future = io.ara.core.agent.AraAgents.executeAsync(agent, task, executor);
+        // Release on completion (success OR failure)
+        future.async().whenComplete((response, error) ->
+                quiescenceTracker.taskFinished());
+        return future;
     }
 
     /**

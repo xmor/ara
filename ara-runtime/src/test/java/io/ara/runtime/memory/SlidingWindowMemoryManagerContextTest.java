@@ -142,6 +142,26 @@ class SlidingWindowMemoryManagerContextTest {
     }
 
     @Test
+    void recallRelevant_slotsRecalledEntriesBehindTheSystemPrompt_neverAtIndexZero() {
+        RecordingStore store = new RecordingStore();
+        store.nextSearchResult = List.of(MemoryEntry.of("user", "an earlier relevant fact"));
+        SlidingWindowMemoryManager m = new SlidingWindowMemoryManager(
+                0, EvictionPolicy.DROP_MIDDLE, null, store, EMBED, "agent-7");
+        m.appendToWorkingMemory("system", "agent system prompt");
+        m.appendToWorkingMemory("user", "current question");
+
+        m.recallRelevant("something relevant", 5);
+
+        List<MemoryEntry> w = m.workingMemory();
+        assertEquals("agent system prompt", w.get(0).content(),
+                "the system prompt must stay at index 0 — recalled entries at the head would "
+                + "silence the strategies' tool-catalog enhancement");
+        assertEquals("an earlier relevant fact", w.get(1).content(),
+                "recalled episodes slot in just behind the system prompt");
+        assertEquals("current question", w.get(2).content());
+    }
+
+    @Test
     void recallRelevantIsANoOpForBlankQueryNonPositiveLimitOrNoStore() {
         RecordingStore store = new RecordingStore();
         store.nextSearchResult = List.of(MemoryEntry.of("user", "should not appear"));

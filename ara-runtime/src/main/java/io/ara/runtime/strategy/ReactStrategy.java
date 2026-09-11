@@ -96,9 +96,28 @@ public final class ReactStrategy implements ExecutionStrategy {
         // Resolve tools once — the list is stable for the lifetime of this execution
         List<AraTool> resolvedTools = tools.resolveEnabled(config.enabledTools());
 
-        log.debug("ReactStrategy starting for task [{}] maxIterations={} tools={}",
-                task.taskId(), config.maxIterations(),
-                resolvedTools.stream().map(AraTool::toolId).toList());
+        // stepCtx only ever differs by which tools are exposed: the full set on
+        // normal iterations, an empty set on the forced-final iteration(s). All
+        // other fields are fixed for the task, so the per-iteration withResolvedTools
+        // copy (every field plus two fresh ArrayLists, per loop turn) is pure churn —
+        // precompute the two variants once instead.
+        LlmCallContext stepCtx  = ctx.withResolvedTools(resolvedTools);
+        LlmCallContext forcedCtx = ctx.withResolvedTools(List.of());
+
+        // Same hoisting as the step contexts: the text catalog only varies by which tools
+        // are exposed (full set normally, empty on forced-final iterations), so precompute
+        // the string once instead of re-serialising every tool schema on each iteration.
+        String toolCatalog = ReactExecutionSupport.toolCatalog(resolvedTools, nativeTools);
+        // The message list grows incrementally across iterations — see MessageBuffer.
+        ReactExecutionSupport.MessageBuffer messageBuffer = new ReactExecutionSupport.MessageBuffer();
+
+        if (log.isDebugEnabled()) {
+            // Guarded: SLF4J evaluates arguments eagerly, so the unguarded stream+toList()
+            // below would allocate a fresh list on every execution even with DEBUG off.
+            log.debug("ReactStrategy starting for task [{}] maxIterations={} tools={}",
+                    task.taskId(), config.maxIterations(),
+                    resolvedTools.stream().map(AraTool::toolId).toList());
+        }
 
         while (iterations < config.maxIterations()) {
             // Cooperative cancellation: AgentInstance.terminate(session) interrupts this thread.
@@ -126,14 +145,14 @@ public final class ReactStrategy implements ExecutionStrategy {
             // isFinalAnswer() catches. This guarantees termination even for models
             // that never self-terminate — without contradicting the persist step above.
             boolean forceFinal = iterations >= config.maxIterations() - 1;
-            List<AraTool> activeTools = forceFinal ? List.of() : resolvedTools;
-            List<LlmMessage> messages = ReactExecutionSupport.buildMessages(memory, activeTools, nativeTools);
+            List<LlmMessage> messages = messageBuffer.build(memory, forceFinal ? "" : toolCatalog,
+                    ReactExecutionSupport.REACT_SYSTEM_SUFFIX);
             // Inject resolved tools into the context so the LLM client can build
             // native ToolSpecification objects from the agent's own registry.
-            LlmCallContext stepCtx = ctx.withResolvedTools(activeTools);
+            LlmCallContext iterationCtx = forceFinal ? forcedCtx : stepCtx;
             LlmCompletion completion;
             try {
-                completion = ReactExecutionSupport.callLlm(llm, messages, stepCtx, task, deadline, config);
+                completion = ReactExecutionSupport.callLlm(llm, messages, iterationCtx, task, deadline, config);
             } catch (ExecutionTimeoutException te) {
                 throw te;   // preserve timeout semantics for AgentInstance
             } catch (InterruptedException ie) {

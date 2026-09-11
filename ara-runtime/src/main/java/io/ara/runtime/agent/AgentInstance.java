@@ -402,28 +402,41 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
                 return handleEarlyTermination(task.taskId(), session, startedAt);
             }
 
-            AgentExecutionContext execCtx = buildContext(task.taskId(), session, 0, 0);
-            interceptorChain.before(execCtx, "Executing");
+            // With no interceptors registered (the default), the before() notification and
+            // the two Intercepting* decorators are pure hot-path overhead: before() loops
+            // over nothing, and the decorators would still build a fresh AgentExecutionContext
+            // on every LLM call and every tool dispatch via contextSupplier. Skip all of it
+            // and hand the strategy the raw session-pinned client/registry — already
+            // OTel-instrumented by the wiring — which is exactly what the decorators would
+            // delegate to.
+            boolean hasInterceptors = interceptorChain.size() > 0;
+            if (hasInterceptors) {
+                AgentExecutionContext execCtx = buildContext(task.taskId(), session, 0, 0);
+                interceptorChain.before(execCtx, "Executing");
+            }
 
             MemoryManager memoryManager = session.memoryManager();
             seedWorkingMemory(memoryManager, config, session, effectiveSystemPrompt, task);
 
             effectiveLlm = session.wiring().llm();
             ToolRegistry toolRegistry = session.wiring().toolRegistry();
-            // One supplier shared by both decorators instead of two identical lambdas:
-            // it is invoked on every LLM call and every tool dispatch, so it belongs to
-            // the hot path.
-            Supplier<AgentExecutionContext> contextSupplier =
-                    () -> buildContext(task.taskId(), session, 0, 0);
-            // Wrapped, not the raw session-pinned client/registry: gives interceptors
-            // per-iteration Think/ToolCall visibility (see InterceptingLlmClient /
-            // InterceptingToolRegistry) without any strategy needing to know about the
-            // interceptor chain — same pattern as the OTel decorators in AraRuntime.
-            LlmClient interceptedLlm = new InterceptingLlmClient(
-                    effectiveLlm, interceptorChain, contextSupplier);
-            ToolRegistry interceptedTools = new InterceptingToolRegistry(
-                    toolRegistry, interceptorChain, contextSupplier);
-            ExecutionResult result = strategy.execute(task, interceptedLlm, memoryManager, interceptedTools, config);
+
+            LlmClient dispatchedLlm   = effectiveLlm;
+            ToolRegistry dispatchedTools = toolRegistry;
+            if (hasInterceptors) {
+                // One supplier shared by both decorators instead of two identical lambdas:
+                // it is invoked on every LLM call and every tool dispatch, so it belongs
+                // to the hot path.
+                Supplier<AgentExecutionContext> contextSupplier =
+                        () -> buildContext(task.taskId(), session, 0, 0);
+                // Wrapped, not the raw session-pinned client/registry: gives interceptors
+                // per-iteration Think/ToolCall visibility (see InterceptingLlmClient /
+                // InterceptingToolRegistry) without any strategy needing to know about the
+                // interceptor chain — same pattern as the OTel decorators in AraRuntime.
+                dispatchedLlm = new InterceptingLlmClient(effectiveLlm, interceptorChain, contextSupplier);
+                dispatchedTools = new InterceptingToolRegistry(toolRegistry, interceptorChain, contextSupplier);
+            }
+            ExecutionResult result = strategy.execute(task, dispatchedLlm, memoryManager, dispatchedTools, config);
 
             Duration elapsed = Duration.between(startedAt, Instant.now());
 

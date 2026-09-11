@@ -18,6 +18,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * (default 60 s). The cache is invalidated immediately when {@link #invalidate()}
  * is called — intended to be wired to the SDK's {@code ToolListChanged} notification.
  *
+ * <p>Concurrent misses are collapsed into a single in-flight {@code tools/list} request
+ * (single-flight): when N agents warm up in parallel every one sees an empty cache, and
+ * without this each would fire its own fetch at the same freshly-started server.
+ *
  * <p>Usage:
  * <pre>{@code
  * McpToolRegistry registry = new McpToolRegistry(McpClientFactory.fromSse("http://localhost:3000/sse"));
@@ -35,6 +39,7 @@ public class McpToolRegistry {
     private final McpClient client;
     private final Duration ttl;
     private final AtomicReference<CachedSnapshot> cache = new AtomicReference<>(null);
+    private final AtomicReference<CompletableFuture<List<McpTool>>> inFlight = new AtomicReference<>(null);
 
     public McpToolRegistry(McpClient client) {
         this(client, DEFAULT_TTL);
@@ -81,11 +86,34 @@ public class McpToolRegistry {
         cache.set(null);
     }
 
+    /**
+     * Fetches the tool list, guaranteeing that at most one {@code tools/list} request is
+     * in flight at a time. Only the thread that wins the {@code inFlight} slot actually
+     * dispatches the network call; the others attach to its future.
+     */
     private CompletableFuture<List<McpTool>> refresh() {
-        return client.listTools().thenApply(tools -> {
-            cache.set(new CachedSnapshot(tools, Instant.now()));
-            return tools;
-        });
+        while (true) {
+            CompletableFuture<List<McpTool>> pending = inFlight.get();
+            if (pending != null) {
+                return pending;
+            }
+            CompletableFuture<List<McpTool>> candidate = new CompletableFuture<>();
+            if (inFlight.compareAndSet(null, candidate)) {
+                client.listTools().whenComplete((tools, error) -> {
+                    if (error == null) {
+                        cache.set(new CachedSnapshot(tools, Instant.now()));
+                        candidate.complete(tools);
+                    } else {
+                        candidate.completeExceptionally(error);
+                    }
+                    inFlight.compareAndSet(candidate, null);
+                });
+                return candidate;
+            }
+            // Lost the CAS — the winner may already have completed and released the slot,
+            // in which case inFlight is empty again (or a fresh winner is racing us). Loop
+            // instead of returning a now-null slot (completion order is not guaranteed).
+        }
     }
 
     private record CachedSnapshot(List<McpTool> tools, Instant fetchedAt) {

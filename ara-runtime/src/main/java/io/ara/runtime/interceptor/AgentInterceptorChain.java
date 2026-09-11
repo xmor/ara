@@ -9,7 +9,6 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
@@ -30,6 +29,7 @@ public final class AgentInterceptorChain {
     private static final Logger log = LoggerFactory.getLogger(AgentInterceptorChain.class);
 
     private final List<AgentInterceptor> interceptors;
+    private final List<AgentInterceptor> reverse;
 
     /**
      * Creates a chain from the given list of interceptors.
@@ -38,6 +38,14 @@ public final class AgentInterceptorChain {
      */
     public AgentInterceptorChain(List<AgentInterceptor> interceptors) {
         this.interceptors = List.copyOf(Objects.requireNonNull(interceptors, "interceptors must not be null"));
+        // Reverse registration order is the "outgoing" half of the onion, invoked
+        // after every step. Computed once here because the chain is immutable — the
+        // after-path runs on every LLM call and tool dispatch, so rebuilding an
+        // ArrayList + reverse on each of those (even with an empty chain) would be
+        // pure churn that a copy in the constructor makes go away entirely.
+        List<AgentInterceptor> rev = new ArrayList<>(this.interceptors);
+        java.util.Collections.reverse(rev);
+        this.reverse = rev;
     }
 
     /**
@@ -271,8 +279,6 @@ public final class AgentInterceptorChain {
     }
 
     private List<AgentInterceptor> reversed() {
-        List<AgentInterceptor> rev = new ArrayList<>(interceptors);
-        Collections.reverse(rev);
-        return rev;
+        return reverse;
     }
 }

@@ -1,26 +1,19 @@
 package io.ara.adapters.llm.mistral;
 
 import java.time.Duration;
-import java.util.List;
 import java.util.Set;
-import java.util.concurrent.Flow;
 
-import dev.langchain4j.agent.tool.ToolSpecification;
-import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.mistralai.MistralAiChatModel;
 import dev.langchain4j.model.mistralai.MistralAiStreamingChatModel;
-import io.ara.adapters.llm.CallParameterUtils;
-import io.ara.adapters.llm.ProviderErrorMapper;
-import io.ara.adapters.llm.TokenStreamPublisher;
-import io.ara.adapters.llm.ToolConversionUtils;
+import io.ara.adapters.llm.AbstractLangChain4jLlmClient;
+import io.ara.adapters.llm.AbstractLlmClientBuilder;
+import io.ara.adapters.llm.AbstractLlmClientBuilder.LlmSettings;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
-import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmException;
-import io.ara.core.llm.LlmMessage;
-import io.ara.core.llm.ToolCallEntry;
 import io.ara.core.media.MediaTypes;
 import io.ara.core.media.MediaTypes.MediaKind;
 
@@ -54,7 +47,7 @@ import io.ara.core.media.MediaTypes.MediaKind;
  *
  * @see LlmClient
  */
-public class MistralLlmClient implements LlmClient {
+public class MistralLlmClient extends AbstractLangChain4jLlmClient {
 
     private static final String PROVIDER = "mistral";
 
@@ -71,6 +64,11 @@ public class MistralLlmClient implements LlmClient {
     private final Duration timeout;
     private final boolean  logRequests;
     private final boolean  logResponses;
+    /**
+     * Precomputed once: a pure function of the adapter's capabilities, which never change
+     * after construction — rebuilding the set on every request only allocates needlessly.
+     */
+    private final Set<String> supportedMediaTypes;
 
     // ── Model catalogue ───────────────────────────────────────────────────────
 
@@ -111,26 +109,29 @@ public class MistralLlmClient implements LlmClient {
     // ── Construction ──────────────────────────────────────────────────────────
 
     private MistralLlmClient(Builder builder) {
-        this.modelName          = builder.modelName;
-        this.apiKey             = builder.apiKey;
-        this.baseUrl            = builder.baseUrl;
-        this.defaultTemperature = builder.temperature;
+        LlmSettings s = builder.settings();
+        this.modelName          = s.modelName();
+        this.apiKey             = s.apiKey();
+        this.baseUrl            = s.baseUrl();
+        this.defaultTemperature = s.temperature();
         this.defaultTopP        = builder.topP;
-        this.defaultMaxTokens   = builder.maxTokens;
-        this.timeout            = builder.timeout;
-        this.logRequests        = builder.logRequests;
-        this.logResponses       = builder.logResponses;
+        this.defaultMaxTokens   = s.maxTokens();
+        this.timeout            = s.timeout();
+        this.logRequests        = s.logRequests();
+        this.logResponses       = s.logResponses();
+        this.supportedMediaTypes =
+                MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT);
 
         this.chatModel = MistralAiChatModel.builder()
-                .apiKey(builder.apiKey)
-                .baseUrl(builder.baseUrl)
-                .modelName(builder.modelName)
-                .temperature(builder.temperature)
+                .apiKey(s.apiKey())
+                .baseUrl(s.baseUrl())
+                .modelName(s.modelName())
+                .temperature(s.temperature())
                 .topP(builder.topP)
-                .maxTokens(builder.maxTokens)
-                .timeout(builder.timeout)
-                .logRequests(builder.logRequests)
-                .logResponses(builder.logResponses)
+                .maxTokens(s.maxTokens())
+                .timeout(s.timeout())
+                .logRequests(s.logRequests())
+                .logResponses(s.logResponses())
                 .build();
     }
 
@@ -139,7 +140,7 @@ public class MistralLlmClient implements LlmClient {
         return PROVIDER + "-" + modelName;
     }
 
-    /** Mistral's function calling is sent natively — see {@link #complete} and {@link #toLlmCompletion}. */
+    /** Mistral's function calling is sent natively — see the shared pipeline's response mapping in {@link AbstractLangChain4jLlmClient}. */
     @Override
     public boolean supportsNativeTools() {
         return true;
@@ -153,44 +154,17 @@ public class MistralLlmClient implements LlmClient {
      */
     @Override
     public Set<String> supportedMediaTypes() {
-        return MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT);
+        return supportedMediaTypes;
     }
 
     @Override
-    public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) throws LlmException {
-        try {
-            ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages, context));
-            CallParameterUtils.applyTo(reqBuilder, context);
-
-            if (context != null && context.hasResolvedTools()) {
-                reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
-            }
-
-            return toLlmCompletion(chatModel.chat(reqBuilder.build()));
-
-        } catch (LlmException ex) {
-            throw ex;
-        } catch (Exception ex) {
-            throw mapException(ex);
-        }
+    protected ChatResponse chat(ChatRequest request) {
+        return chatModel.chat(request);
     }
 
     @Override
-    public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-        return TokenStreamPublisher.of(
-                handler -> {
-                    ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                            .messages(toLC4jMessages(messages, context));
-                    CallParameterUtils.applyTo(reqBuilder, context);
-
-                    if (context != null && context.hasResolvedTools()) {
-                        reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
-                    }
-
-                    getStreamingModel().chat(reqBuilder.build(), handler);
-                },
-                this::mapException);
+    protected void streamChat(ChatRequest request, StreamingChatResponseHandler handler) {
+        getStreamingModel().chat(request, handler);
     }
 
     // Thread-safe lazy initialisation using double-checked locking, same as the other adapters.
@@ -215,46 +189,9 @@ public class MistralLlmClient implements LlmClient {
         return streamingModel;
     }
 
-    // ── Conversion helpers ────────────────────────────────────────────────────
-
-    private List<ChatMessage> toLC4jMessages(List<LlmMessage> messages, LlmCallContext context) {
-        // Delegates to ToolConversionUtils so native tool-call/tool-result turns are
-        // reconstructed rather than collapsed into a generic UserMessage, and so media is
-        // checked against this client's declared types and flattened in one shared place.
-        return ToolConversionUtils.toNativeAwareChatMessages(messages, context, this);
-    }
-
-    private LlmCompletion toLlmCompletion(ChatResponse response) {
-        var ai = response.aiMessage();
-        // Both halves matter: aiMessage().text() is null on a tool-call-only turn, and
-        // LlmCompletion rejects a null text outright — same shape as the other adapters.
-        String text = (ai != null && ai.text() != null) ? ai.text() : "";
-
-        String finishReason = response.finishReason() != null
-                ? response.finishReason().toString().toLowerCase() : "stop";
-        int inputTokens  = response.tokenUsage() != null ? response.tokenUsage().inputTokenCount()  : 0;
-        int outputTokens = response.tokenUsage() != null ? response.tokenUsage().outputTokenCount() : 0;
-
-        String toolCallJson = null;
-        String toolCallId   = null;
-        List<ToolCallEntry> toolCalls = List.of();
-
-        if (ai != null && ai.hasToolExecutionRequests()) {
-            // Every request, not just the first: Mistral emits parallel tool calls whenever
-            // tools are present, so a multi-call completion is the norm, not the edge case.
-            var requests = ai.toolExecutionRequests();
-            toolCalls    = ToolConversionUtils.toToolCallEntries(requests);
-            toolCallJson = ToolConversionUtils.toLegacyToolCallJson(requests.get(0));
-            toolCallId   = requests.get(0).id();
-            finishReason = "tool_calls";
-        }
-
-        return new LlmCompletion(text, inputTokens, outputTokens, finishReason,
-                toolCallJson, toolCallId, toolCalls);
-    }
-
-    private LlmException mapException(Throwable ex) {
-        String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+    @Override
+    protected LlmException mapException(Throwable ex) {
+        String msg = errorMessage(ex);
         if (msg.contains("401") || msg.contains("Unauthorized") || msg.contains("api_key")) {
             return LlmException.authenticationError(PROVIDER, msg);
         }
@@ -268,15 +205,7 @@ public class MistralLlmClient implements LlmClient {
             return LlmException.contextLengthExceeded(PROVIDER, modelName, 0, 0);
         }
 
-        // Before falling through to a retryable network error: langchain4j classifies HTTP
-        // failures onto its own retriable/non-retriable hierarchy, and reading that is both
-        // more accurate than the substring checks above and immune to a provider rewording
-        // its error bodies. Without it a malformed request (400) was reported as a network
-        // error — retryable — so the strategy retried it and every fallback in a failover
-        // pool was tried in turn, for a request that could not succeed on any of them.
-        LlmException typed = ProviderErrorMapper.fromTypedException(PROVIDER, ex);
-        if (typed != null) return typed;
-        return LlmException.networkError(PROVIDER, msg, ex);
+        return fallbackClassify(PROVIDER, msg, ex);
     }
 
     // ── Builder ───────────────────────────────────────────────────────────────
@@ -293,52 +222,26 @@ public class MistralLlmClient implements LlmClient {
     /**
      * Builder for {@link MistralLlmClient}.
      *
-     * <p>The only required field is {@link #apiKey(String)}. All other fields have sensible
-     * defaults ({@link Models#MISTRAL_MEDIUM_LATEST}, temperature 0.7, 2000 max tokens).
+     * <p>Shared configuration (API key, base URL, model, temperature, max tokens, timeout,
+     * logging) lives in {@link AbstractLlmClientBuilder}; this class adds the {@link Models}
+     * catalogue and the {@link #topP(double)} knob, and defaults the model to
+     * {@link Models#MISTRAL_MEDIUM_LATEST}. The only required field is {@code apiKey}.
      */
-    public static final class Builder {
-        private String   apiKey;
-        private String   baseUrl;
-        private String   modelName    = Models.MISTRAL_MEDIUM_LATEST.id;
-        private Double   temperature  = 0.7;
-        private Double   topP;
-        private Integer  maxTokens    = 2000;
-        private Duration timeout      = Duration.ofSeconds(60);
-        private boolean  logRequests  = false;
-        private boolean  logResponses = false;
+    public static final class Builder extends AbstractLlmClientBuilder<Builder> {
+        private Double topP;
 
-        /** Sets the Mistral API key (required). */
-        public Builder apiKey(String apiKey)       { this.apiKey = apiKey; return this; }
-
-        /** Overrides the default API base URL (useful for proxies and testing). */
-        public Builder baseUrl(String baseUrl)     { this.baseUrl = baseUrl; return this; }
+        public Builder() {
+            modelName = Models.MISTRAL_MEDIUM_LATEST.id;
+        }
 
         /** Sets the model from the {@link Models} catalogue (preferred). */
         public Builder model(Models model)         { this.modelName = model.id; return this; }
-
-        /** Sets the model by string ID (use for non-catalogued or preview models). */
-        public Builder modelName(String modelName) { this.modelName = modelName; return this; }
-
-        /** Sampling temperature. Defaults to {@code 0.7}. */
-        public Builder temperature(double t)       { this.temperature = t; return this; }
 
         /**
          * Nucleus sampling threshold. Unset by default, so Mistral applies its own — altering
          * either {@code temperature} or {@code topP} is recommended, not both.
          */
         public Builder topP(double topP)           { this.topP = topP; return this; }
-
-        /** Maximum output tokens. Defaults to {@code 2000}. */
-        public Builder maxTokens(int maxTokens)    { this.maxTokens = maxTokens; return this; }
-
-        /** HTTP request timeout. Defaults to {@code 60s}. */
-        public Builder timeout(Duration timeout)   { this.timeout = timeout; return this; }
-
-        /** Enables LangChain4j request logging to SLF4J. */
-        public Builder logRequests(boolean v)      { this.logRequests = v; return this; }
-
-        /** Enables LangChain4j response logging to SLF4J. */
-        public Builder logResponses(boolean v)     { this.logResponses = v; return this; }
 
         /**
          * Builds the {@link MistralLlmClient}.
