@@ -71,8 +71,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -123,14 +121,6 @@ public final class AraRuntime implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(AraRuntime.class);
 
-    /**
-     * Lifecycle phases: {@code NEW → STARTED ⇄ STOPPED}. Explicit restart via
-     * {@link #start()} is supported (a fresh executor is provisioned); only the
-     * <em>implicit</em> auto-start performed by {@link #createAgent} / {@link #submit}
-     * is limited to the {@code NEW} phase — see {@link #autoStart()}.
-     */
-    private enum Lifecycle { NEW, STARTED, STOPPED }
-
     private final AraRuntimeConfig config;
     private final AgentFactory     factory;
     private final AgentRegistry    registry;
@@ -140,20 +130,10 @@ public final class AraRuntime implements AutoCloseable {
     private final ApprovalGate     approvalGate;
     private final io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry;
     private final io.ara.runtime.auth.AuthorizationService authorizationService;
-    private final QuiescenceTracker quiescenceTracker = new QuiescenceTracker();
+    private final RuntimeLifecycle lifecycle;
     private final Map<String, LlmClient> llmClients;
     private final ToolRegistry     toolRegistry;
     private final Map<String, Retriever> retrievers;
-
-    /**
-     * Serializes lifecycle transitions and agent creation/submission, so a
-     * {@link #stop()} can't race a concurrent {@link #createAgent} (which would leak an
-     * agent into a stopped runtime) or a {@link #submit} (which would hand the task to
-     * an executor that is being shut down).
-     */
-    private final Object lifecycleLock = new Object();
-    private volatile Lifecycle lifecycle = Lifecycle.NEW;
-    private volatile Executor agentExecutor;
 
     private AraRuntime(
             AraRuntimeConfig config,
@@ -177,6 +157,7 @@ public final class AraRuntime implements AutoCloseable {
         this.approvalGate  = approvalGate;
         this.temporaryScopeRegistry = temporaryScopeRegistry;
         this.authorizationService = new io.ara.runtime.auth.AuthorizationService(abacPolicyEngine);
+        this.lifecycle = new RuntimeLifecycle(config.name(), config.shutdownTimeoutSec());
         this.llmClients    = llmClients;
         this.toolRegistry  = toolRegistry;
         this.retrievers    = retrievers;
@@ -191,10 +172,10 @@ public final class AraRuntime implements AutoCloseable {
      * <p>Agents are created synchronously. If the provider throws, startup fails fast.
      */
     public void start() {
-        synchronized (lifecycleLock) {
-            if (lifecycle == Lifecycle.STARTED) return;
+        synchronized (lifecycle.getLock()) {
+            if (lifecycle.isStarted()) return;
             log.info("AraRuntime [{}] starting", config.name());
-            this.agentExecutor = Executors.newVirtualThreadPerTaskExecutor();
+            lifecycle.start();
 
             if (agentProvider != null) {
                 for (AgentConfig cfg : agentProvider.configs()) {
@@ -204,7 +185,6 @@ public final class AraRuntime implements AutoCloseable {
             }
 
             scheduler.start();
-            lifecycle = Lifecycle.STARTED;
             log.info("AraRuntime [{}] started — {} agent(s) registered",
                     config.name(), registry.count());
         }
@@ -222,8 +202,8 @@ public final class AraRuntime implements AutoCloseable {
      * seconds before {@code shutdownNow()} forces it.
      */
     public void stop() {
-        synchronized (lifecycleLock) {
-            if (lifecycle != Lifecycle.STARTED) return;
+        synchronized (lifecycle.getLock()) {
+            if (!lifecycle.isStarted()) return;
             log.info("AraRuntime [{}] stopping", config.name());
             try {
                 try {
@@ -242,8 +222,7 @@ public final class AraRuntime implements AutoCloseable {
                     }
                 });
             } finally {
-                shutdownExecutor();
-                lifecycle = Lifecycle.STOPPED;
+                lifecycle.stop();
                 log.info("AraRuntime [{}] stopped", config.name());
             }
         }
@@ -270,36 +249,10 @@ public final class AraRuntime implements AutoCloseable {
      * its agents and their checkpoints, so silently re-running the {@link
      * AgentProvider} would be surprising. Restart explicitly via {@link #start()}.
      *
-     * <p>Must be called while holding {@link #lifecycleLock}.
+     * <p>Must be called while holding {@code lifecycle.getLock()}.
      */
     private void autoStart() {
-        if (lifecycle == Lifecycle.STOPPED) {
-            throw new IllegalStateException("AraRuntime [" + config.name()
-                    + "] has been stopped — call start() to restart it explicitly"
-                    + " before creating agents or submitting tasks");
-        }
-        start();   // no-op when already STARTED
-    }
-
-    /**
-     * Shuts the shared executor down gracefully, waiting up to
-     * {@link AraRuntimeConfig#shutdownTimeoutSec()} seconds for in-flight tasks to
-     * finish before forcing it.
-     */
-    private void shutdownExecutor() {
-        if (!(agentExecutor instanceof ExecutorService es)) return;
-        long timeoutSec = config.shutdownTimeoutSec();
-        es.shutdown();
-        try {
-            if (!es.awaitTermination(timeoutSec, TimeUnit.SECONDS)) {
-                log.warn("AraRuntime [{}] executor did not drain within {}s — forcing shutdownNow",
-                        config.name(), timeoutSec);
-                es.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            es.shutdownNow();
-        }
+        lifecycle.autoStart();   // throws when stopped, no-op when already STARTED
     }
 
     // ── agent management ──────────────────────────────────────────────────────
@@ -311,7 +264,7 @@ public final class AraRuntime implements AutoCloseable {
      * explicitly via {@link #start()} first.
      */
     public AraAgent createAgent(AgentConfig config) {
-        synchronized (lifecycleLock) {
+        synchronized (lifecycle.getLock()) {
             autoStart();
             return factory.create(config);
         }
@@ -322,7 +275,7 @@ public final class AraRuntime implements AutoCloseable {
      * Same lifecycle rules as {@link #createAgent(AgentConfig)}.
      */
     public AraAgent createAgent(AgentConfig config, AgentContract contract) {
-        synchronized (lifecycleLock) {
+        synchronized (lifecycle.getLock()) {
             autoStart();
             return factory.create(config, contract);
         }
@@ -377,7 +330,7 @@ public final class AraRuntime implements AutoCloseable {
      * UI without dropping work already in progress against the old one.
      */
     public AraAgent replaceAgent(AgentConfig config) {
-        synchronized (lifecycleLock) {
+        synchronized (lifecycle.getLock()) {
             autoStart();
             return factory.replace(config);
         }
@@ -389,7 +342,7 @@ public final class AraRuntime implements AutoCloseable {
      * #replaceAgent(AgentConfig)}.
      */
     public AraAgent replaceAgent(AgentConfig config, AgentContract contract) {
-        synchronized (lifecycleLock) {
+        synchronized (lifecycle.getLock()) {
             autoStart();
             return factory.replace(config, contract);
         }
@@ -401,7 +354,7 @@ public final class AraRuntime implements AutoCloseable {
      * already in flight always finishes with the configuration it started with; only
      * sessions created after this call observe the updated one.
      *
-     * <p>Serialized on the same {@link #lifecycleLock} as {@link #createAgent}/{@link
+     * <p>Serialized on the same lock as {@link #createAgent}/{@link
      * #replaceAgent}: an administrative operation, not a hot-path one, so process-wide
      * serialization against other lifecycle operations is an acceptable trade-off for
      * the simplicity of reusing the existing lock.
@@ -414,7 +367,7 @@ public final class AraRuntime implements AutoCloseable {
     public void reconfigureAgent(AgentId id, UnaryOperator<AgentConfig> update) {
         Objects.requireNonNull(id, "id must not be null");
         Objects.requireNonNull(update, "update must not be null");
-        synchronized (lifecycleLock) {
+        synchronized (lifecycle.getLock()) {
             autoStart();
             AraAgent agent = registry.findById(id)
                     .orElseThrow(() -> new IllegalArgumentException(
@@ -479,7 +432,7 @@ public final class AraRuntime implements AutoCloseable {
     }
 
     /** {@code true} between a {@link #start()} and the next {@link #stop()}. */
-    public boolean isRunning() { return lifecycle == Lifecycle.STARTED; }
+    public boolean isRunning() { return lifecycle.isStarted(); }
 
     /**
      * Terminates a single agent, cleans up its checkpoints, and removes it from
@@ -496,9 +449,9 @@ public final class AraRuntime implements AutoCloseable {
     public void destroyAgent(AraAgent agent) {
         Objects.requireNonNull(agent, "agent must not be null");
 
-        synchronized (lifecycleLock) {
+        synchronized (lifecycle.getLock()) {
             // Guard: runtime already stopped → all agents were destroyed by stop()
-            if (lifecycle == Lifecycle.STOPPED) {
+            if (lifecycle.isStopped()) {
                 log.debug("AraRuntime [{}] already stopped — destroyAgent([{}]) is a no-op",
                         config.name(), agent.agentId().value());
                 return;
@@ -695,7 +648,7 @@ public final class AraRuntime implements AutoCloseable {
      *
      * @return the shared executor; may be {@code null} before {@link #start()} is called
      */
-    public Executor executor() { return agentExecutor; }
+    public Executor executor() { return lifecycle.getAgentExecutor(); }
 
     /**
      * Returns the shared {@link InstanceContextStore} (ADR-036) — one entry per agent,
@@ -765,20 +718,17 @@ public final class AraRuntime implements AutoCloseable {
      * executor reference are NOT tracked.
      */
     public AgentFuture submit(AraAgent agent, AgentTask task) {
-        Executor executor = agentExecutor;
-        if (lifecycle != Lifecycle.STARTED) {
-            // Slow path: a started-but-untouched (NEW) or a stopped runtime. The
-            // lifecycle decision must be taken atomically against a concurrent stop(),
-            // which is exactly what the lock does.
-            synchronized (lifecycleLock) {
-                autoStart();
-                executor = agentExecutor;
-            }
+        // Fast path: volatile read, lock-free when already STARTED. On the slow path
+        // (NEW or stopped) the lifecycle decision is taken atomically against a
+        // concurrent stop() — see RuntimeLifecycle#getAgentExecutorOrAutoStart.
+        Executor executor = lifecycle.getAgentExecutor();
+        if (!lifecycle.isStarted()) {
+            executor = lifecycle.getAgentExecutorOrAutoStart();
         }
 
         // Register BEFORE handing off — prevents a race where the task
         // completes before we even start tracking it
-        quiescenceTracker.taskStarted();
+        lifecycle.taskStarted();
         try {
             return submitTracked(agent, task, executor);
         } catch (RejectedExecutionException e) {
@@ -789,21 +739,18 @@ public final class AraRuntime implements AutoCloseable {
             // outcome is exactly the old one: blocked until stop() finishes, then the
             // IllegalStateException autoStart() raises for a stopped runtime. The executor
             // never rejects for any other reason, so this retry cannot loop.
-            quiescenceTracker.taskFinished();
-            synchronized (lifecycleLock) {
-                autoStart();
-                executor = agentExecutor;
-            }
-            quiescenceTracker.taskStarted();
+            lifecycle.taskFinished();
+            executor = lifecycle.getAgentExecutorOrAutoStart();
+            lifecycle.taskStarted();
             try {
                 return submitTracked(agent, task, executor);
             } catch (RuntimeException f) {
-                quiescenceTracker.taskFinished();
+                lifecycle.taskFinished();
                 throw f;
             }
         } catch (RuntimeException e) {
             // Task was never actually submitted (no completion will ever fire)
-            quiescenceTracker.taskFinished();
+            lifecycle.taskFinished();
             throw e;
         }
     }
@@ -813,7 +760,7 @@ public final class AraRuntime implements AutoCloseable {
         AgentFuture future = io.ara.core.agent.AraAgents.executeAsync(agent, task, executor);
         // Release on completion (success OR failure)
         future.async().whenComplete((response, error) ->
-                quiescenceTracker.taskFinished());
+                lifecycle.taskFinished());
         return future;
     }
 
@@ -849,7 +796,7 @@ public final class AraRuntime implements AutoCloseable {
         if (timeout.isNegative()) {
             throw new IllegalArgumentException("timeout must not be negative: " + timeout);
         }
-        return quiescenceTracker.awaitQuiescence(timeout.toNanos(), TimeUnit.NANOSECONDS);
+        return lifecycle.awaitQuiescence(timeout.toNanos(), TimeUnit.NANOSECONDS);
     }
 
     /**
@@ -858,7 +805,7 @@ public final class AraRuntime implements AutoCloseable {
      * endpoints and diagnostics.
      */
     public int inFlightTaskCount() {
-        return quiescenceTracker.inFlightCount();
+        return lifecycle.inFlightCount();
     }
 
 
