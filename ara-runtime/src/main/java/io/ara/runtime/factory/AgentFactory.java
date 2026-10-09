@@ -356,11 +356,6 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
      */
     private AraAgent buildAndWrap(AgentConfig config, AgentContract contract) {
         boolean enforcing = contract != null && !contract.isEmpty();
-        // Validated before anything is built: a rejected configuration must not leave a
-        // half-built agent — and its tool registry — behind with no one to dispose of it.
-        if (enforcing) {
-            rejectUnsatisfiableOutputSchema(config, contract);
-        }
         AgentInstance inner = buildInstance(config);
         return enforcing ? new ContractEnforcingAgent(inner, contract) : inner;
     }
@@ -375,47 +370,6 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         return traceStore != null && traceBlobStore != null
                 ? new io.ara.runtime.trace.TraceEmittingAgent(agent, traceStore, traceBlobStore, traceSpecHash)
                 : agent;
-    }
-
-    /**
-     * Rejects the one combination of config and contract that cannot be honoured: an output
-     * schema declared on the contract while the agent's LLM profile asks for the <em>native</em>
-     * schema path.
-     *
-     * <p>A structured-output contract reaches the model by exactly one route — {@code
-     * OutputFormatEnforcer} appending the schema to the system prompt — and {@code
-     * ContractEnforcer} takes that route only when {@code nativeJsonSchema} is {@code false}.
-     * When it is {@code true}, the schema is meant to travel as a provider-native
-     * {@code response_format}, and <strong>no ARA adapter implements that</strong>: {@code
-     * CallParameterUtils} forwards temperature, topP and maxOutputTokens, and nothing reads
-     * {@code LlmCallContext.outputJsonSchema()}.
-     *
-     * <p>So the combination produces a model that was never told about the schema, answering in
-     * prose, and an output validator that rejects every answer it gives — a task that fails on
-     * every run with a message about a missing field, pointing at the model rather than at the
-     * flag that caused it. Failing here instead turns a puzzle into a sentence, at agent
-     * creation rather than on the first task.
-     *
-     * <p>The alternative was to implement the native path in the adapters that support it. It
-     * was rejected for now because provider support for {@code response_format: json_schema} is
-     * per-<em>endpoint</em> rather than per-provider — the same lesson the media work learned
-     * the hard way with {@code file} content parts on OpenAI-compatible gateways — so it needs
-     * the same declared-capability treatment, which is a change of its own rather than a
-     * by-product of closing this hole.
-     *
-     * @throws IllegalStateException if the contract's output schema could never reach the model
-     */
-    private static void rejectUnsatisfiableOutputSchema(AgentConfig config, AgentContract contract) {
-        if (contract.outputSchema() == null || !config.nativeJsonSchema()) {
-            return;
-        }
-        throw new IllegalStateException(
-                "Agent [" + config.agentId().value() + "] declares an output schema on its "
-                        + "AgentContract while its LLM profile sets nativeJsonSchema(true), and no "
-                        + "ARA adapter sends a provider-native response_format — so the schema "
-                        + "would reach neither the model nor the request, and every answer would "
-                        + "fail output validation. Set nativeJsonSchema(false) on the LlmProfile "
-                        + "(the default) to have the schema appended to the system prompt instead.");
     }
 
     /**

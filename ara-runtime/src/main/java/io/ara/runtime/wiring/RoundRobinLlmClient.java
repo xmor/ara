@@ -81,6 +81,11 @@ final class RoundRobinLlmClient implements LlmClient {
         return clients.stream().allMatch(LlmClient::supportsNativeTools);
     }
 
+    @Override
+    public boolean supportsNativeStructuredOutput() {
+        return clients.stream().allMatch(LlmClient::supportsNativeStructuredOutput);
+    }
+
     /**
      * The intersection of the candidates' supported media types.
      *

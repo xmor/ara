@@ -76,6 +76,11 @@ public abstract class DelegatingLlmClient implements LlmClient {
     }
 
     @Override
+    public boolean supportsNativeStructuredOutput() {
+        return delegate.supportsNativeStructuredOutput();
+    }
+
+    @Override
     public Set<String> supportedMediaTypes() {
         return delegate.supportedMediaTypes();
     }

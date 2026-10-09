@@ -31,14 +31,36 @@ AgentContract contract = AgentContract.builder()
 AraAgent agent = runtime.createAgent(config, contract);
 ```
 
-`outputSchema(...)` does two things: it declares the contract *and* instructs the model,
-by appending the schema to the system prompt (`"Respond ONLY with a single valid JSON
-object matching this schema"`). That route works against every endpoint, including
-gateways that support no `response_format` at all, and it is what the default
-`nativeJsonSchema(false)` selects. Setting `nativeJsonSchema(true)` on the `LlmProfile`
-asks for a provider-native `response_format` instead — which no adapter sends yet, so
-combining it with an output schema is rejected at `createAgent` rather than left to fail
-on every task with a puzzling missing-field error.
+`outputSchema(...)` does two things: it declares the contract *and* makes the schema reach
+the model. By default (`nativeJsonSchema(false)`) that happens by appending the schema to the
+system prompt (`"Respond ONLY with a single valid JSON object matching this schema"`) — a route
+that works against every endpoint, including gateways that support no `response_format` at all.
+
+Setting `nativeJsonSchema(true)` on the `LlmProfile` sends the schema as a provider-native
+`response_format: json_schema` instead, on the request rather than in the prompt. Support is
+per-**endpoint**, not per-provider: `OpenAiLlmClient` claims it for hosted OpenAI and, behind a
+custom `baseUrl`, only when told to — the same treatment media types get:
+
+```java
+LlmClient viaGateway = AraLlmClientFactory.openAi()
+        .apiKey(KEY).baseUrl("https://gateway.internal/v1").modelName("m")
+        .structuredOutputSupport(true)   // this endpoint really accepts response_format
+        .strictJsonSchema(true)          // optional: guarantee, not just guidance — see below
+        .build();
+```
+
+Asking for the native path on a client that does not support it fails the call with a
+non-retryable error naming the capability, instead of quietly dropping the schema and answering
+in prose.
+
+**Guidance vs guarantee.** By default the native schema travels with `strict: false`: the
+provider is told the shape but does not constrain decoding, so a wrong answer is still possible
+and it is the contract's own validator (plus `outputRepairAttempts`) that catches it.
+`strictJsonSchema(true)` sends `strict: true`, which makes OpenAI constrain decoding so the
+answer cannot violate the schema — at the cost of what the schema may contain (every property
+must be in `required`, `additionalProperties` must be `false`, and keywords like `pattern`,
+`minimum` and `format` are unsupported). A legal draft-07 schema using one of those is answered
+with a 400, which is why it is opt-in rather than derived.
 
 ## Built-in processors
 

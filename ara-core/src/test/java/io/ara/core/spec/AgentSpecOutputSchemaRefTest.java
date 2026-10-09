@@ -10,8 +10,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * {@code outputSchemaRef}: the answer-side twin of {@code schemaRef} — an overlay that moves
- * {@link AgentSpec#effectiveHash()} and nothing else, carried through every copy, and refused
- * together with {@code nativeJsonSchema(true)}.
+ * {@link AgentSpec#effectiveHash()} and nothing else, carried through every copy, and legal
+ * together with {@code nativeJsonSchema(true)} now that adapters send a native
+ * {@code response_format}.
  */
 class AgentSpecOutputSchemaRefTest {
 
@@ -131,20 +132,25 @@ class AgentSpecOutputSchemaRefTest {
     }
 
     @Test
-    void anOutputSchemaWithNativeJsonSchema_isRefusedWhenTheSpecIsBuilt() {
+    void anOutputSchemaWithNativeJsonSchema_isAllowed() {
+        // Adapters now send a provider-native response_format, so the combination is legal:
+        // the schema reaches the model through the request instead of the system prompt. A
+        // client that cannot do it fails the call naming the capability (see the adapters'
+        // supportsNativeStructuredOutput), rather than the spec forbidding it up front.
         AgentSpec nativeSpec = AgentSpec.root(nativeConfig());
 
-        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> nativeSpec.withOutputSchemaRef("out-1"));
-        assertTrue(e.getMessage().contains("nativeJsonSchema"), e.getMessage());
-        assertTrue(e.getMessage().contains("out-1"), e.getMessage());
+        AgentSpec withSchema = assertDoesNotThrow(() -> nativeSpec.withOutputSchemaRef("out-1"));
+        assertEquals("out-1", withSchema.outputSchemaRef());
+        assertTrue(withSchema.config().nativeJsonSchema());
     }
 
     @Test
-    void derivingIntoNativeJsonSchema_isRefusedWhenTheSpecCarriesAnOutputSchema() {
+    void derivingIntoNativeJsonSchema_isAllowedWhenTheSpecCarriesAnOutputSchema() {
         AgentSpec spec = base().withOutputSchemaRef("out-1");
 
-        assertThrows(IllegalArgumentException.class, () -> spec.derive(nativeConfig()));
+        AgentSpec derived = assertDoesNotThrow(() -> spec.derive(nativeConfig()));
+        assertEquals("out-1", derived.outputSchemaRef());
+        assertTrue(derived.config().nativeJsonSchema());
     }
 
     @Test

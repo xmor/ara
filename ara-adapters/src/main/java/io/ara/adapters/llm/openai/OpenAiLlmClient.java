@@ -10,6 +10,10 @@ import dev.langchain4j.http.client.jdk.JdkHttpClient;
 import dev.langchain4j.http.client.jdk.JdkHttpClientBuilder;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.request.ChatRequestParameters;
+import dev.langchain4j.model.chat.request.ResponseFormat;
+import dev.langchain4j.model.chat.request.ResponseFormatType;
+import dev.langchain4j.model.chat.request.json.JsonRawSchema;
+import dev.langchain4j.model.chat.request.json.JsonSchema;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.openai.OpenAiChatModel;
@@ -76,6 +80,30 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
     private final boolean logResponses;
     private final Map<String, String> customHeaders;
     private final boolean documentSupport;
+    /**
+     * Whether this endpoint accepts a native {@code response_format: json_schema}.
+     *
+     * <p>Derived the same way as {@link #documentSupport}, and for the same reason: structured
+     * output is an OpenAI API extension, hosted OpenAI (and Azure) implement it, but an arbitrary
+     * OpenAI-compatible gateway often rejects the {@code response_format} field. So the default is
+     * {@code true} only when no custom {@link Builder#baseUrl(String)} is set; behind a base URL
+     * it is {@code false} unless the caller opts in with {@link Builder#structuredOutputSupport(boolean)}.
+     * See {@link #supportsNativeStructuredOutput()}.
+     */
+    private final boolean structuredOutputSupport;
+    /**
+     * Whether a native output schema is sent with OpenAI's {@code strict: true}, which is what
+     * turns the schema from strong guidance into a guarantee: only in strict mode does OpenAI
+     * constrain decoding so the answer cannot violate the schema.
+     *
+     * <p>Opt-in rather than on by default, because strict mode restricts what the schema may
+     * contain — every property must be listed in {@code required}, {@code additionalProperties}
+     * must be {@code false}, and several JSON Schema keywords are unsupported. A perfectly legal
+     * draft-07 schema that breaks one of those rules is rejected by the API, so defaulting to
+     * {@code true} would turn working agents into 400s. {@code null}/{@code false} keeps the
+     * previous wire shape ({@code strict: false}).
+     */
+    private final Boolean strictJsonSchema;
     /**
      * Forces HTTP/1.1 on <em>both</em> the blocking and the streaming model's underlying JDK
      * {@code HttpClient}.
@@ -183,6 +211,13 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         this.documentSupport = builder.documentSupport != null
                 ? builder.documentSupport
                 : (s.baseUrl() == null || s.baseUrl().isBlank());
+        // Same per-endpoint derivation as documentSupport: hosted OpenAI accepts
+        // response_format: json_schema, an arbitrary OpenAI-compatible gateway usually does
+        // not. See supportsNativeStructuredOutput().
+        this.structuredOutputSupport = builder.structuredOutputSupport != null
+                ? builder.structuredOutputSupport
+                : (s.baseUrl() == null || s.baseUrl().isBlank());
+        this.strictJsonSchema = builder.strictJsonSchema;
         this.forceHttp1 = builder.forceHttp1;
         this.connectTimeout = builder.connectTimeout;
         this.supportedMediaTypes = documentSupport
@@ -197,6 +232,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                 .topP(builder.topP)
                 .maxTokens(s.maxTokens())
                 .returnThinking(true)   // parse-only: reads the reasoning a server returns; asks for nothing
+                .strictJsonSchema(builder.strictJsonSchema)   // null ⇒ langchain4j's default (strict: false)
                 .timeout(s.timeout())
                 .customHeaders(customHeaders)
                 .logRequests(s.logRequests())
@@ -346,6 +382,37 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
     }
 
     /**
+     * Whether this endpoint accepts a native {@code response_format: json_schema}. Derived per
+     * endpoint — hosted OpenAI yes, a custom {@link Builder#baseUrl(String)} no unless opted in
+     * via {@link Builder#structuredOutputSupport(boolean)} — see the {@link #structuredOutputSupport}
+     * field and {@link io.ara.core.llm.LlmClient#supportsNativeStructuredOutput()}.
+     */
+    @Override
+    public boolean supportsNativeStructuredOutput() {
+        return structuredOutputSupport;
+    }
+
+    /**
+     * The agent's output schema as an OpenAI {@code response_format: json_schema}. The schema
+     * string travels verbatim via {@link dev.langchain4j.model.chat.request.json.JsonRawSchema},
+     * so a draft-07 schema with {@code pattern}, bounds, {@code additionalProperties} etc. reaches
+     * the provider exactly as the contract declared it, with no lossy round-trip through a typed
+     * model. Called only when {@link #supportsNativeStructuredOutput()} is {@code true} and a
+     * schema is present (see {@link AbstractLangChain4jLlmClient#applyResponseFormat}).
+     */
+    @Override
+    protected ResponseFormat buildResponseFormat(LlmCallContext context) {
+        String name = context.outputSchemaName() != null ? context.outputSchemaName() : "output";
+        return ResponseFormat.builder()
+                .type(ResponseFormatType.JSON)
+                .jsonSchema(JsonSchema.builder()
+                        .name(name)
+                        .rootElement(JsonRawSchema.from(context.outputJsonSchema()))
+                        .build())
+                .build();
+    }
+
+    /**
      * Images as image parts and text files inlined as text — always; PDFs as {@code file}
      * parts only when this client talks to an endpoint known to accept them.
      *
@@ -400,6 +467,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                                     .topP(defaultTopP)
                                     .maxTokens(defaultMaxTokens)
                                     .returnThinking(true)
+                                    .strictJsonSchema(strictJsonSchema)
                                     .timeout(timeout)
                                     .customHeaders(customHeaders)
                                     .logRequests(logRequests)
@@ -458,6 +526,10 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         private Double  topP;
         /** Nullable on purpose: null means "derive from baseUrl" — see supportedMediaTypes(). */
         private Boolean documentSupport;
+        /** Nullable on purpose: null means "derive from baseUrl" — see supportsNativeStructuredOutput(). */
+        private Boolean structuredOutputSupport;
+        /** Nullable on purpose: null means langchain4j's default, i.e. {@code strict: false}. */
+        private Boolean strictJsonSchema;
         private boolean forceHttp1 = false;
         private Duration connectTimeout;
         private Map<String, String> customHeaders = Map.of();
@@ -500,6 +572,43 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
          * worked, saying so clearly.
          */
         public Builder documentSupport(boolean v) { this.documentSupport = v; return this; }
+
+        /**
+         * Declares whether this endpoint accepts a native {@code response_format: json_schema}
+         * (OpenAI structured output).
+         *
+         * <p>Leave it unset unless you have to: the default is hosted OpenAI ⇒ yes, custom
+         * {@link #baseUrl(String)} ⇒ no, which is right for almost every deployment. Set it to
+         * {@code true} for a gateway you know forwards {@code response_format} (Azure OpenAI,
+         * say) so an agent with {@code nativeJsonSchema(true)} can use it, and to {@code false}
+         * to force the prompt-based schema path even on hosted OpenAI.
+         *
+         * <p>Getting it wrong in the generous direction is what this flag prevents: an endpoint
+         * that rejects {@code response_format} would otherwise answer with an opaque 400 (or
+         * silently ignore the field) instead of ARA naming the unsupported capability before the
+         * call. Wrong in the strict direction merely falls back to the schema-in-prompt path,
+         * which works everywhere.
+         */
+        public Builder structuredOutputSupport(boolean v) { this.structuredOutputSupport = v; return this; }
+
+        /**
+         * Sends a native output schema with OpenAI's {@code strict: true} — the mode that
+         * actually <em>guarantees</em> the answer matches the schema, by constraining decoding
+         * rather than only instructing the model.
+         *
+         * <p>Off by default, and deliberately not derived from the endpoint: strict mode narrows
+         * what a schema may contain (every property must appear in {@code required},
+         * {@code additionalProperties} must be {@code false}, and a number of JSON Schema
+         * keywords — {@code pattern}, {@code minimum}, {@code format}, … — are not supported).
+         * A legal draft-07 schema that uses one of those is answered with a 400, so turning this
+         * on is a statement about the schemas an agent declares, not about the provider.
+         *
+         * <p>Leave it off to keep the schema as strong guidance and let the contract's own
+         * {@code JsonSchemaValidator} (plus {@code outputRepairAttempts}) catch the rare
+         * violation; turn it on when the schemas are strict-compliant and the guarantee is worth
+         * more than the flexibility. Applies to both the blocking and the streaming model.
+         */
+        public Builder strictJsonSchema(boolean v) { this.strictJsonSchema = v; return this; }
 
         /**
          * Forces HTTP/1.1 on both the blocking and the streaming model, preventing HTTP/2

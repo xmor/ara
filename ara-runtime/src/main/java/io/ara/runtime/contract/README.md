@@ -14,9 +14,11 @@ declared on an `AgentContract` in a fixed order:
 ```
 1. InputProcessor chain   — contract.inputProcessors(), applied in declaration order
 2. PromptShaper chain     — contract.promptShapers(), applied in declaration order
-3. outputSchema           — contract.outputSchema() (a SchemaProvider), appended to the
+3. outputSchema           — contract.outputSchema() (a SchemaProvider): always put on the
+                            task's LlmExecutionHints, and additionally appended to the
                             system prompt via OutputFormatEnforcer unless the LLM profile
-                            supports nativeJsonSchema()
+                            sets nativeJsonSchema(true) — in which case the adapter sends
+                            it as a provider-native response_format instead
 4. inner.execute(task)    — the actual agent/strategy/LLM loop
 5. OutputProcessor chain  — contract.outputProcessors(), applied in declaration order
 ```

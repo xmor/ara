@@ -413,6 +413,11 @@ public final class FailoverLlmClient implements LlmClient {
         return clients.stream().allMatch(LlmClient::supportsNativeTools);
     }
 
+    @Override
+    public boolean supportsNativeStructuredOutput() {
+        return clients.stream().allMatch(LlmClient::supportsNativeStructuredOutput);
+    }
+
     /**
      * The intersection of the candidates' supported media types — the pool can only promise
      * what every client it might fall back to can deliver.

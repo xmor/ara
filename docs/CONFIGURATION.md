@@ -288,7 +288,7 @@ javadoc lists them all.
 URL where you host it, with a top-level `"$schema"` field and an editor will complete field names,
 offer the allowed values and flag mistakes as you type; the decoder accepts and ignores that
 field. The schema is the first line of defence, not the only one: rules that depend on two
-fields (a retriever needs a `rag+` strategy; an output schema excludes `nativeJsonSchema`) and
+fields (a retriever needs a `rag+` strategy) and
 names that do not exist on your runtime are still caught at import and by `AgentSpecCheck`. A
 test keeps the schema and the decoder in step.
 

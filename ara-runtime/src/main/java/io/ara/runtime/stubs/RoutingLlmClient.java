@@ -84,6 +84,12 @@ public final class RoutingLlmClient implements LlmClient {
                 && defaultClient.supportsNativeTools();
     }
 
+    @Override
+    public boolean supportsNativeStructuredOutput() {
+        return routes.values().stream().allMatch(LlmClient::supportsNativeStructuredOutput)
+                && defaultClient.supportsNativeStructuredOutput();
+    }
+
     /**
      * The intersection across every route <em>and</em> the default — the route is chosen by
      * agent type at call time, so the honest answer is what all of them can do.

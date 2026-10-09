@@ -288,6 +288,12 @@ public final class CircuitBreakerLlmClient implements LlmClient {
     }
 
     @Override
+    public boolean supportsNativeStructuredOutput() {
+        // Forward the delegate's capability for the same reason as supportsNativeTools above.
+        return delegate.supportsNativeStructuredOutput();
+    }
+
+    @Override
     public Set<String> supportedMediaTypes() {
         return delegate.supportedMediaTypes();
     }

@@ -84,7 +84,7 @@
       "additionalProperties": false,
       "properties": {
         "inputSchemaRef": { "type": "string" },
-        "outputSchemaRef": { "type": "string", "description": "Cannot be combined with llm.primary.nativeJsonSchema = true." },
+        "outputSchemaRef": { "type": "string", "description": "Id of the registered output schema the answer must match. With llm.primary.nativeJsonSchema = true it is sent as a provider-native response_format; otherwise it is appended to the system prompt." },
         "outputRepairAttempts": { "type": "integer", "minimum": 0 }
       }
     },

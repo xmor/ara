@@ -79,12 +79,6 @@ public record AgentSpec(
         if (outputRepairAttempts < 0) {
             throw new IllegalArgumentException("outputRepairAttempts must be >= 0, was " + outputRepairAttempts);
         }
-        if (outputSchemaRef != null && config.nativeJsonSchema()) {
-            throw new IllegalArgumentException("outputSchemaRef '" + outputSchemaRef + "' cannot be combined with "
-                    + "nativeJsonSchema(true) on the LLM profile: the output schema reaches the model only through "
-                    + "the system prompt, which the native path skips, and no ARA adapter sends a native "
-                    + "response_format — set nativeJsonSchema(false), or drop the output schema");
-        }
     }
 
     /**

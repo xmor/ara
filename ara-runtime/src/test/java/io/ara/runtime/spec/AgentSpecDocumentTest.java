@@ -405,11 +405,16 @@ class AgentSpecDocumentTest {
     }
 
     @Test
-    void decode_anOutputSchemaWithNativeJsonSchema_isRejectedByTheSpec() throws Exception {
-        assertEquals("contract", rejected(json("""
+    void decode_anOutputSchemaWithNativeJsonSchema_isAcceptedByTheSpec() throws Exception {
+        // Legal since adapters send a provider-native response_format: the document round-trips
+        // instead of being refused for a restriction that no longer holds.
+        AgentSpec spec = AgentSpecDocument.decode(json("""
                 {"schemaVersion":1,"agent":{"type":"a"},
                  "llm":{"primary":{"model":"m","nativeJsonSchema":true}},
-                 "contract":{"outputSchemaRef":"out-v1"}}""")).path());
+                 "contract":{"outputSchemaRef":"out-v1"}}"""));
+
+        assertEquals("out-v1", spec.outputSchemaRef());
+        assertTrue(spec.config().nativeJsonSchema());
     }
 
     // ── what a document cannot hold ────────────────────────────────────────────────────

@@ -179,17 +179,21 @@ public record LlmProfile(
          * Declares that the schema of a structured-output contract should travel as a
          * provider-native {@code response_format} rather than be appended to the system prompt.
          *
-         * <p><strong>No ARA adapter implements the native path yet</strong>, so setting this to
-         * {@code true} together with an {@code AgentContract.outputSchema(...)} is a
-         * configuration that cannot be honoured, and {@code AgentFactory} rejects it at agent
-         * creation with an explanation. Left at its default {@code false}, the schema is
-         * appended to the system prompt — which works against every endpoint, including the
-         * OpenAI-compatible gateways that support no {@code response_format} at all.
+         * <p>Honoured by adapters that declare {@link LlmClient#supportsNativeStructuredOutput()}
+         * — today the OpenAI adapter, per endpoint. The schema then reaches the provider on the
+         * request itself, which is more reliable than an instruction a model can ignore; add
+         * {@code OpenAiLlmClient.Builder.strictJsonSchema(true)} to have the provider also
+         * <em>guarantee</em> conformance by constraining decoding.
          *
-         * <p>The flag stays because the native path is worth having: it is more reliable than
-         * an instruction a model can ignore. It needs the same declared-capability treatment as
-         * media types, since {@code response_format} support is per-endpoint rather than
-         * per-provider.
+         * <p>Because {@code response_format} support is per-<em>endpoint</em> rather than
+         * per-provider, a client pointed at an OpenAI-compatible gateway does not claim it
+         * unless told to. Asking for the native path on a client that cannot do it fails the
+         * call with a non-retryable error naming the capability, rather than silently dropping
+         * the schema.
+         *
+         * <p>Left at its default {@code false}, the schema is appended to the system prompt —
+         * which works against every endpoint, including gateways that support no
+         * {@code response_format} at all.
          */
         public Builder nativeJsonSchema(boolean v)        { this.nativeJsonSchema = v;         return this; }
         public Builder costInputPer1kTokens(Money v)      { this.costInputPer1kTokens = v;     return this; }

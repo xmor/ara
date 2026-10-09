@@ -151,6 +151,38 @@ public interface LlmClient {
     }
 
     /**
+     * Whether this client can enforce an output JSON Schema natively — sending it as a
+     * provider {@code response_format: json_schema} on the request rather than relying on
+     * the schema being appended to the system prompt.
+     *
+     * <p>This is the capability behind {@link LlmProfile#nativeJsonSchema()}: when an agent
+     * sets {@code nativeJsonSchema(true)} and declares an output schema, the schema travels
+     * on {@link LlmCallContext#outputJsonSchema()} and the adapter is expected to put it in
+     * the request's {@code response_format}. A client that returns {@code false} here cannot
+     * honour that request and must reject it with a non-retryable {@link LlmException}
+     * rather than silently answer in prose — the same contract as an unsupported media type.
+     *
+     * <p><b>Support is per-endpoint, not per-vendor.</b> The structured-output API is an
+     * OpenAI extension that hosted OpenAI, Azure OpenAI and a few gateways implement, while
+     * many OpenAI-compatible proxies reject the {@code response_format} field outright. So an
+     * adapter pointed at an arbitrary {@code baseUrl} must not claim this on the strength of
+     * speaking the OpenAI wire format — exactly the lesson {@link #supportedMediaTypes()}
+     * learned with {@code file} content parts.
+     *
+     * <p>Defaults to {@code false} — the safe answer for any client with no native structured
+     * output. Adapters that have it override this (OpenAI, per endpoint). Decorators
+     * <strong>must</strong> delegate to the wrapped client(s) rather than inherit this
+     * default, or they will silently mask the capability of whatever they wrap; a composite
+     * over several clients reports the <em>intersection</em>, since it cannot promise what a
+     * candidate it might pick lacks.
+     *
+     * @return {@code true} if this client sends a native {@code response_format: json_schema}
+     */
+    default boolean supportsNativeStructuredOutput() {
+        return false;
+    }
+
+    /**
      * The MIME types from {@code MediaTypes.allowed()} that this client can actually send to
      * its provider.
      *

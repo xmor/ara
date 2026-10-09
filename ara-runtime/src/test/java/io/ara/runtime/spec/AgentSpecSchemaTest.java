@@ -161,17 +161,12 @@ class AgentSpecSchemaTest {
 
     @Test
     void someRulesBelongToTheDomain_notTheSchema() {
-        // The schema cannot know these: they depend on two fields together. The decoder catches them.
+        // The schema cannot know this: it depends on two fields together. The decoder catches it.
         JsonNode retrieverWithoutRag = json("{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"execution\":{\"retrieverId\":\"docs\"}}");
-        JsonNode outputSchemaWithNative = json("{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},"
-                + "\"llm\":{\"primary\":{\"nativeJsonSchema\":true}},\"contract\":{\"outputSchemaRef\":\"out\"}}");
 
         assertTrue(schemaAccepts(retrieverWithoutRag));
-        assertTrue(schemaAccepts(outputSchemaWithNative));
         assertInstanceOf(AgentSpecDocumentException.class,
                 assertThrows(IllegalArgumentException.class, () -> AgentSpecDocument.decode(retrieverWithoutRag)));
-        assertInstanceOf(AgentSpecDocumentException.class,
-                assertThrows(IllegalArgumentException.class, () -> AgentSpecDocument.decode(outputSchemaWithNative)));
     }
 
     // ── the two know the same field names ──────────────────────────────────────────────

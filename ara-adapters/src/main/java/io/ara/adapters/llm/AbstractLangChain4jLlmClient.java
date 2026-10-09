@@ -7,6 +7,7 @@ import java.util.concurrent.Flow;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.request.ChatRequestParameters;
+import dev.langchain4j.model.chat.request.ResponseFormat;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.output.FinishReason;
@@ -124,10 +125,63 @@ public abstract class AbstractLangChain4jLlmClient implements LlmClient {
         ChatRequest.Builder reqBuilder = ChatRequest.builder()
                 .messages(toLC4jMessages(messages, context));
         CallParameterUtils.applyTo(reqBuilder, context);
+        applyResponseFormat(reqBuilder, context);
         applyTools(reqBuilder, context);
         return context != null && context.hasReasoningOptions()
                 ? withReasoningParameters(reqBuilder, context)
                 : reqBuilder;
+    }
+
+    /**
+     * Puts the agent's output schema on the request as a native {@code response_format:
+     * json_schema}, when the agent asked for the native path and declared a schema.
+     *
+     * <p>Reached only when {@link LlmCallContext#nativeJsonSchema()} is {@code true} <em>and</em>
+     * a schema is present: with the default {@code nativeJsonSchema(false)} the schema travels
+     * in the system prompt instead (ARA's {@code OutputFormatEnforcer}), and this leaves the
+     * request untouched — byte-for-byte what it was before the native path existed.
+     *
+     * <p>When the agent does ask for the native path but this client cannot honour it
+     * ({@link LlmClient#supportsNativeStructuredOutput()} is {@code false} — e.g. a provider
+     * with no structured-output API, or an OpenAI-compatible endpoint not known to accept
+     * {@code response_format}), the call is rejected with a non-retryable {@link LlmException}
+     * naming the provider, rather than sending a request that silently ignores the schema and
+     * answers in prose. This mirrors the hard-failure contract of {@link
+     * LlmClient#supportedMediaTypes()}: a capability the client lacks is an error before the
+     * request goes out, never a quiet downgrade.
+     */
+    private void applyResponseFormat(ChatRequest.Builder reqBuilder, LlmCallContext context) {
+        if (context == null || !context.nativeJsonSchema() || !context.hasOutputSchema()) {
+            return;
+        }
+        if (!supportsNativeStructuredOutput()) {
+            throw LlmException.invalidRequest(providerId(),
+                    "Agent requested native structured output (nativeJsonSchema=true with an output "
+                            + "schema) but '" + providerId() + "' does not send a provider-native "
+                            + "response_format for this endpoint. Set nativeJsonSchema(false) to have the "
+                            + "schema appended to the system prompt, or point the client at an endpoint that "
+                            + "accepts response_format and declare it (e.g. OpenAiLlmClient."
+                            + "structuredOutputSupport(true)).");
+        }
+        ResponseFormat responseFormat = buildResponseFormat(context);
+        if (responseFormat != null) {
+            reqBuilder.responseFormat(responseFormat);
+        }
+    }
+
+    /**
+     * The provider-native {@code response_format} carrying {@code context}'s output schema, or
+     * {@code null} to send none. Called only when the agent asked for the native path, a schema
+     * is present and {@link #supportsNativeStructuredOutput()} returned {@code true}, so an
+     * implementation may assume {@link LlmCallContext#outputJsonSchema()} is non-null.
+     *
+     * <p>The default returns {@code null}: a client that declares the capability overrides this
+     * to build the format from the raw schema (see {@code OpenAiLlmClient}). Kept separate from
+     * {@link #supportsNativeStructuredOutput()} so the capability can be reported without this
+     * class forcing a particular langchain4j construction on every adapter.
+     */
+    protected ResponseFormat buildResponseFormat(LlmCallContext context) {
+        return null;
     }
 
     /**
