@@ -159,7 +159,8 @@
             "type": { "const": "plan_execute" },
             "replanPolicy": { "enum": ["never", "on_failure"] },
             "maxPlanSteps": { "type": "integer", "minimum": 1 },
-            "maxStepRoundsPerStep": { "type": "integer", "minimum": 1 }
+            "maxStepRoundsPerStep": { "type": "integer", "minimum": 1 },
+            "maxParallelSteps": { "type": "integer", "minimum": 1 }
           }
         },
         {

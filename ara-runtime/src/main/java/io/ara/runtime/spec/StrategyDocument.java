@@ -61,7 +61,8 @@ final class StrategyDocument {
         return guard(fields.path(), () -> new StrategyConfig.PlanExecute(
                 orElse(fields.string("replanPolicy"), defaults.replanPolicy()),
                 orElse(fields.integer("maxPlanSteps"), defaults.maxPlanSteps()),
-                orElse(fields.integer("maxStepRoundsPerStep"), defaults.maxStepRoundsPerStep())));
+                orElse(fields.integer("maxStepRoundsPerStep"), defaults.maxStepRoundsPerStep()),
+                fields.integer("maxParallelSteps")));
     }
 
     private static StrategyConfig decodeReflexion(DocumentFields fields) {
@@ -144,6 +145,9 @@ final class StrategyDocument {
                 out.put("replanPolicy", planExecute.replanPolicy());
                 out.put("maxPlanSteps", planExecute.maxPlanSteps());
                 out.put("maxStepRoundsPerStep", planExecute.maxStepRoundsPerStep());
+                if (planExecute.maxParallelSteps() != null) {
+                    out.put("maxParallelSteps", planExecute.maxParallelSteps());
+                }
             }
             case StrategyConfig.Reflexion reflexion -> {
                 out.put("type", REFLEXION);

@@ -308,7 +308,7 @@ loaded from JSON. → [Classify-and-act](ara-runtime/src/main/java/io/ara/runtim
 | `ReactStrategy` | `"react"` | Reasoning–Action loop: Think → Act → Observe. The default |
 | `ReSpActStrategy` | `"respact"` | ReAct + a **speak** action: converse with the user mid-task without closing it |
 | `ReflActStrategy` | `"reflact"` | ReAct + **in-loop** self-correction on tool failures or stalled reasoning |
-| `PlanExecuteStrategy` | `"plan_execute"` | Generate a structured plan, then execute each step |
+| `PlanExecuteStrategy` | `"plan_execute"` | Generate a structured (JSON) plan, execute each step in its own context, and have each step close with an outcome and notes for the next |
 | `ReflexionStrategy` | `"reflexion"` | Generate → critique → revise, restarting the whole episode |
 | `RetrievalAugmentedStrategy` | `"rag+<name>"` | Inject retrieved context before every LLM call |
 
@@ -355,6 +355,7 @@ Everything below lives in `ara-examples` and runs with `main()`.
 | `spec/ImportAgentFromJsonExample` | stub | A fully described agent (fallback model, prices, spend cap, strategy, tools, memory) imported from a JSON file on the classpath, then run |
 | `events/RunEventsExample` | stub | A listener on the task receives every step as it happens, including a delegated agent's, printed as a tree |
 | `scheduler/AgentSchedulerExample` | none | Interval and cron schedules, with pause / resume / trigger |
+| `planner/PlannerExample` | stub / **live** | `plan_execute` on a small coding task: a JSON plan with dependencies, notes that carry a choice from one step to the next, and a failed step that replans — in an in-memory workspace |
 | `web/StreamingChatWebExample` | stub / **live** | A chat page on a JDK `HttpServer`, streaming over SSE |
 
 ---

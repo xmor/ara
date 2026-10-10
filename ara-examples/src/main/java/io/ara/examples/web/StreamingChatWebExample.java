@@ -65,7 +65,7 @@ public final class StreamingChatWebExample {
 
     private static final int    PORT          = Integer.getInteger("ara.web.port", 8080);
     private static final String LIVE_BASE_URL = "http://127.0.0.1:1234/v1";
-    private static final String LIVE_MODEL    = "openai/gpt-oss-20b";
+    private static final String LIVE_MODEL    = "qwen3-coder-30b-a3b-instruct";
     private static final String LIVE_API_KEY  = Live.apiKey("not-required");
 
     /**

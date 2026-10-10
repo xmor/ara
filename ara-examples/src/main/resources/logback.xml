@@ -11,6 +11,7 @@
     <logger name="io.ara.runtime"                               level="WARN"/>
     
     <logger name="io.ara.runtime.strategy.ReactStrategy"        level="INFO"/>
+
     <logger name="io.ara.runtime.llm.LoggingLlmClient"          level="INFO"/>
 
     <root level="INFO">

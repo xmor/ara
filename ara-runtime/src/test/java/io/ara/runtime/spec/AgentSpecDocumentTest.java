@@ -20,7 +20,9 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -53,7 +55,7 @@ class AgentSpecDocumentTest {
                 .systemPrompt("Classify the request.").promptCatalogId("catalog-1")
                 .primaryLlm(primary).fallbackLlms(List.of(LlmProfile.of("backup")))
                 .llmSelectionPolicy(LlmSelectionPolicy.FAILOVER).logLlmIo(true).logLlmIoMaxChars(99)
-                .strategyConfig(new StrategyConfig.PlanExecute("on_failure", 6, 2))
+                .strategyConfig(new StrategyConfig.PlanExecute("on_failure", 6, 2, 3))
                 .enabledTools(List.of("search", "calc")).mcpServerIds(List.of("files"))
                 .maxIterations(7).executionTimeout(Duration.ofSeconds(90)).maxTokensPerStep(2048)
                 .humanApprovalRequired(true).knowledgeBaseId("kb-1")
@@ -149,6 +151,7 @@ class AgentSpecDocumentTest {
         List<StrategyConfig> arms = List.of(
                 new StrategyConfig.React(),
                 new StrategyConfig.PlanExecute("never", 4, 2),
+                new StrategyConfig.PlanExecute("on_failure", 4, 2, 3),
                 new StrategyConfig.Reflexion(3, "think again", "judge"),
                 new StrategyConfig.ReflAct(5, 3, false, "judge"));
         for (StrategyConfig arm : arms) {
@@ -156,6 +159,27 @@ class AgentSpecDocumentTest {
 
             assertEquals(spec.config(), AgentSpecDocument.decode(AgentSpecDocument.encode(spec)).config(), arm.toString());
         }
+    }
+
+    @Test
+    void planExecute_withoutParallelism_isEncodedWithoutTheField_andKeepsItsHash() {
+        AgentSpec spec = AgentSpec.root(AgentConfig.defaults().agentType("a")
+                .strategyConfig(new StrategyConfig.PlanExecute("never", 4, 2)).build());
+
+        assertFalse(AgentSpecDocument.encode(spec).toString().contains("maxParallelSteps"));
+        AgentSpec back = AgentSpecDocument.decode(AgentSpecDocument.encode(spec));
+        assertNull(((StrategyConfig.PlanExecute) back.config().execution().strategyConfig()).maxParallelSteps());
+        assertEquals(spec.specHash(), back.specHash());
+    }
+
+    @Test
+    void planExecute_parallelism_changesTheHash_sinceItChangesWhatRuns() {
+        AgentSpec sequential = AgentSpec.root(AgentConfig.defaults().agentType("a")
+                .strategyConfig(new StrategyConfig.PlanExecute("never", 4, 2)).build());
+        AgentSpec parallel = AgentSpec.root(AgentConfig.defaults().agentType("a")
+                .strategyConfig(new StrategyConfig.PlanExecute("never", 4, 2, 3)).build());
+
+        assertNotEquals(sequential.specHash(), parallel.specHash());
     }
 
     @Test

@@ -114,7 +114,10 @@ class PlanExecuteStrategyNativeToolsTest {
                 "inline JSON tool-call instruction is redundant with native function-calling and should be omitted");
         assertTrue(step.context().hasResolvedTools(),
                 "resolvedTools should be attached to the context for the step-execution call");
-        assertEquals(List.of("noop"), step.context().resolvedTools().stream().map(AraTool::toolId).toList());
+        // A step's model is also given the reserved close_step tool (it closes the step); the
+        // planner and synthesis never are — asserted just below.
+        assertEquals(List.of("noop", "close_step"),
+                step.context().resolvedTools().stream().map(AraTool::toolId).toList());
 
         assertFalse(plan.context().hasResolvedTools(),
                 "planning never invokes tools — resolvedTools should not be attached there");

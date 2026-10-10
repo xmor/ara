@@ -63,7 +63,7 @@ import java.util.stream.Collectors;
 public final class CodeReviewCrewExample {
 
     private static final String LIVE_BASE_URL = "http://127.0.0.1:1234/v1";
-    private static final String LIVE_MODEL    = "openai/gpt-oss-20b";
+    private static final String LIVE_MODEL    = "qwen3-coder-30b-a3b-instruct";
     /** LM Studio ignores the key but langchain4j wants a non-blank string; override with
      *  {@code -Dara.api.key=...} or {@code ARA_API_KEY} if your gateway checks it. */
     private static final String LIVE_API_KEY  = Live.apiKey("not-required");

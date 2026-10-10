@@ -253,6 +253,19 @@ public record AgentConfig(
         public Builder llmSelectionPolicy(LlmSelectionPolicy v) { llmPolicy = v; return this; }
 
         // --- execution ---
+        /**
+         * Names the {@link ExecutionStrategy} that runs this agent's tasks (default
+         * {@code "react"}).
+         *
+         * <p>Despite the name, this only <b>selects</b> a strategy from the runtime's registry —
+         * nothing here plans. The name predates the strategy catalogue and is kept for
+         * compatibility. An agent that should break a task into steps up front, rather than
+         * deciding one action at a time, selects {@code "plan_execute"}; see that strategy's
+         * documentation for how the plan is produced and executed.
+         *
+         * <p>An unregistered name fails loudly at the first task, never silently falls back to
+         * {@code "react"}.
+         */
         public Builder plannerStrategy(String v)                      { plannerStrategy = v;       return this; }
         public Builder strategyConfig(StrategyConfig v)               { strategyConfig = v;
                                                                         if (v != null) plannerStrategy = v.strategyName();

@@ -38,7 +38,7 @@ import io.ara.core.media.MediaTypes.MediaKind;
  * <pre>{@code
  * LlmClient gpt4o = OpenAiLlmClient.builder()
  *     .apiKey(System.getenv("OPENAI_API_KEY"))
- *     .modelName("gpt-oss-20b")
+ *     .modelName("qwen3-coder-30b-a3b-instruct")
  *     .build();
  *
  * AraRuntime runtime = AraRuntime.builder()

@@ -149,7 +149,7 @@ Each agent references its provider by name:
 AraRuntime runtime = AraRuntime.builder()
         .llmClient("fast",  AraLlmClientFactory.openAi().apiKey(KEY).modelName("gpt-4o-mini").build())
         .llmClient("smart", AraLlmClientFactory.openAi().apiKey(KEY).modelName("gpt-4o").build())
-        .llmClient("local", AraLlmClientFactory.ollama().modelName("gpt-oss-20b").build())
+        .llmClient("local", AraLlmClientFactory.ollama().modelName("qwen3-coder:30b").build())
         .build();
 
 AgentConfig config = AgentConfig.defaults()

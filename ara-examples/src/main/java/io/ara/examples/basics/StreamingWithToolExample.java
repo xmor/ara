@@ -28,7 +28,7 @@ import java.util.List;
  * <p>Runs offline by default with a stub LLM. Pass {@code live} as the first argument (or
  * {@code -Dara.example.live=true}) to point it at a real OpenAI-compatible endpoint instead
  * — the constants {@link #LIVE_BASE_URL} / {@link #LIVE_MODEL} / {@link #LIVE_API_KEY} are
- * preset for a local LM-Studio-style server ({@code openai/gpt-oss-20b}, no key required).
+ * preset for a local LM-Studio-style server ({@code qwen3-coder-30b-a3b-instruct}, no key required).
  *
  * <p>The point worth seeing is that streaming is <em>not</em> just "the final answer, one
  * token at a time": {@code ReactStrategy} streams <strong>every</strong> Think step, so the
@@ -85,7 +85,7 @@ public class StreamingWithToolExample {
     /** OpenAI-compatible base URL. {@code /v1} suffix included, as LM Studio / vLLM expect. */
     private static final String LIVE_BASE_URL = "http://127.0.0.1:1234/v1";
     // private static final String LIVE_MODEL = "llama-3.1-8b-instruct";
-    private static final String LIVE_MODEL    = "openai/gpt-oss-20b";
+    private static final String LIVE_MODEL    = "qwen3-coder-30b-a3b-instruct";
     /** LM Studio ignores the key but langchain4j requires a non-blank string. Override with
      *  {@code -Dara.api.key=...} or {@code ARA_API_KEY} if your gateway does check it. */
     private static final String LIVE_API_KEY  = Live.apiKey("not-required");

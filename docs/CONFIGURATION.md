@@ -51,7 +51,7 @@ the shorthand) carries the per-model settings:
 | `LlmProfile` field | Default | Description |
 |---|---|---|
 | `modelId` | `""` | Name of the `LlmClient` registered on the runtime (`AraRuntime.builder().llmClient("name", …)`) |
-| `temperature` | `0.4` | Sampling temperature, range `[0.0, 2.0]` |
+| `temperature` | `null` | Sampling temperature, range `[0.0, 2.0]`; `null` leaves it to the client, whose own default is `0.7` (set it on the client builder with `temperature(...)`) |
 | `topP` | `null` | Nucleus sampling, range `[0.0, 1.0]`; `null` = provider default |
 | `maxTokens` | `null` | Max output tokens per completion; `null` = provider default |
 | `baseUrl` / `apiKey` / `modelName` | `null` | Optional per-profile overrides of the underlying client's connection settings |

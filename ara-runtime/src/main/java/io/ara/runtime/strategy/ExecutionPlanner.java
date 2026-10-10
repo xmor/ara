@@ -10,6 +10,12 @@ import java.util.Objects;
 /**
  * Selects the appropriate {@link ExecutionStrategy} for a given {@link AgentConfig}.
  *
+ * <p><b>This class selects; it does not plan.</b> "Planner" here means the thing that picks
+ * which strategy runs a task. Breaking a task into steps is done by a strategy —
+ * {@code "plan_execute"} ({@link PlanExecuteStrategy}) — which this class merely looks up by
+ * name. The name is historical and is kept because it is public API; anyone searching for
+ * "the planner" in order to change how a plan is produced should go to that strategy instead.
+ *
  * <p>The planner holds an immutable registry of named strategies built at startup.
  * Selection is O(1) via a hash map lookup on {@link AgentConfig#plannerStrategy()}.
  * An unknown strategy name is fail-fast: {@link #select} throws {@link

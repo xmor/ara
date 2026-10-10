@@ -163,13 +163,13 @@ class ReasoningWireTest {
 
         ask(client, context().thinkingBudgetTokens(2048).build());
 
-        // Observed on the wire: the client was built with its default temperature (0.0) and that
+        // Observed on the wire: the client was built with its default temperature (0.7) and that
         // default travels with every request, thinking or not. Anthropic, to the best of my knowledge,
         // accepts only an unset or 1.0 temperature while thinking, so this request would be refused by
         // the real API. It cannot be fixed per call: a null in the request does not override the
         // client's default. A client meant for a reasoning model must be built without one. If this
         // assertion starts failing because the default no longer travels, the ADR note is obsolete.
-        assertTrue(wire().contains("\"temperature\":0.0"), body.get());
+        assertTrue(wire().contains("\"temperature\":0.7"), body.get());
     }
 
     @Test

@@ -35,7 +35,7 @@ import java.time.Duration;
  * ceremony that keeps a client constructor one expression away from the values.
  *
  * <h2>Defaults</h2>
- * <p>Field defaults are the OpenAI/Mistral profile ({@code temperature 0.0}, {@code 2000}
+ * <p>Field defaults are the OpenAI/Mistral profile ({@code temperature 0.7}, {@code 2000}
  * max tokens, {@code 60s} timeout). Adapters that disagree reset the field in their own
  * constructor (Anthropic: {@code 4096} max tokens) rather than duplicating the whole
  * setter block — a one-line override reads more honestly than a shared knobs object holding
@@ -54,8 +54,15 @@ public abstract class AbstractLlmClientBuilder<B extends AbstractLlmClientBuilde
     protected String baseUrl;
     /** Model identifier. Null until set, or given a catalogue default by a subclass constructor. */
     protected String modelName;
-    /** Sampling temperature. Defaults to {@code 0.0}. */
-    protected Double temperature = 0.0;
+    /**
+     * Sampling temperature. Defaults to {@code 0.7}.
+     *
+     * <p>Not {@code 0.0}: at zero a request is the same every time, so when a server fails on one
+     * (a local model whose tool call the server's parser drops) every retry sends the identical request
+     * and fails again. At 0.7 each retry is a different sample and can get through. Set
+     * {@code temperature(0.0)} where a repeatable answer matters more than that.
+     */
+    protected Double temperature = 0.7;
     /** Maximum output tokens. Defaults to {@code 2000}. */
     protected Integer maxTokens = 2000;
     /** HTTP request timeout. Defaults to {@code 60s}. */
@@ -112,7 +119,7 @@ public abstract class AbstractLlmClientBuilder<B extends AbstractLlmClientBuilde
     /** Sets the model by string ID (for non-catalogued or preview models). */
     public B modelName(String modelName) { this.modelName = modelName; return self(); }
 
-    /** Sampling temperature. Defaults to {@code 0.0}. */
+    /** Sampling temperature. Defaults to {@code 0.7}. */
     public B temperature(double t)       { this.temperature = t;   return self(); }
 
     /**

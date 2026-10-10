@@ -200,7 +200,8 @@ public final class DefaultEvalRunner implements EvalRunner {
                     scored.score(), scored.rationale(), scored.metadata(), response.elapsedTime()));
             costs.add(costOf(response));
         }
-        return new CaseRun(c, CaseStats.of(c.caseId(), c.holdout(), scores), isBlocking(c), List.copyOf(costs));
+        double worstRun = java.util.Arrays.stream(scores).min().orElse(0.0);
+        return new CaseRun(c, CaseStats.of(c.caseId(), c.holdout(), scores), worstRun, isBlocking(c), List.copyOf(costs));
     }
 
     /**
@@ -209,9 +210,11 @@ public final class DefaultEvalRunner implements EvalRunner {
      * {@code blocking} and {@code runCosts} — which nothing but a shared caseId kept in step: a
      * case that was measured but never classified was a state the code allowed and no test could
      * see. The {@link EvalCase} travels with the numbers, so a case's tags and hold-out flag
-     * cannot end up beside another case's stats.
+     * cannot end up beside another case's stats. {@code worstRun} is the lowest of the case's
+     * run scores: the mean hides a run that failed, and a veto has to see it.
      */
-    private record CaseRun(EvalCase evalCase, CaseStats stats, boolean blocking, List<Spend> costs) {
+    private record CaseRun(EvalCase evalCase, CaseStats stats, double worstRun, boolean blocking,
+                           List<Spend> costs) {
         String caseId() {
             return evalCase.caseId();
         }
@@ -329,11 +332,15 @@ public final class DefaultEvalRunner implements EvalRunner {
             return new Verdict.NeedsReview("the suite has no evaluable (READY) cases");
         }
 
-        // D1 — blocking veto: a blocking verifier failing rejects outright (ADR-0059 D1).
+        // D1 — blocking veto: a blocking verifier failing rejects outright (ADR-0059 D1). The test
+        // is the worst run, not the mean: a verifier that failed on one run of three has failed, and
+        // a mean of 2/3 would let it through while the case is still a flaky one. The mean stays in
+        // the message so the reader can tell a case that never passed from one that passed mostly.
         for (CaseRun run : runs) {
-            if (run.blocking() && run.stats().meanScore() < CASE_PASS_THRESHOLD) {
+            if (run.blocking() && run.worstRun() < CASE_PASS_THRESHOLD) {
                 return new Verdict.Reject("blocking verifier failed on case " + run.caseId()
-                        + " (mean score " + fmt(run.stats().meanScore()) + ")");
+                        + " (worst run " + fmt(run.worstRun()) + ", mean score "
+                        + fmt(run.stats().meanScore()) + ")");
             }
         }
 

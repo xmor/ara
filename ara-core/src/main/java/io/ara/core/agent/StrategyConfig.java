@@ -67,13 +67,25 @@ public sealed interface StrategyConfig permits
      *
      * @param replanPolicy          {@code "never"} or {@code "on_failure"}; default {@code "never"}
      * @param maxPlanSteps          max steps the planner may generate; default 8
-     * @param maxStepRoundsPerStep  max Think→Act→Observe rounds per step; default 3
+     * @param maxStepRoundsPerStep  max Think→Act→Observe rounds per step, counting the one that closes it with {@code close_step}; default 6
+     * @param maxParallelSteps      how many independent steps should run at once, or {@code null}
+     *                              for one at a time (the default). <b>Accepted and stored, not
+     *                              yet honoured:</b> steps still run one after the other and the
+     *                              strategy logs a warning when this is above 1. Nullable on
+     *                              purpose: a document or a three-argument config that never
+     *                              mentions it stays exactly what it was, down to its hash
      */
     record PlanExecute(
-            String replanPolicy,
-            int    maxPlanSteps,
-            int    maxStepRoundsPerStep
+            String  replanPolicy,
+            int     maxPlanSteps,
+            int     maxStepRoundsPerStep,
+            Integer maxParallelSteps
     ) implements StrategyConfig {
+
+        /** The configuration without parallelism: steps run one after the other. */
+        public PlanExecute(String replanPolicy, int maxPlanSteps, int maxStepRoundsPerStep) {
+            this(replanPolicy, maxPlanSteps, maxStepRoundsPerStep, null);
+        }
 
         public PlanExecute {
             Objects.requireNonNull(replanPolicy, "replanPolicy must not be null");
@@ -85,12 +97,18 @@ public sealed interface StrategyConfig permits
             if (maxStepRoundsPerStep < 1)
                 throw new IllegalArgumentException(
                         "maxStepRoundsPerStep must be >= 1, got: " + maxStepRoundsPerStep);
+            if (maxParallelSteps != null && maxParallelSteps < 1)
+                throw new IllegalArgumentException(
+                        "maxParallelSteps must be >= 1 when given, got: " + maxParallelSteps);
         }
+
+        /** Steps that may run at once: {@link #maxParallelSteps} or 1 when it is not set. */
+        public int parallelSteps() { return maxParallelSteps == null ? 1 : maxParallelSteps; }
 
         @Override public String strategyName() { return "plan_execute"; }
 
         /** Returns a {@code PlanExecute} config with production defaults. */
-        public static PlanExecute defaults() { return new PlanExecute("never", 8, 3); }
+        public static PlanExecute defaults() { return new PlanExecute("never", 8, 6); }
     }
 
     /**

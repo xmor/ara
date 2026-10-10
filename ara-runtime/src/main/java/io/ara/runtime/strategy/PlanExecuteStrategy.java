@@ -5,7 +5,6 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.ExecutionStep;
 import io.ara.core.agent.ExecutionStrategy;
-import io.ara.core.agent.ExecutionTimeoutException;
 import io.ara.core.agent.StrategyConfig;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
@@ -14,8 +13,7 @@ import io.ara.core.llm.LlmMessage;
 import io.ara.core.memory.MemoryManager;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
-import io.ara.core.tool.ToolResult;
-import io.ara.runtime.telemetry.TelemetryToolRegistry;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,8 +24,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Plan-then-execute strategy (ReWOO-inspired).
@@ -48,113 +44,26 @@ import java.util.regex.Pattern;
  * {@link StrategyConfig.PlanExecute#replanPolicy()}), a failed step triggers at most
  * {@value #MAX_REPLAN_ATTEMPTS} re-plan attempts that regenerate only the remaining
  * steps rather than the full plan.
+ *
+ * <p>This class orchestrates the three phases and owns the decisions between them (when a failed
+ * or "revise" step is answered by a replan, how the plan is rewritten). The work of each phase
+ * lives in {@link PlanPlanning} (asking for and reading the plan, replanning),
+ * {@link PlanStepExecutor} (running one step and reading how it was closed, see
+ * {@link CloseStep}) and the synthesis step here; {@link PlanRun} and {@link PlanTally} carry
+ * what is fixed and what accumulates during one pass. Stateless itself: it is shared by
+ * concurrent tasks.
  */
 public final class PlanExecuteStrategy implements ExecutionStrategy {
 
     private static final Logger log = LoggerFactory.getLogger(PlanExecuteStrategy.class);
 
     private static final int MAX_REPLAN_ATTEMPTS = 2;
-    private static final int STEP_RESULT_TRUNCATE_CHARS = 600;
-
-    private static final Pattern STEP_PATTERN = Pattern.compile(
-            "(?m)^\\s*(?:\\d+[\\.)]|[-*])\\s+(.+?)\\s*$");
-
-    private static final String PLAN_SUFFIX = """
-
-    Produce a short numbered execution plan.
-    Output only a numbered list of concrete steps — no explanations, no prose.
-    Do not solve the task yet, only plan.
-    """;
-
-    private static final String EXEC_SUFFIX = """
-
-    You are executing one step of a plan.
-    - If a tool is needed, output only JSON: {"tool_id":"<id>","arguments":{...}}
-    - When the step is complete, write STEP_DONE on the last line.
-    - Be concise.
-    """;
-
-    /**
-     * Used instead of {@link #EXEC_SUFFIX} when the client speaks native provider
-     * function-calling ({@code LlmClient.supportsNativeTools()}) — omits the inline
-     * JSON tool-call instruction, which would otherwise compete with the structured
-     * tool channel the client already receives via {@code LlmCallContext.resolvedTools()}.
-     * The step-completion instruction is unrelated to tool-calling and is kept as-is.
-     */
-    private static final String EXEC_SUFFIX_NATIVE = """
-
-    You are executing one step of a plan.
-    - When the step is complete, write STEP_DONE on the last line.
-    - Be concise.
-    """;
 
     private static final String SYNTHESIS_SUFFIX = """
 
     Produce the complete final answer based on the execution results provided.
     Be thorough and self-contained.
     """;
-
-    private static final String REPLAN_SUFFIX = """
-
-    Produce a revised numbered list of steps for the remaining work.
-    Output only the numbered list — no explanations.
-    """;
-
-    /**
-     * Immutable collaborators shared by every phase of one {@link #execute} pass.
-     * Replaces the positional parameter lists the phase helpers used to take —
-     * {@code executeStep} alone received 17 positional arguments, five of them
-     * {@code int}s/arrays, which is the textbook setup for an argument-order bug the
-     * compiler cannot catch. Same pattern as {@code ReactStrategy.DispatchContext}.
-     */
-    private record Run(
-            AgentTask task,
-            LlmClient llm,
-            LlmCallContext ctx,
-            ToolRegistry tools,
-            List<AraTool> resolvedTools,
-            AgentConfig config,
-            String systemPrompt,
-            String plannerCatalog,
-            String stepCatalog,
-            Instant deadline,
-            int maxIterations,
-            int maxStepRounds,
-            boolean nativeTools) {
-    }
-
-    /**
-     * Mutable per-run accumulators: iteration/token tallies plus the execution trace.
-     * Replaces the previous {@code int[] iters = {0}} single-element-array idiom — a
-     * named object mutated in place says what it is; a one-slot array only says how it
-     * was smuggled past Java's by-value parameters.
-     */
-    private static final class Tally {
-        int iterations;
-        int promptTokens;
-        int outputTokens;
-        final List<ExecutionStep> steps = new ArrayList<>();
-        private final AgentTask task;
-
-        Tally(AgentTask task) {
-            this.task = task;
-        }
-
-        /** The one place a step is recorded: adds it to {@link #steps} and announces it to the run's listener. */
-        void record(ExecutionStep step) {
-            RunEvents.record(task, steps, step);
-        }
-
-        // replan() returns a step list, not an ExecutionResult, so a budget breach detected
-        // there is parked here for the caller to return — keeps the failure reason honest
-        // ("budget exceeded") instead of masquerading as "produced no result".
-        ExecutionResult budgetFailure;
-
-        void addUsage(LlmCompletion completion) {
-            promptTokens += completion.promptTokens();
-            outputTokens += completion.outputTokens();
-        }
-    }
 
     @Override
     public String strategyName() {
@@ -177,489 +86,262 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
 
         StrategyConfig.PlanExecute pe = (config.strategyConfig() instanceof StrategyConfig.PlanExecute p)
                 ? p : StrategyConfig.PlanExecute.defaults();
-        int maxPlanSteps      = pe.maxPlanSteps();
-        String replanStrategy = pe.replanPolicy();
 
-        // See ReactStrategy for the rationale: native function-calling clients get
-        // structured tool specs attached to the step-execution call context instead of
-        // the text catalog/instructions (planning and synthesis never invoke tools
-        // either way, so they are left untouched).
-        //
-        // The catalogs are precomputed once for the whole pass and carried on Run, like
-        // systemPrompt: resolvedTools is stable, yet rebuildStepMessages ran
-        // ToolCatalogFormatter.format per step round, re-serialising every tool schema.
         List<AraTool> resolvedTools = tools.resolveEnabled(
                 config.enabledTools() != null ? config.enabledTools() : List.of());
-        boolean nativeTools = llm.supportsNativeTools();
-        String plannerCatalog = ToolCatalogFormatter.format(resolvedTools);
-        String stepCatalog = nativeTools ? "" : plannerCatalog;
+        if (resolvedTools.stream().anyMatch(tool -> CloseStep.TOOL_ID.equals(tool.toolId()))) {
+            // Failing here, rather than letting the agent's tool shadow ours or ours shadow its,
+            // is the only outcome that cannot silently break a step: one of the two would stop
+            // working with no sign of why.
+            return ExecutionResult.failure("plan_execute reserves the tool name '" + CloseStep.TOOL_ID
+                    + "' for closing a step, but this agent has a tool with that name; rename it",
+                    0, 0, 0, List.of());
+        }
+        PlanRun run = newRun(task, llm, memory, tools, config, resolvedTools, pe);
+        PlanTally tally = new PlanTally(task);
 
-        Run run = new Run(
+        // ── Phase 1: Planning ──────────────────────────────────────────────────
+        PlanPlanning.Planning planning = PlanPlanning.plan(
+                run, tally, pe.maxPlanSteps(), "on_failure".equalsIgnoreCase(pe.replanPolicy()));
+        Progress progress;
+        switch (planning) {
+            case PlanPlanning.Planning.Failed failed -> { return failed.result(); }
+            case PlanPlanning.Planning.Planned planned -> progress = new Progress(new ArrayList<>(planned.steps()));
+        }
+        log.debug("Plan ({} steps) for task [{}]: {}", progress.plan.size(), task.taskId(), progress.plan);
+
+        // ── Phase 2: Execution ─────────────────────────────────────────────────
+        Optional<ExecutionResult> aborted = executeSteps(run, tally, progress, pe.replanPolicy());
+        if (aborted.isPresent()) {
+            return aborted.get();
+        }
+
+        // ── Phase 3: Synthesis ─────────────────────────────────────────────────
+        return synthesize(run, tally, progress);
+    }
+
+    /**
+     * Everything that is fixed for one pass, built once. See ReactStrategy for why native
+     * function-calling clients get structured tool specs attached to the step-execution call
+     * context instead of the text catalog and instructions (planning and synthesis never invoke
+     * tools either way, so they are left untouched).
+     *
+     * <p>The catalogs are precomputed here and carried on the run, like the system prompt:
+     * the tools are stable for the whole pass, yet the step messages used to re-serialise every
+     * tool schema on each round.
+     */
+    private static PlanRun newRun(
+            AgentTask task, LlmClient llm, MemoryManager memory, ToolRegistry tools,
+            AgentConfig config, List<AraTool> resolvedTools, StrategyConfig.PlanExecute pe) {
+        List<AraTool> stepTools = new ArrayList<>(resolvedTools);
+        stepTools.add(CloseStep.TOOL);
+        boolean nativeTools = llm.supportsNativeTools();
+        String plannerCatalog = ToolCatalogFormatter.formatForPlanning(resolvedTools);
+        String stepCatalog = nativeTools ? "" : ToolCatalogFormatter.format(stepTools);
+        if (pe.parallelSteps() > 1) {
+            log.warn("maxParallelSteps={} is set but parallel steps are not implemented yet; "
+                    + "steps run one at a time", pe.parallelSteps());
+        }
+        return new PlanRun(
                 task, llm, LlmCallContext.of(config, task), tools,
-                resolvedTools,
+                resolvedTools, List.copyOf(stepTools),
                 config, ReactExecutionSupport.extractSystemPrompt(memory),
                 plannerCatalog, stepCatalog,
                 Instant.now().plus(config.executionTimeout()),
                 config.maxIterations(), pe.maxStepRoundsPerStep(),
                 nativeTools);
-        Tally tally = new Tally(task);
+    }
 
-        // ── Phase 1: Planning ──────────────────────────────────────────────────
-        if (cancelled()) {
-            return fail("Cancelled", tally);
-        }
-        if (tally.iterations >= run.maxIterations()) {
-            return fail("Max iterations reached before planning", tally);
-        }
-        tally.iterations++;
+    /**
+     * Where phase 2 stands: the plan (which a replan may rewrite from the current step on), the
+     * results of the steps done so far, the step to run next and how many replans were used.
+     *
+     * <p>{@code results} is a compact key-value store, not appended to working memory: each step
+     * call receives only the system prompt, the task, a plan summary and a summary of the
+     * previous results. Not thread-safe; steps run one at a time.
+     */
+    private static final class Progress {
+        List<String> plan;
+        final Map<Integer, String> results = new LinkedHashMap<>();
+        int stepIdx;
+        int replanAttempts;
 
-        LlmCompletion planCompletion;
-        try {
-            planCompletion = ReactExecutionSupport.completeWithRetry(
-                    run.llm(), buildPlanningMessages(run, maxPlanSteps), run.ctx(),
-                    run.deadline(), config, run.task().taskId());
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            return fail("Cancelled", tally);
-        } catch (Exception e) {
-            return fail("Planning failed: " + ReactExecutionSupport.describeLlmFailure(e), tally);
+        Progress(List<String> plan) {
+            this.plan = plan;
         }
-        checkTimeout(run.deadline(), config);
-        tally.addUsage(planCompletion);
-        ExecutionResult planBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
-                config, task, planCompletion.promptTokens(), planCompletion.outputTokens(),
-                tally.iterations, tally.promptTokens, tally.outputTokens, tally.steps);
-        if (planBudgetExceeded != null) {
-            return planBudgetExceeded;
-        }
+    }
 
-        List<String> plan = new ArrayList<>(parsePlanSteps(planCompletion.text()));
-        if (plan.isEmpty()) {
-            plan.add("Solve the task directly and provide a complete answer.");
-        }
-        if (plan.size() > maxPlanSteps) {
-            log.debug("Plan truncated from {} to {} steps (maxPlanSteps={})",
-                    plan.size(), maxPlanSteps, maxPlanSteps);
-            plan = new ArrayList<>(plan.subList(0, maxPlanSteps));
-        }
-        if (ReactExecutionSupport.shouldRecordReasoning(config, planCompletion)) {
-            tally.record(ExecutionStep.reasoning(planCompletion.reasoning(), tally.iterations));
-        }
-        tally.record(ExecutionStep.thought(
-                planCompletion.text() != null ? planCompletion.text() : "", tally.iterations));
-        log.debug("Plan ({} steps) for task [{}]: {}", plan.size(), task.taskId(), plan);
-
-        // ── Phase 2: Execution ─────────────────────────────────────────────────
-        // stepResults: compact key-value store — not appended to working memory.
-        // Each step call receives only: system + task + plan summary + previous results summary.
-        Map<Integer, String> stepResults = new LinkedHashMap<>();
-        int replanAttempts = 0;
-        int stepIdx = 0;
-
-        while (stepIdx < plan.size()) {
-            if (cancelled()) {
-                return fail("Cancelled", tally);
+    /**
+     * Runs the plan's steps in order until all are done.
+     *
+     * @return empty when every step finished; otherwise the result that ends the task
+     */
+    private static Optional<ExecutionResult> executeSteps(
+            PlanRun run, PlanTally tally, Progress progress, String replanPolicy) {
+        while (progress.stepIdx < progress.plan.size()) {
+            if (PlanRun.cancelled()) {
+                return Optional.of(tally.fail("Cancelled"));
             }
-            checkTimeout(run.deadline(), config);
+            run.checkTimeout();
             if (tally.iterations >= run.maxIterations()) {
-                return fail("Max iterations reached while executing step " + (stepIdx + 1), tally);
+                return Optional.of(tally.fail(
+                        "Max iterations reached while executing step " + (progress.stepIdx + 1)));
             }
 
-            String result = executeStep(stepIdx, plan, stepResults, run, tally);
+            StepOutcome outcome = PlanStepExecutor.executeStep(
+                    progress.stepIdx, progress.plan, progress.results, run, tally);
 
             if (tally.budgetFailure != null) {
-                return tally.budgetFailure;
+                return Optional.of(tally.budgetFailure);
             }
-            if (cancelled()) {
-                return fail("Cancelled", tally);
+            if (PlanRun.cancelled()) {
+                return Optional.of(tally.fail("Cancelled"));
             }
 
-            if (result != null && !result.isBlank()) {
-                stepResults.put(stepIdx, result);
-                log.debug("Step {}/{} completed ({} chars)", stepIdx + 1, plan.size(), result.length());
-                stepIdx++;
-            } else {
-                // Step produced no usable result
-                String failureDesc = "Step " + (stepIdx + 1) + " of " + plan.size()
-                        + " [" + plan.get(stepIdx) + "] produced no result";
-                log.warn(failureDesc);
-
-                if ("on_failure".equalsIgnoreCase(replanStrategy)
-                        && replanAttempts < MAX_REPLAN_ATTEMPTS
-                        && tally.iterations < run.maxIterations()) {
-                    replanAttempts++;
-                    log.debug("Replanning after step {} failure (attempt {}/{})",
-                            stepIdx + 1, replanAttempts, MAX_REPLAN_ATTEMPTS);
-
-                    List<String> revisedSteps = replan(plan, stepResults, stepIdx, failureDesc, run, tally);
-
-                    if (tally.budgetFailure != null) {
-                        return tally.budgetFailure;
-                    }
-                    if (!revisedSteps.isEmpty()) {
-                        List<String> newPlan = new ArrayList<>(plan.subList(0, stepIdx));
-                        newPlan.addAll(revisedSteps);
-                        plan = newPlan;
-                        log.debug("Revised plan ({} steps from step {}): {}",
-                                revisedSteps.size(), stepIdx + 1, revisedSteps);
-                        // Retry current step index with the new plan
-                        continue;
-                    }
-                }
-                return fail(failureDesc, tally);
+            Optional<ExecutionResult> ended = switch (outcome) {
+                case StepOutcome.Done done -> stepDone(done, progress);
+                case StepOutcome.Revise revise -> stepRevised(revise, progress, replanPolicy, run, tally);
+                case StepOutcome.Failed failed -> stepFailed(failed, progress, replanPolicy, run, tally);
+            };
+            if (ended.isPresent()) {
+                return ended;
             }
         }
+        return Optional.empty();
+    }
 
-        // ── Phase 3: Synthesis ─────────────────────────────────────────────────
-        if (cancelled()) {
-            return fail("Cancelled", tally);
+    private static Optional<ExecutionResult> stepDone(StepOutcome.Done done, Progress progress) {
+        progress.results.put(progress.stepIdx, done.result());
+        log.debug("Step {}/{} completed ({} chars)",
+                progress.stepIdx + 1, progress.plan.size(), done.result().length());
+        progress.stepIdx++;
+        return Optional.empty();
+    }
+
+    /**
+     * The step itself worked: keep its result and move on. Only the steps still ahead are put
+     * back to the planner — and only when there is still budget to replan and something left to
+     * replan; otherwise the reason is not lost, it becomes a note the remaining steps (and the
+     * synthesis) can see.
+     */
+    private static Optional<ExecutionResult> stepRevised(
+            StepOutcome.Revise revise, Progress progress, String replanPolicy, PlanRun run, PlanTally tally) {
+        progress.results.put(progress.stepIdx, revise.result());
+        progress.stepIdx++;
+        int next = progress.stepIdx;
+        if (next >= progress.plan.size() || !mayReplan(replanPolicy, progress.replanAttempts, run, tally)) {
+            tally.notes.add("Step " + next + " asked for the rest of the plan to be revised: " + revise.reason());
+            return Optional.empty();
         }
-        checkTimeout(run.deadline(), config);
+        progress.replanAttempts++;
+        List<String> revisedSteps = PlanPlanning.replan(progress.plan, progress.results,
+                new PlanPlanning.ReplanRequest(next, revise.reason(), false), run, tally);
+        if (tally.budgetFailure != null) {
+            return Optional.of(tally.budgetFailure);
+        }
+        if (revisedSteps.isEmpty()) {
+            tally.notes.add("Step " + next + " asked for the rest of the plan to be revised ("
+                    + revise.reason() + "), but no revised plan could be read; the original plan continues.");
+        } else {
+            replaceFrom(progress, next, revisedSteps);
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * A step produced nothing usable. With replanning allowed the remaining plan is rebuilt and
+     * the same step index is tried again on the new plan (empty is returned and the loop goes on);
+     * otherwise the task fails, naming the step and why.
+     */
+    private static Optional<ExecutionResult> stepFailed(
+            StepOutcome.Failed failed, Progress progress, String replanPolicy, PlanRun run, PlanTally tally) {
+        int idx = progress.stepIdx;
+        String failureDesc = "Step " + (idx + 1) + " of " + progress.plan.size()
+                + " [" + progress.plan.get(idx) + "] " + failed.reason();
+        log.warn(failureDesc);
+
+        if (mayReplan(replanPolicy, progress.replanAttempts, run, tally)) {
+            progress.replanAttempts++;
+            log.debug("Replanning after step {} failure (attempt {}/{})",
+                    idx + 1, progress.replanAttempts, MAX_REPLAN_ATTEMPTS);
+
+            List<String> revisedSteps = PlanPlanning.replan(progress.plan, progress.results,
+                    new PlanPlanning.ReplanRequest(idx, failureDesc, true), run, tally);
+            if (tally.budgetFailure != null) {
+                return Optional.of(tally.budgetFailure);
+            }
+            if (!revisedSteps.isEmpty()) {
+                replaceFrom(progress, idx, revisedSteps);
+                log.debug("Revised plan ({} steps from step {}): {}", revisedSteps.size(), idx + 1, revisedSteps);
+                return Optional.empty();
+            }
+        }
+        return Optional.of(tally.fail(failureDesc));
+    }
+
+    /** Keeps the steps before {@code fromStep} and puts {@code revised} after them. */
+    private static void replaceFrom(Progress progress, int fromStep, List<String> revised) {
+        List<String> newPlan = new ArrayList<>(progress.plan.subList(0, fromStep));
+        newPlan.addAll(revised);
+        progress.plan = newPlan;
+    }
+
+    /** Phase 3: one call that turns the task, the plan, the results and the notes into the answer. */
+    private static ExecutionResult synthesize(PlanRun run, PlanTally tally, Progress progress) {
+        if (PlanRun.cancelled()) {
+            return tally.fail("Cancelled");
+        }
+        run.checkTimeout();
         if (tally.iterations >= run.maxIterations()) {
-            return fail("Max iterations reached before synthesis", tally);
+            return tally.fail("Max iterations reached before synthesis");
         }
         tally.iterations++;
 
-        LlmCompletion finalCompletion;
+        LlmCompletion completion;
         try {
-            finalCompletion = ReactExecutionSupport.completeWithRetry(
-                    run.llm(), buildSynthesisMessages(run, plan, stepResults), run.ctx(),
-                    run.deadline(), config, run.task().taskId());
+            completion = ReactExecutionSupport.completeWithRetry(
+                    run.llm(), buildSynthesisMessages(run, progress.plan, progress.results, tally.notes),
+                    run.ctx(), run.deadline(), run.config(), run.task().taskId());
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
-            return fail("Cancelled", tally);
+            return tally.fail("Cancelled");
         } catch (Exception e) {
-            return fail("Synthesis failed: " + ReactExecutionSupport.describeLlmFailure(e), tally);
+            return tally.fail("Synthesis failed: " + ReactExecutionSupport.describeLlmFailure(e));
         }
-        checkTimeout(run.deadline(), config);
-        tally.addUsage(finalCompletion);
-        ExecutionResult synthesisBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
-                config, task, finalCompletion.promptTokens(), finalCompletion.outputTokens(),
+        run.checkTimeout();
+        tally.addUsage(completion);
+        ExecutionResult budgetExceeded = ReactExecutionSupport.chargeRunBudget(
+                run.config(), run.task(), completion.promptTokens(), completion.outputTokens(),
                 tally.iterations, tally.promptTokens, tally.outputTokens, tally.steps);
-        if (synthesisBudgetExceeded != null) {
-            return synthesisBudgetExceeded;
+        if (budgetExceeded != null) {
+            return budgetExceeded;
         }
 
-        String finalAnswer = finalCompletion.text() != null ? finalCompletion.text().strip() : "";
+        String finalAnswer = completion.text() != null ? completion.text().strip() : "";
         if (finalAnswer.isBlank()) {
             // Synthesis returned nothing (context overflow or empty response) —
             // fall back to concatenating step results directly
             log.warn("Synthesis returned empty response, falling back to step results");
-            finalAnswer = buildFallbackAnswer(plan, stepResults);
+            finalAnswer = buildFallbackAnswer(progress.plan, progress.results);
         }
         tally.record(ExecutionStep.finalAnswer(finalAnswer, tally.iterations));
         return ExecutionResult.success(finalAnswer, tally.iterations,
                 tally.promptTokens, tally.outputTokens, tally.steps);
     }
 
-    private static ExecutionResult fail(String reason, Tally tally) {
-        return ExecutionResult.failure(reason, tally.iterations,
-                tally.promptTokens, tally.outputTokens, tally.steps);
-    }
-
-    // ── Step execution ─────────────────────────────────────────────────────────
-
-    /**
-     * Executes a single plan step in an isolated message context.
-     * Returns the step result text, or {@code null} if no usable output was produced.
-     */
-    private String executeStep(
-            int stepIdx, List<String> plan, Map<Integer, String> stepResults, Run run, Tally tally) {
-
-        // Local history for tool call / observation exchanges within this step only.
-        // Not carried forward to the next step.
-        List<LlmMessage> stepLocalHistory = new ArrayList<>();
-        boolean stepDone = false;
-        int stepRounds = 0;
-        String lastResult = null;
-
-        // Native clients get resolvedTools attached only for step-execution calls — not
-        // for planning/synthesis/replan, which never invoke tools by design. Built once
-        // per step rather than per round since resolvedTools is stable for the step.
-        LlmCallContext stepCtx = run.nativeTools()
-                ? run.ctx().withResolvedTools(run.resolvedTools()) : run.ctx();
-
-        // The step's instruction prefix — system prompt, task, plan overview, completed-step
-        // summaries, current step instruction — is invariant for every round of this step
-        // (plan, step index and stepResults are fixed here), so it is built once and each
-        // round appends only the tool exchanges this step has accumulated. Rebuilding it
-        // per round re-serialised the plan overview and the step summaries for a string
-        // that never changed.
-        List<LlmMessage> stepPrefix = buildStepPrefix(run, plan, stepResults, stepIdx);
-
-        while (!stepDone) {
-            if (cancelled()) break;   // outer loop returns "Cancelled" on the next boundary check
-            checkTimeout(run.deadline(), run.config());
-            if (tally.iterations >= run.maxIterations()) break;
-
-            tally.iterations++;
-            stepRounds++;
-
-            List<LlmMessage> messages = new ArrayList<>(stepPrefix);
-            messages.addAll(stepLocalHistory);
-
-            LlmCompletion completion;
-            try {
-                completion = ReactExecutionSupport.completeWithRetry(
-                        run.llm(), messages, stepCtx, run.deadline(), run.config(), run.task().taskId());
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                log.debug("Cancelled during the LLM call on step {}/{}", stepIdx + 1, plan.size());
-                return lastResult;
-            } catch (Exception e) {
-                log.warn("LLM call failed on step {}/{}: {}", stepIdx + 1, plan.size(),
-                        ReactExecutionSupport.describeLlmFailure(e));
-                return lastResult;
-            }
-            checkTimeout(run.deadline(), run.config());
-            tally.addUsage(completion);
-            ExecutionResult budgetExceeded = ReactExecutionSupport.checkBudget(
-                    run.config(), run.task().taskId(),
-                    tally.promptTokens, tally.outputTokens, tally.iterations, tally.steps);
-            if (budgetExceeded == null) {
-                budgetExceeded = ReactExecutionSupport.chargeRunBudget(
-                        run.config(), run.task(), completion.promptTokens(), completion.outputTokens(),
-                        tally.iterations, tally.promptTokens, tally.outputTokens, tally.steps);
-            }
-            if (budgetExceeded != null) {
-                tally.budgetFailure = budgetExceeded;   // caller returns it
-                return lastResult;
-            }
-            String text = completion.text() != null ? completion.text() : "";
-
-            // extract() already falls back to inline text parsing when the completion
-            // carries no native tool call — no second extractInline() pass needed.
-            Optional<ToolCallParser.ToolCallRequest> toolCall = ToolCallParser.extract(completion);
-
-            if (toolCall.isPresent()) {
-                try {
-                    dispatchTool(toolCall.get(), text, stepLocalHistory, run, tally);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    log.debug("Cancelled during tool dispatch on step {}/{}", stepIdx + 1, plan.size());
-                    return lastResult;
-                }
-                continue;
-            }
-
-            // No tool call — capture the text as a result candidate
-            if (ReactExecutionSupport.shouldRecordReasoning(run.config(), completion)) {
-                tally.record(ExecutionStep.reasoning(completion.reasoning(), tally.iterations));
-            }
-            if (!text.isBlank()) {
-                lastResult = text;
-                tally.record(ExecutionStep.thought(text, tally.iterations));
-            }
-
-            if (text.contains("STEP_DONE")
-                    || "stop".equalsIgnoreCase(completion.finishReason())
-                    || stepRounds >= run.maxStepRounds()) {
-                stepDone = true;
-            } else {
-                stepLocalHistory.add(new LlmMessage("assistant", text));
-            }
-        }
-        return lastResult;
-    }
-
-    /**
-     * Dispatches one tool call within a step round: SSE notification, trace steps,
-     * telemetry call-id attachment, execution, and the observation exchange appended to
-     * {@code stepLocalHistory} — parity with {@code ReactStrategy.dispatchSingle}, which
-     * this strategy previously skipped entirely: no {@code tool_call} SSE event ever
-     * fired and {@code AgentResponse.steps()} was always empty for {@code plan_execute},
-     * despite {@link ExecutionStep}'s contract that traces reach the caller.
-     *
-     * <p><b>P0/U1-U2, 2026-09-22:</b> the tool call itself now runs through {@link
-     * ReactExecutionSupport#runBounded} instead of inline on this (the reasoning) thread —
-     * previously the only dispatch path in the codebase with no deadline and no watchdog at
-     * all, so a hung tool (a stuck MCP server, a shell command still streaming) blocked this
-     * step, and by extension the whole task, forever, ignoring {@code executionTimeout} — the
-     * step loop's own {@code checkTimeout} boundary check is only ever reached between rounds,
-     * never while a round's own tool call is still in flight.
-     *
-     * @throws InterruptedException      if the calling thread is cancelled while the tool call is in flight
-     * @throws ExecutionTimeoutException if {@code run.deadline()} passes before the tool call returns
-     */
-    private void dispatchTool(
-            ToolCallParser.ToolCallRequest tcr, String completionText,
-            List<LlmMessage> stepLocalHistory, Run run, Tally tally) throws InterruptedException {
-
-        run.task().notifyToolCall(tcr.toolId(), tcr.argumentJson());
-        tally.record(ExecutionStep.toolCall(tcr.toolId(), tcr.argumentJson(), tally.iterations));
-
-        String callId = tcr.toolCallId();
-        AgentTask dispatchTask = (callId != null && !callId.isBlank())
-                ? run.task().withAttachment(TelemetryToolRegistry.TOOL_CALL_ID_ATTACHMENT_KEY, callId)
-                : run.task();
-        ToolResult result = ReactExecutionSupport.runBounded(
-                run.tools(),
-                () -> run.tools().execute(tcr.toolId(), tcr.argumentJson(), dispatchTask),
-                run.deadline(), run.config().executionTimeout());
-
-        String observation = result.success()
-                ? result.output()
-                : "Tool [%s] failed — %s".formatted(tcr.toolId(), result.error());
-        tally.record(ExecutionStep.observation(result, tally.iterations));
-
-        if (callId != null && !callId.isBlank()) {
-            // Native reconstruction — mirrors ReactStrategy's dispatch: pairs with
-            // ToolConversionUtils.toNativeAwareChatMessage in the adapters, so the next
-            // round's request carries a proper AiMessage(toolExecutionRequests) +
-            // ToolExecutionResultMessage instead of collapsing the exchange into plain
-            // text turns that a native provider never asked for.
-            stepLocalHistory.add(LlmMessage.assistantToolCall(callId, tcr.toolId(), tcr.argumentJson()));
-            stepLocalHistory.add(LlmMessage.tool(callId, tcr.toolId(), observation));
-        } else {
-            stepLocalHistory.add(new LlmMessage("assistant", completionText));
-            stepLocalHistory.add(new LlmMessage("user", "Observation: " + observation));
-        }
-    }
-
-    // ── Re-planning ────────────────────────────────────────────────────────────
-
-    /**
-     * Generates a revised plan for steps starting at {@code failedStepIdx}.
-     * Returns an empty list if replanning fails or produces no steps.
-     */
-    private List<String> replan(
-            List<String> originalPlan, Map<Integer, String> stepResults,
-            int failedStepIdx, String failureReason, Run run, Tally tally) {
-
-        tally.iterations++;
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("Original task: ").append(run.task().input()).append("\n\n");
-        sb.append("Plan execution status:\n");
-        for (int i = 0; i < originalPlan.size(); i++) {
-            if (i < failedStepIdx) {
-                sb.append("  %d. ✓ %s%n".formatted(i + 1, originalPlan.get(i)));
-            } else if (i == failedStepIdx) {
-                sb.append("  %d. ✗ %s — %s%n".formatted(i + 1, originalPlan.get(i), failureReason));
-            } else {
-                sb.append("  %d. (pending) %s%n".formatted(i + 1, originalPlan.get(i)));
-            }
-        }
-        if (!stepResults.isEmpty()) {
-            sb.append("\nCompleted step results:\n");
-            stepResults.forEach((idx, result) -> {
-                String truncated = result.length() > 300 ? result.substring(0, 300) + "…" : result;
-                sb.append("  Step %d: %s%n".formatted(idx + 1, truncated));
-            });
-        }
-        sb.append("\nGenerate a revised plan for the remaining work starting from step ")
-           .append(failedStepIdx + 1).append(".");
-
-        List<LlmMessage> messages = List.of(
-                new LlmMessage("system", run.systemPrompt() + REPLAN_SUFFIX),
-                new LlmMessage("user", sb.toString())
-        );
-
-        try {
-            LlmCompletion completion = ReactExecutionSupport.completeWithRetry(
-                    run.llm(), messages, run.ctx(), run.deadline(), run.config(), run.task().taskId());
-            checkTimeout(run.deadline(), run.config());
-            tally.addUsage(completion);
-            ExecutionResult replanBudgetExceeded = ReactExecutionSupport.checkBudget(
-                    run.config(), run.task().taskId(),
-                    tally.promptTokens, tally.outputTokens, tally.iterations, tally.steps);
-            if (replanBudgetExceeded == null) {
-                replanBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
-                        run.config(), run.task(), completion.promptTokens(), completion.outputTokens(),
-                        tally.iterations, tally.promptTokens, tally.outputTokens, tally.steps);
-            }
-            if (replanBudgetExceeded != null) {
-                tally.budgetFailure = replanBudgetExceeded;   // caller returns it
-                return List.of();
-            }
-            List<String> revised = parsePlanSteps(completion.text());
-            log.debug("Replan produced {} step(s)", revised.size());
-            return revised;
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            log.debug("Cancelled during replanning");
-            return List.of();
-        } catch (Exception e) {
-            log.warn("Replanning failed: {}", ReactExecutionSupport.describeLlmFailure(e));
-            return List.of();
-        }
-    }
-
-    // ── Message builders ───────────────────────────────────────────────────────
-
-    /**
-     * Planning phase: compact prompt asking for a numbered list of steps.
-     */
-    private List<LlmMessage> buildPlanningMessages(Run run, int maxPlanSteps) {
-        return List.of(
-                new LlmMessage("system",
-                        run.systemPrompt() + run.plannerCatalog() + PLAN_SUFFIX),
-                // The planner has to see the attachments too: "summarise this PDF" cannot be
-                // broken into steps by a model shown only the words around the document.
-                LlmMessage.user(
-                        run.task().input() + "\n\n(Produce at most " + maxPlanSteps + " steps.)",
-                        run.task().media())
-        );
-    }
-
-    /**
-     * Per-step execution: the invariant instruction prefix for every round of one step —
-     * isolated context containing system prompt, task, compact plan status, compact
-     * previous results, and the current step instruction. The caller appends that step's
-     * own tool exchange history to a copy of this list on each round.
-     *
-     * <p>Token usage is O(maxPlanSteps × STEP_RESULT_TRUNCATE_CHARS + stepLocalHistory)
-     * regardless of total iterations.
-     *
-     * <p>When {@code run.nativeTools()} is {@code true} the text tool catalog and the
-     * inline JSON tool-call instruction are both omitted — see {@link #EXEC_SUFFIX_NATIVE}.
-     */
-    private List<LlmMessage> buildStepPrefix(
-            Run run, List<String> plan, Map<Integer, String> stepResults, int currentStepIdx) {
-
-        List<LlmMessage> messages = new ArrayList<>();
-        String toolCatalog = run.stepCatalog();
-        String execSuffix  = run.nativeTools() ? EXEC_SUFFIX_NATIVE : EXEC_SUFFIX;
-        messages.add(new LlmMessage("system", run.systemPrompt() + toolCatalog + execSuffix));
-        // Unlike the ReAct family, this strategy does not rebuild the conversation from
-        // working memory — it re-serialises the task into a fresh per-step prompt. So the
-        // task's attachments have to be re-attached here, or a plan-execute agent would be
-        // the one strategy that silently loses them.
-        messages.add(LlmMessage.user("Task: " + run.task().input(), run.task().media()));
-
-        // Compact plan overview with execution status markers
-        StringBuilder planCtx = new StringBuilder("Execution plan:\n");
-        for (int i = 0; i < plan.size(); i++) {
-            String marker = i < currentStepIdx ? "✓" : (i == currentStepIdx ? "→" : " ");
-            planCtx.append("  %d. [%s] %s%n".formatted(i + 1, marker, plan.get(i)));
-        }
-        messages.add(new LlmMessage("user", planCtx.toString().stripTrailing()));
-
-        // Compact summaries of completed steps — not full verbatim output
-        if (!stepResults.isEmpty()) {
-            StringBuilder prev = new StringBuilder("Completed step results:\n");
-            stepResults.forEach((idx, result) -> {
-                String truncated = result.length() > STEP_RESULT_TRUNCATE_CHARS
-                        ? result.substring(0, STEP_RESULT_TRUNCATE_CHARS) + "…"
-                        : result;
-                prev.append("  Step %d: %s%n".formatted(idx + 1, truncated));
-            });
-            messages.add(new LlmMessage("user", prev.toString().stripTrailing()));
-        }
-
-        // Current step instruction
-        messages.add(new LlmMessage("user",
-                "Execute step %d/%d: %s".formatted(
-                        currentStepIdx + 1, plan.size(), plan.get(currentStepIdx))));
-        return messages;
+    /** Whether a step that went wrong may be answered with another planning call. */
+    private static boolean mayReplan(String replanPolicy, int replanAttempts, PlanRun run, PlanTally tally) {
+        return "on_failure".equalsIgnoreCase(replanPolicy)
+                && replanAttempts < MAX_REPLAN_ATTEMPTS
+                && tally.iterations < run.maxIterations();
     }
 
     /**
      * Synthesis phase: compact prompt with task + plan + all step results.
      * Token usage is predictable regardless of how many tool rounds each step used.
      */
-    private List<LlmMessage> buildSynthesisMessages(
-            Run run, List<String> plan, Map<Integer, String> stepResults) {
+    private static List<LlmMessage> buildSynthesisMessages(
+            PlanRun run, List<String> plan, Map<Integer, String> stepResults, List<String> notes) {
 
         StringBuilder ctx = new StringBuilder();
         ctx.append("Task: ").append(run.task().input()).append("\n\n");
@@ -667,6 +349,10 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         for (int i = 0; i < plan.size(); i++) {
             String result = stepResults.getOrDefault(i, "(not executed)");
             ctx.append("Step %d — %s:%n%s%n%n".formatted(i + 1, plan.get(i), result));
+        }
+        String notesBlock = CloseStep.formatNotes(notes);
+        if (notesBlock != null) {
+            ctx.append(notesBlock).append("\n\n");
         }
         ctx.append("Based on the above, produce the complete final answer.");
 
@@ -676,23 +362,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         );
     }
 
-    // ── Helpers ────────────────────────────────────────────────────────────────
-
-    private static void checkTimeout(Instant deadline, AgentConfig config) {
-        if (Instant.now().isAfter(deadline)) {
-            throw new ExecutionTimeoutException(config.executionTimeout());
-        }
-    }
-
-    /**
-     * Cooperative cancellation: {@code AgentInstance.terminate(session)} interrupts the
-     * executing thread. Returns {@code true} when the current task should stop.
-     */
-    private static boolean cancelled() {
-        return Thread.currentThread().isInterrupted();
-    }
-
-    private String buildFallbackAnswer(List<String> plan, Map<Integer, String> stepResults) {
+    private static String buildFallbackAnswer(List<String> plan, Map<Integer, String> stepResults) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < plan.size(); i++) {
             String result = stepResults.get(i);
@@ -702,20 +372,4 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         }
         return sb.toString().strip();
     }
-
-    private List<String> parsePlanSteps(String planText) {
-        if (planText == null || planText.isBlank()) {
-            return List.of();
-        }
-        List<String> steps = new ArrayList<>();
-        Matcher m = STEP_PATTERN.matcher(planText);
-        while (m.find()) {
-            String step = m.group(1).strip();
-            if (!step.isBlank()) {
-                steps.add(step);
-            }
-        }
-        return steps;
-    }
-
 }

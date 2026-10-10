@@ -6,6 +6,11 @@ shared loop internals (`ReactExecutionSupport`), strategy selection (`ExecutionP
 tool-call parsing (`ToolCallParser`), and system prompt formatting
 (`ToolCatalogFormatter`).
 
+> **Selecting is not planning.** `ExecutionPlanner` and `AgentConfig.plannerStrategy` only
+> *choose* which strategy runs a task, by name; neither produces a plan. Breaking a task into
+> steps up front is the job of one strategy, `"plan_execute"` (`PlanExecuteStrategy`, below).
+> The names are historical and kept because they are public API.
+
 ## The `ExecutionStrategy` contract, as actually implemented here
 
 ```java
@@ -230,8 +235,8 @@ ReAct plus in-loop self-correction — the micro-granularity counterpart to
 
 ### `PlanExecuteStrategy`
 
-- Three phases, each a single or bounded set of LLM calls: **Planning** (one call, numbered
-  step list, capped at `pe.maxPlanSteps()`) → **Execution** (each step in an isolated
+- Three phases, each a single or bounded set of LLM calls: **Planning** (one call, the plan
+  as JSON, capped at `pe.maxPlanSteps()`) → **Execution** (each step in an isolated
   message context — system prompt + task + compact plan status + compact prior-step
   summaries, *not* the full growing transcript — capped at `pe.maxStepRoundsPerStep()`
   Think/Act/Observe rounds) → **Synthesis** (one call over task + plan + all step
@@ -240,18 +245,48 @@ ReAct plus in-loop self-correction — the micro-granularity counterpart to
   `O(maxPlanSteps × STEP_RESULT_TRUNCATE_CHARS + stepLocalHistory)` regardless of how
   many total iterations the whole task consumes — unlike `ReactStrategy`, where the
   transcript grows with every iteration.
+- **The plan is JSON** — `{"steps":[{"id":"s1","goal":"...","dependsOn":[]}]}` — asked for in
+  the prompt and, when the agent's profile has `nativeJsonSchema(true)` and the client
+  supports it, enforced as the provider's `response_format`. A numbered or bulleted list is
+  still accepted as a plan. `id` and `dependsOn` are asked for but **not used yet**: steps run
+  in the written order and each sees everything before it (`PlanReader`).
+- **An unreadable plan is an error, never an invented plan.** Under `replanPolicy = "never"`
+  the task fails with *"The plan could not be read…"*; under `"on_failure"` the plan is asked
+  for once more, telling the model what was wrong, and then the task fails. Before 1.1.0 an
+  unreadable reply silently became a single *"Solve the task directly"* step, which made
+  `plan_execute` behave as a plain answer while its trace claimed a plan; if you depended on
+  that, a plan the model cannot write is now visible as a failure.
+- **A step closes itself with the reserved `close_step` tool** (`CloseStep`; shown to the
+  step's model only, never in the agent's `ToolRegistry`, and the task fails at start if the
+  agent has a tool with that name). Arguments: `status` — `done`, `failed` (needs `reason`) or
+  `revise` (needs `reason`: the step is done but the remaining steps need changing) — plus
+  optional `result` and `notes`. A step that ends the old way (`STEP_DONE` in the text, or a
+  plain final answer) still counts as `done`, with no notes.
+- **Notes** are up to 5 facts of at most 300 characters per step ("Person is in
+  `io/github/xmor/ara/Person.java`"). Unlike step results, which are shortened to
+  `STEP_RESULT_TRUNCATE_CHARS` for the next steps, notes are handed over **whole** to every
+  later step, to the replanner and to the synthesis. A closing with too many or too long notes
+  is refused and the step stays open (it costs a round).
 - **Re-planning** (`StrategyConfig.PlanExecute.replanPolicy() == "on_failure"`): a step
-  that produces no usable output triggers up to `MAX_REPLAN_ATTEMPTS` (2) re-plans of
-  only the *remaining* steps, keeping completed ones untouched.
+  that fails (no usable output, `status = failed`, or its rounds exhausted) triggers up to
+  `MAX_REPLAN_ATTEMPTS` (2) re-plans of only the *remaining* steps, keeping completed ones
+  untouched. A `revise` step keeps its own result and re-plans the steps *after* it. With
+  `"never"`, with no attempts left, with nothing left to revise, or when the new plan cannot
+  be read, `revise` does not stop the task: the plan continues and the reason becomes a note.
 - Falls back to concatenating raw step results (`buildFallbackAnswer`) if the synthesis
   call itself returns an empty response (context overflow or provider hiccup).
 - **Records a full execution trace** (`thought` for the plan, `tool_call`/`observation`
   per dispatch, `final_answer` for the synthesis) and fires `AgentTask.notifyToolCall(...)`
   — parity with `ReactStrategy`. Failure results carry the partial trace accumulated so
   far rather than an empty list.
-- Internally structured around two carriers instead of long positional parameter lists:
-  `Run` (immutable per-pass collaborators) and `Tally` (mutable iteration/token/step
-  accumulators).
+- Internally split by phase, with two carriers instead of long positional parameter lists:
+  `PlanPlanning` (asking for and reading the plan, replanning), `PlanStepExecutor` (running a
+  step and reading how it was closed) and `PlanExecuteStrategy` itself (orchestration and
+  synthesis); `PlanRun` (immutable per-pass collaborators) and `PlanTally` (mutable
+  iteration/token/step/notes accumulators).
+- `maxStepRoundsPerStep` bounds **every** round of a step, with or without tool calls. A step
+  that keeps calling tools without closing ends at the limit and fails with that reason; it no
+  longer runs until the whole task's `maxIterations` is spent.
 - **Task media reaches the planner and every step.** Because this strategy re-serialises
   the task into fresh per-step prompts instead of rebuilding the conversation from working
   memory, it attaches `task.media()` explicitly on the planning call and on each step's
@@ -382,7 +417,7 @@ wrong variant) still runs with sane defaults rather than throwing a `ClassCastEx
 | Variant | Parameters (defaults) |
 |---|---|
 | `React` | none |
-| `PlanExecute` | `replanPolicy` (`"never"`), `maxPlanSteps` (8), `maxStepRoundsPerStep` (3) |
+| `PlanExecute` | `replanPolicy` (`"never"`), `maxPlanSteps` (8), `maxStepRoundsPerStep` (6) |
 | `Reflexion` | `maxReflections` (2), `reflectionPrompt` (`null`), `reflectionProvider` (`null`) |
 | `ReflAct` | `maxReflections` (3), `unproductiveStreak` (2), `reflectOnToolFailure` (`true`), `reflectionProvider` (`null`) |
 | `Custom` | `strategyName` (required), `params` (open `Map<String,Object>`, empty when unset) — the extension seam for a strategy registered from outside `ara-core`; the framework never reads the map |

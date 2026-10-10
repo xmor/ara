@@ -26,7 +26,7 @@ import io.ara.runtime.AraRuntime;
  * Pass {@code live} as the first argument (or {@code -Dara.example.live=true}) to stream
  * from a real OpenAI-compatible endpoint instead — {@code OpenAiLlmClient} streams natively
  * over an SSE socket. The constants below are preset for a local LM-Studio-style server
- * ({@code openai/gpt-oss-20b}, no API key required).
+ * ({@code qwen3-coder-30b-a3b-instruct}, no API key required).
  *
  * @see StreamingWithToolExample — streaming through a ReAct loop that also calls a tool
  * @see io.ara.examples.web.StreamingChatWebExample — the same streaming pattern in a browser
@@ -38,7 +38,7 @@ public class SimpleStreamingExample {
             "Ciao, sono un agente ARA e ti rispondo in streaming, una parola alla volta.";
 
     private static final String LIVE_BASE_URL = "http://127.0.0.1:1234/v1";
-    private static final String LIVE_MODEL    = "openai/gpt-oss-20b";
+    private static final String LIVE_MODEL    = "qwen3-coder-30b-a3b-instruct";
     /** LM Studio ignores the key but langchain4j wants a non-blank string;
      *  override with {@code -Dara.api.key=...} or {@code ARA_API_KEY} if your gateway checks it. */
     private static final String LIVE_API_KEY  = Live.apiKey("not-required");

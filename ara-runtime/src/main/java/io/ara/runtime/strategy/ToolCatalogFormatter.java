@@ -31,4 +31,24 @@ public final class ToolCatalogFormatter {
         }
         return sb.toString();
     }
+
+    /**
+     * The catalogue as a planner needs it: what each tool is called and what it does, without the
+     * argument schemas. A plan names the tools it will use; the arguments are the step's concern.
+     *
+     * <p>Leaving the schemas out is not only shorter. Measured against a local gpt-oss-20b behind
+     * LM Studio, a system prompt that carries tool schemas as JSON text <i>and</i> asks for a JSON
+     * plan makes the server fail the request — the model's JSON plan is taken for a tool call it
+     * cannot parse — on every attempt (5 of 5 on one task), while the same request without the
+     * schemas worked every time (6 of 6) and so did the schemas with a list-shaped plan. Returns an
+     * empty string when {@code tools} is empty.
+     */
+    public static String formatForPlanning(List<AraTool> tools) {
+        if (tools.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder("\n\nAvailable tools:\n");
+        for (AraTool tool : tools) {
+            sb.append("- ").append(tool.toolId()).append(": ").append(tool.description()).append("\n");
+        }
+        return sb.toString();
+    }
 }

@@ -289,6 +289,29 @@ class DefaultEvalRunnerTest {
         assertTrue(s.stdev() > 0.0);
     }
 
+    @Test
+    void aBlockingVerifierThatFailedOneRunOfThreeVetoes_eventhoughTheMeanClearsTheThreshold() {
+        addCase("c1", false, EvalCase.Status.READY, List.of(), "x", "exact_match", Map.of("expected", "ok"));
+        AtomicInteger call = new AtomicInteger();
+        // ok / no / ok → mean 2/3 ≥ CASE_PASS_THRESHOLD, but one run failed
+        EvalResult r = runner(agent(in -> call.getAndIncrement() % 2 == 0 ? "ok" : "no")).run("spec-A", SUITE, 3);
+
+        assertTrue(r.perCase().get("c1").meanScore() >= DefaultEvalRunner.CASE_PASS_THRESHOLD);
+        Verdict.Reject reject = assertInstanceOf(Verdict.Reject.class, r.verdict());
+        assertTrue(reject.reason().contains("blocking verifier failed on case c1"));
+        assertTrue(reject.reason().contains("worst run 0.000"), reject.reason());
+    }
+
+    @Test
+    void aNonBlockingCaseThatFailedOneRunOfThreeDoesNotVeto() {
+        addCase("c1", false, EvalCase.Status.READY, List.of(), "x", "exact_match",
+                Map.of("expected", "ok", "blocking", "false"));
+        AtomicInteger call = new AtomicInteger();
+        EvalResult r = runner(agent(in -> call.getAndIncrement() % 2 == 0 ? "ok" : "no")).run("spec-A", SUITE, 3);
+
+        assertInstanceOf(Verdict.PromoteToCanary.class, r.verdict());
+    }
+
     // ── ADR-054 D6 / ADR-0085 D1 — a RunBudget-measured cost per run ──────────
 
     /** An agent that reports a fixed cost / token draw per run. */
