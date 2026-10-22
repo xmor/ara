@@ -81,6 +81,9 @@ final class ReactExecutionSupport {
     - NEVER output special tokens like <|channel|> or <|constrain|>. Only plain text and JSON.
     Never mix tool calls and final answers in the same response.""";
 
+    /** Marks framework-generated turns sent with the {@code "user"} role, as {@code ReActLoop} does. */
+    static final String AUTOMATED_PREFIX = "[automated] ";
+
     /**
      * Always-present core of the synthesis nudge injected into working memory a few
      * iterations before {@code maxIterations} is reached — nudges models that never
@@ -320,9 +323,10 @@ final class ReactExecutionSupport {
      * clause asks the model to save unsaved work before finalising, which would be
      * impossible to honour if tools were withheld at the same time the nudge fires.
      *
-     * <p>Injected with role {@code "system"} rather than {@code "user"} — this is a
-     * framework-generated instruction, not text from the end user, and agents that
-     * treat user turns as untrusted data must not see it labelled as one.
+     * <p>Injected as an {@value #AUTOMATED_PREFIX} {@code "user"} turn, the same convention as
+     * the background-task results in {@code ReActLoop}: providers that require the system
+     * message first (qwen via LiteLLM) reject a mid-conversation {@code "system"} turn with
+     * INVALID_REQUEST, and the prefix still marks it as framework-generated, not end-user text.
      *
      * @param resolvedTools the agent's enabled tools, used to decide whether the
      *                       file-write persist clause applies to this agent
@@ -343,7 +347,7 @@ final class ReactExecutionSupport {
             return false;
         }
         boolean hasFileWrite = resolvedTools.stream().anyMatch(t -> "file_write".equals(t.toolId()));
-        memory.appendToWorkingMemory("system", buildSynthesisPrompt(hasFileWrite, !nativeTools));
+        memory.appendToWorkingMemory("user", AUTOMATED_PREFIX + buildSynthesisPrompt(hasFileWrite, !nativeTools));
         log.debug("Synthesis trigger injected at iteration {}/{} for task [{}] (persistClause={}, sentinelClause={})",
                 iterations, config.maxIterations(), task.taskId(), hasFileWrite, !nativeTools);
         return true;
@@ -428,7 +432,7 @@ final class ReactExecutionSupport {
                 List<LlmMessage> result = new ArrayList<>(entries.size());
                 result.addAll(messages);
                 for (int i = cached; i < entries.size(); i++) {
-                    result.add(materialize(entries.get(i)));
+                    result.add(materializeTail(entries.get(i)));
                 }
                 messages = result;
                 pinned   = List.copyOf(entries);
@@ -447,6 +451,8 @@ final class ReactExecutionSupport {
                 MemoryEntry e = entries.get(i);
                 if (i == enhanced) {
                     result.add(new LlmMessage("system", e.content() + toolCatalog + effectiveSuffix));
+                } else if (enhanced >= 0 && i > enhanced) {
+                    result.add(materializeTail(e));
                 } else {
                     result.add(materialize(e));
                 }
@@ -465,6 +471,19 @@ final class ReactExecutionSupport {
                 }
             }
             return true;
+        }
+
+        /**
+         * An entry after the first system message. A {@code "system"} entry there — the
+         * SUMMARIZE context summary, recalled episodes, Reflexion's injected blocks — is sent
+         * as an {@value #AUTOMATED_PREFIX} {@code "user"} turn: providers that require the
+         * system message first (qwen via LiteLLM) reject it with INVALID_REQUEST. Memory keeps
+         * the original role; only the outgoing request changes.
+         */
+        static LlmMessage materializeTail(MemoryEntry e) {
+            LlmMessage m = materialize(e);
+            if (!"system".equals(m.role())) return m;
+            return new LlmMessage("user", AUTOMATED_PREFIX + m.content(), null, null, m.media());
         }
 
         /**

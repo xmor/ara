@@ -193,7 +193,7 @@ class ReactStrategyFixesTest {
     }
 
     @Test
-    void synthesisNudge_isInjectedAsSystemRole_notUser() {
+    void synthesisNudge_isInjectedAsAutomatedUserMessage() {
         MemoryManager memory = new InMemoryMemoryManager();
         memory.appendToWorkingMemory("system", "You are a helpful AI agent.");
         memory.appendToWorkingMemory("user", "Do the work.");
@@ -202,8 +202,31 @@ class ReactStrategyFixesTest {
         new ReactStrategy().execute(AgentTask.of("go"), llm, memory, ToolRegistry.empty(), fiveIterationConfig());
 
         LlmMessage nudge = synthesisMessage(llm.callMessages).orElseThrow(() -> new AssertionError("nudge never injected"));
-        assertEquals("system", nudge.role(),
-                "the synthesis nudge is a framework instruction, not end-user text — it must not be labelled \"user\"");
+        assertEquals("user", nudge.role(),
+                "a mid-conversation system turn is rejected by system-first providers (qwen via LiteLLM)");
+        assertTrue(nudge.content().startsWith(ReactExecutionSupport.AUTOMATED_PREFIX),
+                "framework-generated, so it carries the [automated] marker");
+        for (List<LlmMessage> messages : llm.callMessages) {
+            assertTrue(messages.stream().skip(1).noneMatch(m -> "system".equals(m.role())),
+                    "no system turn after index 0");
+        }
+    }
+
+    @Test
+    void midConversationSystemEntry_isSentAsAutomatedUserTurn() {
+        MemoryManager memory = new InMemoryMemoryManager();
+        memory.appendToWorkingMemory("system", "You are a helpful AI agent.");
+        memory.appendToWorkingMemory("user", "Do the work.");
+        memory.appendToWorkingMemory("system", "SUMMARY");
+
+        RecordingLlmClient llm = new RecordingLlmClient();
+        new ReactStrategy().execute(AgentTask.of("go"), llm, memory, ToolRegistry.empty(), fiveIterationConfig());
+
+        List<LlmMessage> first = llm.callMessages.get(0);
+        assertEquals("system", first.get(0).role());
+        LlmMessage summary = first.get(2);
+        assertEquals("user", summary.role());
+        assertEquals(ReactExecutionSupport.AUTOMATED_PREFIX + "SUMMARY", summary.content());
     }
 
     @Test

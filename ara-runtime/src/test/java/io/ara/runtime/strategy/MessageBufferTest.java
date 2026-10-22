@@ -79,7 +79,7 @@ class MessageBufferTest {
     }
 
     @Test
-    void tailSystemEntryFromSynthesisIsNotEnhanced() {
+    void tailSystemEntryIsNotEnhancedAndIsSentAsAutomatedUserTurn() {
         memory.appendToWorkingMemory("system", "agent");
 
         buffer.build(memory, CATALOG, SUFFIX);
@@ -87,8 +87,10 @@ class MessageBufferTest {
 
         List<LlmMessage> messages = buffer.build(memory, CATALOG, SUFFIX);
         assertEquals(2, messages.size());
-        assertEquals("wrap up now", messages.get(1).content(),
-                "only the very first system message is enhanced — a tail nudge stays plain");
+        assertEquals("user", messages.get(1).role(),
+                "system-first providers reject a system turn after the opening one");
+        assertEquals("[automated] wrap up now", messages.get(1).content(),
+                "only the very first system message is enhanced — a tail entry stays plain");
     }
 
     @Test
