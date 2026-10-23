@@ -143,6 +143,22 @@ public final class DelegatingToolRegistry implements ToolRegistry {
                                    DelegateStateAccess stateAccess, SessionStore sessionStore,
                                    ScopeSet ownGrantedScopes, AgentView agentView,
                                    AsyncDelegation asyncDelegation, Function<String, AsyncSupport> recipientSupport) {
+        this(inner, bus, selfId, timeout, stateAccess, sessionStore, ownGrantedScopes, agentView,
+                asyncDelegation, recipientSupport, null);
+    }
+
+    /**
+     * @param viewSource (ADR-033 §3.3, task-scoped form) the discovery-time pre-check's
+     *                   authority, built per task; may return {@code null} for "no scope
+     *                   channel on this task" (pre-check skipped). When a fixed {@code
+     *                   agentView} is also given, the fixed one wins — see {@link
+     *                   AgentDelegationTool}'s own constructor Javadoc.
+     */
+    public DelegatingToolRegistry(ToolRegistry inner, MessageBus bus, String selfId, Duration timeout,
+                                   DelegateStateAccess stateAccess, SessionStore sessionStore,
+                                   ScopeSet ownGrantedScopes, AgentView agentView,
+                                   AsyncDelegation asyncDelegation, Function<String, AsyncSupport> recipientSupport,
+                                   Function<AgentTask, AgentView> viewSource) {
         this.inner          = Objects.requireNonNull(inner,  "inner must not be null");
         AgentDelegationTool delegationTool = new AgentDelegationTool(
                 Objects.requireNonNull(bus,    "bus must not be null"),
@@ -153,7 +169,8 @@ public final class DelegatingToolRegistry implements ToolRegistry {
                 ownGrantedScopes,
                 agentView,
                 asyncDelegation,
-                recipientSupport);
+                recipientSupport,
+                viewSource);
         ownTools.put(AgentDelegationTool.TOOL_ID, delegationTool);
         if (asyncDelegation != null) {
             ownTools.put(AwaitTasksTool.TOOL_ID, new AwaitTasksTool());
@@ -163,7 +180,22 @@ public final class DelegatingToolRegistry implements ToolRegistry {
 
     @Override
     public List<AraTool> resolveEnabled(List<String> enabledToolIds) {
-        List<AraTool> tools = new ArrayList<>(inner.resolveEnabled(enabledToolIds));
+        return withOwnTools(enabledToolIds, inner.resolveEnabled(enabledToolIds));
+    }
+
+    /**
+     * Same rule as the caller-independent form, applied to whatever the inner registry
+     * resolved for this task: this decorator's own tools (delegation, background task
+     * controls) are not scope-gated, so they are added regardless of what the filter
+     * underneath removed.
+     */
+    @Override
+    public List<AraTool> resolveEnabled(List<String> enabledToolIds, AgentTask task) {
+        return withOwnTools(enabledToolIds, inner.resolveEnabled(enabledToolIds, task));
+    }
+
+    private List<AraTool> withOwnTools(List<String> enabledToolIds, List<AraTool> resolved) {
+        List<AraTool> tools = new ArrayList<>(resolved);
         if (shouldAddOwnTools(enabledToolIds)) {
             addMissingOwnTools(tools);
         }

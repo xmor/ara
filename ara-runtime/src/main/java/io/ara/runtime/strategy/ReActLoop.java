@@ -101,7 +101,10 @@ abstract class ReActLoop {
         this.checkpointer  = RunCheckpointer.from(task);
 
         // Resolve tools once — the list is stable for the lifetime of this execution.
-        this.resolvedTools = tools.resolveEnabled(config.enabledTools());
+        // Resolved against the effective task (`this.task`), not the raw parameter: with
+        // background delegation configured, BackgroundTasks.attachTo may wrap it, and the
+        // scope filter must read the channels of the task actually being executed.
+        this.resolvedTools = tools.resolveEnabled(config.enabledTools(), this.task);
         // stepCtx only ever differs by which tools are exposed: the full set on normal
         // iterations, an empty set on forced-final ones. All other fields are fixed for
         // the task, so precompute the two variants once instead of copying every field

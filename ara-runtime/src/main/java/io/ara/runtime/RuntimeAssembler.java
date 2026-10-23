@@ -15,6 +15,7 @@ import io.ara.runtime.agent.AgentRegistry;
 import io.ara.runtime.agent.InstanceContextStore;
 import io.ara.runtime.bus.DelegatingToolRegistry;
 import io.ara.runtime.bus.LocalMessageBus;
+import io.ara.runtime.bus.ScopeFilteringToolRegistry;
 import io.ara.runtime.config.AraRuntimeConfig;
 import io.ara.runtime.factory.AgentFactory;
 import io.ara.runtime.factory.DefaultLlmRouter;
@@ -304,17 +305,30 @@ final class RuntimeAssembler {
 
     /**
      * Composes the full per-agent tool registry: the resolved base, wrapped for
-     * delegation (ADR-0077 D2), then gated for HITL when a gate is configured
-     * (ADR-0067 D6), then instrumented for OTel spans.
+     * delegation (ADR-0077 D2), then scope-filtered for the caller, then gated for HITL
+     * when a gate is configured (ADR-0067 D6), then instrumented for OTel spans.
+     *
+     * <p>The scope filter sits <em>outside</em> the approval gate on purpose:
+     * {@code ApprovalToolRegistry} waits for a human (or suspends the run) before
+     * delegating, so a call this caller's scopes will never allow must be refused
+     * before an operator is asked — otherwise the attention (or the suspension) is
+     * spent on an action that cannot run. Telemetry stays outermost so even a refusal
+     * is visible as a span.
      *
      * <p>ADR-0077 D2's declared gap, closed: ownGrantedScopes now reflects this
      * agent's own {@code AgentConfig.grantedScopes()} instead of the implicit
      * {@code ScopeSet.EMPTY} every caller got before — the attenuation
      * {@code AgentDelegationTool} already performs (incoming ∩ ownGrantedScopes) had
      * a real ceiling to narrow against only when constructed directly; every agent
-     * created through AraRuntime saw EMPTY regardless of what it declared. agentView
-     * stays null (unchanged): wiring {@code registry.viewFor(...)} here is a separate
-     * decision (ADR-033 Fase 3 §3.3's pre-check), not part of this fix.
+     * created through AraRuntime saw EMPTY regardless of what it declared. The
+     * delegation pre-check's fixed agentView stays null (unchanged); the pre-check's
+     * authority instead arrives per task through {@code viewSource}: the same channels
+     * the scope filter reads, resolved against the recipient registry — so a delegation
+     * the caller's scopes cannot justify fails at discovery time ("not found"), the
+     * way the tool catalog already hides an unauthorized tool, instead of surfacing
+     * only at dispatch. A task with no scope channel yields {@code null} and skips the
+     * pre-check: with no authority to judge by, the bus-side dispatch check — which
+     * names the specific reason — remains the only gate.
      *
      * <p>ADR-0067 D6: insert the approval decorator whenever a gate is configured, and
      * let it decide per call whether a gate is needed (agent flag OR the tool's own
@@ -328,10 +342,21 @@ final class RuntimeAssembler {
                 perAgentToolRegistry.apply(agentCfg), messageBus, agentCfg.agentId().value(),
                 b.delegationTimeout, agentCfg.delegateStateAccess(), b.sessionStore,
                 io.ara.core.auth.ScopeSet.of(agentCfg.grantedScopes()), null,
-                agentCfg.asyncDelegation(), recipientId -> asyncSupportOf(registry, recipientId));
+                agentCfg.asyncDelegation(), recipientId -> asyncSupportOf(registry, recipientId),
+                task -> {
+                    io.ara.core.agent.TaskScopes.Resolved caller =
+                            io.ara.core.agent.TaskScopes.of(task);
+                    // Null, not an empty-scoped view: "no scope channel" must skip the
+                    // pre-check and defer to the bus's specific dispatch-time error, not
+                    // fold every gated recipient into a misleading "not found".
+                    return caller.channelPresent()
+                            ? registry.viewFor(caller.scopes())
+                            : null;
+                });
+        ToolRegistry scoped = new ScopeFilteringToolRegistry(base);
         ToolRegistry withApproval = b.approvalGate != null
-                ? new ApprovalToolRegistry(base, b.approvalGate, agentCfg)
-                : base;
+                ? new ApprovalToolRegistry(scoped, b.approvalGate, agentCfg)
+                : scoped;
         return new TelemetryToolRegistry(withApproval, b.telemetry);
     }
 

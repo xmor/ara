@@ -403,18 +403,17 @@ public final class AraRuntime implements AutoCloseable {
      * further, attenuating again at each hop exactly as ADR-033 Fase 5 already does for a
      * machine-to-machine chain.
      *
-     * <p>Does not otherwise change how {@code agent} resolves its tools or peer visibility
-     * for this call — narrowing what the *delegation chain* downstream of this call can do
-     * (Fase 5, already wired), not yet what {@code agent} itself can invoke directly for
-     * this specific execution (Fase 5.4/6.3, not implemented: {@code AgentInstance} still
-     * builds its {@code AgentView}/tool registry once, at {@code createAgent} time, from
-     * {@code agent.config()} — not fresh per call from this method's {@code userScopes}).
+     * <p>Since ADR-033 §3.3's task-scoped wiring, the same channels scope this execution
+     * directly, at both enforcement points the way the tool catalog is scoped: the
+     * delegation pre-check (a {@code delegate_task} call from {@code agent} resolves its
+     * recipients against the effective scopes this context carries) and the tool registry
+     * (the catalog filtered per task). Peer visibility — {@code AgentRegistry.viewFor(AgentTask)}
+     * — now reads the same source, so a caller with narrower scopes sees and can reach
+     * fewer peers, without rebuilding any wiring.
      *
-     * @param agent      the agent to run; must already be created via {@link #createAgent}
-     * @param task       the task to execute
-     * @param userId     the user this call is made on behalf of
-     * @param userScopes the user's own scopes
-     * @return the agent's response, exactly as {@link AraAgent#execute(AgentTask)} would return it
+     * <p>What is still fixed per agent: everything else {@code AgentInstance} builds at
+     * {@code createAgent} time from {@code agent.config()} — not fresh per call from
+     * this method's {@code userScopes}.
      */
     public AgentResponse executeOnBehalfOf(AraAgent agent, AgentTask task, String userId, ScopeSet userScopes) {
         Objects.requireNonNull(agent,  "agent must not be null");

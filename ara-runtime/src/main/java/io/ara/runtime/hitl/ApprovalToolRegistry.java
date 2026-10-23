@@ -123,6 +123,16 @@ public final class ApprovalToolRegistry implements ToolRegistry {
         return delegate.resolveEnabled(enabledToolIds);
     }
 
+    /**
+     * Forwarded, not re-implemented: the approval gate is a dispatch-time concern, and the
+     * catalog must be whatever the registry underneath resolved for this caller. Dropping
+     * the task here would hand every gated agent the caller-independent catalog.
+     */
+    @Override
+    public List<AraTool> resolveEnabled(List<String> enabledToolIds, AgentTask task) {
+        return delegate.resolveEnabled(enabledToolIds, task);
+    }
+
     @Override
     public Optional<AraTool> findById(String toolId) {
         return delegate.findById(toolId);

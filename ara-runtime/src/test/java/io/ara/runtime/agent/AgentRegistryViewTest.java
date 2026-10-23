@@ -131,4 +131,43 @@ class AgentRegistryViewTest {
 
         assertEquals(1, view.all().size(), "the view reads the registry live, not a snapshot");
     }
+
+    // ── ADR-033 §3.3 — the task-scoped overload ──
+
+    @Test
+    void viewForTask_readsTheExecutionContextsEffectiveScopes() {
+        AgentRegistry registry = new AgentRegistry();
+        registry.register(agent("finance-bot", null, "finance", "handles finance"));
+
+        // ofUserDelegation(actor, {finance,finance:write}, user, {finance}) → effective {finance}
+        AgentTask task = AgentTask.of("go").withExecutionContext(io.ara.core.auth.ExecutionContext.ofUserDelegation(
+                "agent-1", ScopeSet.of("finance", "finance:write"),
+                "user-1", ScopeSet.of("finance")));
+
+        assertTrue(registry.viewFor(task).findById(AgentId.of("finance-bot")).isPresent());
+    }
+
+    @Test
+    void viewForTask_fallsBackToTheBareScopesKey() {
+        AgentRegistry registry = new AgentRegistry();
+        registry.register(agent("finance-bot", null, "finance", "handles finance"));
+
+        AgentTask task = AgentTask.of("go")
+                .withAttachment(io.ara.core.agent.RunContext.SCOPES_KEY, ScopeSet.of("finance"));
+
+        assertTrue(registry.viewFor(task).findById(AgentId.of("finance-bot")).isPresent());
+    }
+
+    @Test
+    void viewForTask_withNoChannel_hidesEveryAgentThatDeclaresScopes() {
+        // No task, no caller authority: fail-closed, like the tool filter's empty channel.
+        AgentRegistry registry = new AgentRegistry();
+        registry.register(agent("gated", null, "finance", "visible to finance only"));
+        registry.register(agent("open", null, null, "no scope declarations"));
+
+        AgentView view = registry.viewFor((AgentTask) null);
+
+        assertTrue(view.findById(AgentId.of("gated")).isEmpty());
+        assertTrue(view.findById(AgentId.of("open")).isPresent());
+    }
 }

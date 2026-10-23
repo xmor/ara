@@ -93,6 +93,32 @@ LLM response → [get_weather(Rome), get_weather(London)]
                       └──────── ~300 ms total ───────┘
 ```
 
+## Showing each caller only the tools it may use
+
+By default an agent's catalog is the same for everyone: whatever `enabledTools()` selects
+is what every task sees, and a caller without the right authority only finds out when the
+call is denied at dispatch. A registry chain can narrow that catalog per caller with the
+scope-filter decorator:
+
+```java
+ToolRegistry chain = new ScopeFilteringToolRegistry(inner);
+```
+
+With this form, each task's own authority decides what the model sees: the task's
+execution context (its effective scopes, actor ∩ subject) first, then the bare scope set
+on the run context, then nothing. A tool that declares `requiredScopes()` and is not
+covered is hidden from the catalog before the LLM ever reads it — no denied call to
+explain, no retry loop on a tool that was never usable. A tool that declares no scopes is
+unaffected, and a task that carries no scope channel at all is treated as authorized for
+nothing: fail-closed for gated tools, invisible for everything else. When a gated tool is
+hidden because the task carried no channel, the registry logs one warning per tool — the
+symptom of a seeding omission, not a denial to show the model.
+
+The runtime wires this decorator into every agent's chain automatically; declare scopes on
+the tools that need them and seed the tasks, and the catalogs follow. The fixed-view
+constructor (`new ScopeFilteringToolRegistry(inner, agentView)`) stays for deployments
+whose scopes never vary within the agent.
+
 ## Related
 
 - [Human approval on every tool call](HITL-AND-RAG.md#human-in-the-loop-hitl--approval-gate)

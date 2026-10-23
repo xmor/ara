@@ -33,14 +33,38 @@ final class CompositeToolRegistry implements ToolRegistry {
 
     @Override
     public List<AraTool> resolveEnabled(List<String> enabledToolIds) {
-        List<AraTool> result = new ArrayList<>();
+        return composite(enabledToolIds, base.resolveEnabled(remainingIds(enabledToolIds)));
+    }
+
+    /**
+     * The same split as the caller-independent form, with the task forwarded to {@code base}
+     * for the ids this composite does not own: MCP-leased tools are resolved here, and the
+     * scope filter that may wrap this composite sees them all as one catalog anyway.
+     */
+    @Override
+    public List<AraTool> resolveEnabled(List<String> enabledToolIds, AgentTask task) {
+        return composite(enabledToolIds, base.resolveEnabled(remainingIds(enabledToolIds), task));
+    }
+
+    private List<String> remainingIds(List<String> enabledToolIds) {
         List<String> remaining = new ArrayList<>();
         for (String id : enabledToolIds) {
-            AraTool mcp = mcpTools.get(id);
-            if (mcp != null) result.add(mcp);
-            else remaining.add(id);
+            if (!mcpTools.containsKey(id)) {
+                remaining.add(id);
+            }
         }
-        result.addAll(base.resolveEnabled(remaining));
+        return remaining;
+    }
+
+    private List<AraTool> composite(List<String> enabledToolIds, List<AraTool> fromBase) {
+        List<AraTool> result = new ArrayList<>();
+        for (String id : enabledToolIds) {
+            AraTool mcp = mcpTools.get(id);
+            if (mcp != null) {
+                result.add(mcp);
+            }
+        }
+        result.addAll(fromBase);
         return List.copyOf(result);
     }
 

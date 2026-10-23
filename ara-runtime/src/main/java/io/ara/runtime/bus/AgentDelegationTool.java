@@ -78,6 +78,7 @@ public final class AgentDelegationTool implements AraTool {
     private final AgentView           agentView;
     private final AsyncDelegation     asyncDelegation;
     private final Function<String, AsyncSupport> recipientSupport;
+    private final Function<AgentTask, AgentView> viewSource;
 
     /**
      * @param bus    the local message bus
@@ -166,6 +167,28 @@ public final class AgentDelegationTool implements AraTool {
     public AgentDelegationTool(MessageBus bus, String selfId, Duration timeout, DelegateStateAccess stateAccess,
                                 SessionStore sessionStore, ScopeSet ownGrantedScopes, AgentView agentView,
                                 AsyncDelegation asyncDelegation, Function<String, AsyncSupport> recipientSupport) {
+        this(bus, selfId, timeout, stateAccess, sessionStore, ownGrantedScopes, agentView, asyncDelegation,
+                recipientSupport, null);
+    }
+
+    /**
+     * @param viewSource (ADR-033 §3.3, task-scoped form) the discovery-time pre-check's
+     *                   authority, built per task instead of captured at wiring time: the
+     *                   task-scoped counterpart of {@link ScopeFilteringToolRegistry}'s
+     *                   task-scoped form. May return {@code null} — "this task carries no
+     *                   scope channel, so there is no authority to judge by" — and the
+     *                   pre-check is then skipped, leaving {@link LocalMessageBus}'s
+     *                   dispatch-time check (which names the specific reason) as the only
+     *                   gate; a view with empty scopes instead denies every gated
+     *                   recipient outright. When both this and a fixed {@code agentView}
+     *                   are given, the fixed one wins — the same precedence {@link
+     *                   ScopeFilteringToolRegistry} applies, where the fixed form is the
+     *                   explicit override and the task-scoped form only fills its absence.
+     */
+    public AgentDelegationTool(MessageBus bus, String selfId, Duration timeout, DelegateStateAccess stateAccess,
+                                SessionStore sessionStore, ScopeSet ownGrantedScopes, AgentView agentView,
+                                AsyncDelegation asyncDelegation, Function<String, AsyncSupport> recipientSupport,
+                                Function<AgentTask, AgentView> viewSource) {
         this.asyncDelegation  = asyncDelegation;
         this.recipientSupport = Objects.requireNonNull(recipientSupport, "recipientSupport must not be null");
         this.bus              = Objects.requireNonNull(bus,    "bus must not be null");
@@ -175,6 +198,7 @@ public final class AgentDelegationTool implements AraTool {
         this.sessionStore     = Objects.requireNonNull(sessionStore, "sessionStore must not be null");
         this.ownGrantedScopes = Objects.requireNonNullElse(ownGrantedScopes, ScopeSet.EMPTY);
         this.agentView        = agentView;
+        this.viewSource       = viewSource;
     }
 
     @Override
@@ -257,7 +281,7 @@ public final class AgentDelegationTool implements AraTool {
 
     @Override
     public ToolResult execute(String argumentJson) {
-        return delegate(argumentJson, Caller.NONE);
+        return delegate(argumentJson, Caller.NONE, agentView);
     }
 
     /**
@@ -270,10 +294,29 @@ public final class AgentDelegationTool implements AraTool {
      * variables would see them unresolved. {@code promptVars}/{@code opaque} are always
      * passed through unchanged (immutable); the mutable {@link RunState} channel is
      * instead transformed per {@link #stateAccess} — see {@link #delegate}.
+     *
+     * <p>The task is also what makes the §3.3 pre-check task-scoped: the effective view
+     * is the fixed {@code agentView} when one was given, else {@code viewSource} applied
+     * to this task — which may yield {@code null} ("no scope channel on this task"), in
+     * which case the pre-check is skipped and dispatch-time authorization on the bus
+     * remains the gate.
      */
     @Override
     public ToolResult execute(String argumentJson, AgentTask task) {
-        return delegate(argumentJson, task != null ? Caller.of(task) : Caller.NONE);
+        return delegate(argumentJson, task != null ? Caller.of(task) : Caller.NONE, viewFor(task));
+    }
+
+    /**
+     * The view the §3.3 pre-check consults for this task: the fixed {@code agentView}
+     * when provided (the explicit override, mirroring {@link ScopeFilteringToolRegistry}),
+     * else the task-scoped source — which is asked only here, where the task exists,
+     * because the {@code Caller} a delegation carries holds the run context, not the task.
+     */
+    private AgentView viewFor(AgentTask task) {
+        if (agentView != null) {
+            return agentView;
+        }
+        return viewSource != null && task != null ? viewSource.apply(task) : null;
     }
 
     /**
@@ -363,7 +406,7 @@ public final class AgentDelegationTool implements AraTool {
         }
     }
 
-    private ToolResult delegate(String argumentJson, Caller caller) {
+    private ToolResult delegate(String argumentJson, Caller caller, AgentView view) {
         DelegationRequest request;
         try {
             request = parseDelegation(argumentJson);
@@ -384,7 +427,10 @@ public final class AgentDelegationTool implements AraTool {
         // failure message doesn't need to distinguish them (LocalMessageBus's own
         // AuthorizationException, reached below if this pre-check is skipped or passes,
         // still names the specific reason when the failure is dispatch-time instead).
-        if (agentView != null && agentView.findById(AgentId.of(recipientId)).isEmpty()) {
+        // The view arrives already resolved per task (fixed view, or the task-scoped
+        // source — whose null means "no scope channel on this task", so there is no
+        // authority to pre-check against and the bus stays the only gate).
+        if (view != null && view.findById(AgentId.of(recipientId)).isEmpty()) {
             return ToolResult.failure(TOOL_ID, "Agent not found: " + recipientId);
         }
 

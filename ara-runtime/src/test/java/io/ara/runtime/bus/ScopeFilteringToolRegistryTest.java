@@ -2,7 +2,9 @@ package io.ara.runtime.bus;
 
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AgentView;
+import io.ara.core.agent.RunContext;
 import io.ara.core.auth.AuthorizationException;
+import io.ara.core.auth.ExecutionContext;
 import io.ara.core.auth.ScopeSet;
 import io.ara.core.common.AgentId;
 import io.ara.core.tool.AraTool;
@@ -113,5 +115,105 @@ class ScopeFilteringToolRegistryTest {
 
         assertThrows(AuthorizationException.class,
                 () -> scoped.execute("shell_exec", "{}", AgentTask.of("go")));
+    }
+
+    // ── Task-scoped form ───────────────────────────────────────────────────────
+
+    private static List<String> ids(List<AraTool> tools) {
+        return tools.stream().map(AraTool::toolId).toList();
+    }
+
+    private static AgentTask taskWithScopes(String... scopes) {
+        return AgentTask.of("go").withRunContext(
+                RunContext.empty().withOpaque(RunContext.SCOPES_KEY, ScopeSet.of(scopes)));
+    }
+
+    private static AgentTask taskWithExecutionContext(ExecutionContext ctx) {
+        return AgentTask.of("go").withExecutionContext(ctx);
+    }
+
+    @Test
+    void taskScoped_readsTheExecutionContextWhenPresent_evenWhenABareScopeSetAlsoTravels() {
+        ToolRegistry inner = innerWith(tool("open"), tool("shell_exec", "tools:shell"));
+        ToolRegistry scoped = new ScopeFilteringToolRegistry(inner);
+
+        // actor ∩ subject = {misc} — the bare scope set would grant shell; the context wins.
+        // withRunContext replaces the whole RunContext, so the context must be attached last.
+        AgentTask task = AgentTask.of("go")
+                .withRunContext(RunContext.empty().withOpaque(RunContext.SCOPES_KEY, ScopeSet.of("tools:shell")))
+                .withExecutionContext(
+                        ExecutionContext.ofUserDelegation("agent", ScopeSet.of("tools:shell", "misc"),
+                                "user-1", ScopeSet.of("misc")));
+
+        assertEquals(List.of("open"), ids(scoped.resolveEnabled(null, task)));
+    }
+
+    @Test
+    void taskScoped_onBehalfOf_effectiveScopesAreTheIntersection() {
+        ToolRegistry inner = innerWith(tool("a", "s:a"), tool("b", "s:b"));
+        ToolRegistry scoped = new ScopeFilteringToolRegistry(inner);
+
+        AgentTask task = taskWithExecutionContext(
+                ExecutionContext.ofUserDelegation("agent", ScopeSet.of("s:a", "s:b"), "user-1", ScopeSet.of("s:a")));
+
+        assertEquals(List.of("a"), ids(scoped.resolveEnabled(null, task)));
+    }
+
+    @Test
+    void taskScoped_readsTheBareScopeSetWhenThereIsNoExecutionContext() {
+        ToolRegistry inner = innerWith(tool("open"), tool("shell_exec", "tools:shell"));
+        ToolRegistry scoped = new ScopeFilteringToolRegistry(inner);
+
+        assertEquals(List.of("open", "shell_exec"), ids(scoped.resolveEnabled(null, taskWithScopes("tools:shell"))));
+        assertEquals(List.of("open"), ids(scoped.resolveEnabled(null, taskWithScopes("misc"))));
+    }
+
+    @Test
+    void taskScoped_aTaskWithNoChannelSeesOnlyUngatedTools_failClosedButNothingElse() {
+        ToolRegistry inner = innerWith(tool("open"), tool("shell_exec", "tools:shell"));
+        ToolRegistry scoped = new ScopeFilteringToolRegistry(inner);
+
+        assertEquals(List.of("open"), ids(scoped.resolveEnabled(null, AgentTask.of("go"))));
+    }
+
+    @Test
+    void taskScoped_theCallerIndependentFormIsUnfiltered_evenForTheSameInstance() {
+        ToolRegistry inner = innerWith(tool("open"), tool("shell_exec", "tools:shell"));
+        ToolRegistry scoped = new ScopeFilteringToolRegistry(inner);
+
+        assertEquals(2, scoped.resolveEnabled(null).size());
+    }
+
+    @Test
+    void taskScoped_executeWithoutATask_refusesAGatedTool_andForwardsAnUngatedOne() {
+        ToolRegistry inner = innerWith(tool("open"), tool("shell_exec", "tools:shell"));
+        ToolRegistry scoped = new ScopeFilteringToolRegistry(inner);
+
+        AuthorizationException e = assertThrows(AuthorizationException.class,
+                () -> scoped.execute("shell_exec", "{}"));
+        assertEquals(AuthorizationException.Reason.TOOL_NOT_AUTHORIZED, e.reason());
+        assertDoesNotThrow(() -> assertTrue(scoped.execute("open", "{}").success()));
+    }
+
+    @Test
+    void taskScoped_executeWithTask_checksAgainstTheSameResolutionAsTheCatalog() {
+        ToolRegistry inner = innerWith(tool("shell_exec", "tools:shell"));
+        ToolRegistry scoped = new ScopeFilteringToolRegistry(inner);
+
+        assertDoesNotThrow(() -> assertTrue(scoped.execute("shell_exec", "{}", taskWithScopes("tools:shell")).success()));
+        AuthorizationException e = assertThrows(AuthorizationException.class,
+                () -> scoped.execute("shell_exec", "{}", AgentTask.of("go")));
+        assertEquals(AuthorizationException.Reason.TOOL_NOT_AUTHORIZED, e.reason());
+    }
+
+    @Test
+    void taskScoped_anEmptyChannelIsARealDenial_notAMissingOne() {
+        ToolRegistry inner = innerWith(tool("open"), tool("shell_exec", "tools:shell"));
+        ToolRegistry scoped = new ScopeFilteringToolRegistry(inner);
+
+        // An explicitly empty execution context carries a channel: deny, don't warn-as-missing.
+        AgentTask task = taskWithExecutionContext(ExecutionContext.ofAgent("agent", ScopeSet.EMPTY));
+
+        assertEquals(List.of("open"), ids(scoped.resolveEnabled(null, task)));
     }
 }

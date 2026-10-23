@@ -25,6 +25,26 @@ public interface ToolRegistry {
     List<AraTool> resolveEnabled(List<String> enabledToolIds);
 
     /**
+     * Returns the tools enabled for this execution — the caller-aware variant of
+     * {@link #resolveEnabled(List)}.
+     *
+     * <p>Default: delegates to the one-argument form. The overload exists so a registry
+     * that knows <em>who</em> is running, and therefore what that caller may use, can
+     * answer differently per task without forcing every existing registry to change.
+     * A registry that filters by caller MUST do it here and leave the one-argument form
+     * alone: that form is the caller-independent answer ("what is enabled for this
+     * agent"), which discovery and listing surfaces depend on precisely because they
+     * have no task to check against.
+     *
+     * @param enabledToolIds the identifiers declared in {@code AgentConfig.enabledTools()}
+     * @param task           the task this resolution belongs to
+     * @return an immutable list of matching tools; empty if none match
+     */
+    default List<AraTool> resolveEnabled(List<String> enabledToolIds, AgentTask task) {
+        return resolveEnabled(enabledToolIds);
+    }
+
+    /**
      * Returns every tool this registry can resolve, independent of any particular
      * agent's {@code enabledTools()} selection — the full catalog, not a per-agent
      * subset. {@link #resolveEnabled}/{@link #findById} answer "can this specific id

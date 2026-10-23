@@ -67,6 +67,12 @@ public final class TelemetryToolRegistry implements ToolRegistry {
         return delegate.resolveEnabled(enabledToolIds);
     }
 
+    /** Forwarded so a scope filter underneath still sees the caller the strategy passes in. */
+    @Override
+    public List<AraTool> resolveEnabled(List<String> enabledToolIds, AgentTask task) {
+        return delegate.resolveEnabled(enabledToolIds, task);
+    }
+
     @Override
     public Optional<AraTool> findById(String toolId) {
         return delegate.findById(toolId);

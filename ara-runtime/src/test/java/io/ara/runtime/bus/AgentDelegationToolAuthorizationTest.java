@@ -107,6 +107,86 @@ class AgentDelegationToolAuthorizationTest {
         assertTrue(result.success());
     }
 
+    // ── ADR-033 §3.3, task-scoped form: the pre-check's authority comes per task ──
+
+    @Test
+    void withViewSource_theTasksScopesDecide_notTheWiringTimeView() {
+        AgentRegistry registry = new AgentRegistry();
+        registry.register(agent("worker", null, "ops"));
+
+        AgentDelegationTool tool = new AgentDelegationTool(capturingBus, "caller", Duration.ofSeconds(1),
+                DelegateStateAccess.OVERLAY, SessionStore.noop(), ScopeSet.EMPTY, null,
+                null, id -> null, task -> registry.viewFor(io.ara.core.agent.TaskScopes.of(task).scopes()));
+
+        // The task carries {ops} through the bare scope channel → the recipient is visible.
+        ToolResult allowed = tool.execute("{\"agent_id\":\"worker\",\"task\":\"do it\"}", AgentTask.of("go")
+                .withAttachment(RunContext.SCOPES_KEY, ScopeSet.of("ops")));
+        assertTrue(allowed.success(), allowed.error());
+
+        // The task carries only {finance} → the {ops}-gated recipient is not found.
+        ToolResult denied = tool.execute("{\"agent_id\":\"worker\",\"task\":\"do it\"}", AgentTask.of("go")
+                .withAttachment(RunContext.SCOPES_KEY, ScopeSet.of("finance")));
+        assertFalse(denied.success());
+        assertTrue(denied.error().contains("Agent not found: worker"), denied.error());
+    }
+
+    @Test
+    void withViewSource_nullViewForTheTask_skipsThePreCheck_andTheBusDecides() {
+        AgentRegistry registry = new AgentRegistry();
+        registry.register(agent("worker", null, "ops"));
+
+        // "null" from the source = no scope channel on this task = no authority to judge
+        // by: the pre-check defers, and the bus's dispatch-time check names the reason.
+        AgentDelegationTool tool = new AgentDelegationTool(capturingBus, "caller", Duration.ofSeconds(1),
+                DelegateStateAccess.OVERLAY, SessionStore.noop(), ScopeSet.EMPTY, null,
+                null, id -> null, task -> {
+                    var resolved = io.ara.core.agent.TaskScopes.of(task);
+                    return resolved.channelPresent() ? registry.viewFor(resolved.scopes()) : null;
+                });
+
+        ToolResult result = tool.execute("{\"agent_id\":\"anyone\",\"task\":\"do it\"}", AgentTask.of("go"));
+
+        assertTrue(result.success(), "the recipient declares no scopes, so the bus lets it through");
+    }
+
+    @Test
+    void withViewSource_anEmptyButPresentChannel_deniesGatedRecipients() {
+        AgentRegistry registry = new AgentRegistry();
+        registry.register(agent("worker", null, "ops"));
+
+        AgentDelegationTool tool = new AgentDelegationTool(capturingBus, "caller", Duration.ofSeconds(1),
+                DelegateStateAccess.OVERLAY, SessionStore.noop(), ScopeSet.EMPTY, null,
+                null, id -> null, task -> registry.viewFor(io.ara.core.agent.TaskScopes.of(task).scopes()));
+
+        // A channel that is present but empty is a legitimate "this caller has no
+        // authority" — not a missing channel: the pre-check denies, fail-closed.
+        ToolResult result = tool.execute("{\"agent_id\":\"worker\",\"task\":\"do it\"}", AgentTask.of("go")
+                .withAttachment(RunContext.SCOPES_KEY, ScopeSet.EMPTY));
+
+        assertFalse(result.success());
+        assertTrue(result.error().contains("Agent not found: worker"), result.error());
+    }
+
+    @Test
+    void fixedAgentView_winsOverViewSource_mirroringTheToolFilter() {
+        AgentRegistry registry = new AgentRegistry();
+        registry.register(agent("worker", null, "ops"));
+        registry.register(agent("other", null, "finance"));
+
+        // Fixed view built for {ops}: it must decide even though the task-scoped source
+        // would answer differently for the {finance} task below.
+        AgentDelegationTool tool = new AgentDelegationTool(capturingBus, "caller", Duration.ofSeconds(1),
+                DelegateStateAccess.OVERLAY, SessionStore.noop(), ScopeSet.EMPTY,
+                registry.viewFor(ScopeSet.of("ops")),
+                null, id -> null, task -> registry.viewFor(io.ara.core.agent.TaskScopes.of(task).scopes()));
+
+        ToolResult result = tool.execute("{\"agent_id\":\"other\",\"task\":\"do it\"}", AgentTask.of("go")
+                .withAttachment(RunContext.SCOPES_KEY, ScopeSet.of("finance")));
+
+        assertFalse(result.success());
+        assertTrue(result.error().contains("Agent not found: other"), result.error());
+    }
+
     // ── End-to-end, via a real LocalMessageBus (the plan's own Fase 3 test scenario) ──
     //
     // "Agente A con scope ["ops"] non riesce a delegare ad agente B con

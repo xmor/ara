@@ -169,6 +169,10 @@ and the crew's token/cost summary. Pass `live` to run the same crew against a re
 - **Human-in-the-loop as a runtime primitive** — an `ApprovalGate` wired into the tool
   dispatch chain; `ApprovalDecision` is a sealed interface, so approve / reject / modify
   is exhaustive at compile time. → [HITL guide](docs/HITL-AND-RAG.md#human-in-the-loop-hitl--approval-gate)
+- **A per-caller tool catalog** — a tool that declares `requiredScopes()` is hidden from
+  the model's catalog for any task that doesn't carry the scopes, before the LLM ever
+  reads it; scopes come from the task's execution context, attenuated through delegation
+  like any other call. → [Tools guide](docs/TOOLS.md#showing-each-caller-only-the-tools-it-may-use)
 - **Conversation and self-correction inside the loop** — `"respact"` asks a clarifying
   question mid-task and resumes on the same session; `"reflact"` recovers from a failed
   tool call without discarding what the run already accomplished.

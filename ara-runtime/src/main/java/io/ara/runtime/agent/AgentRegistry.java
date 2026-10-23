@@ -5,6 +5,8 @@ import io.ara.core.agent.AgentState;
 import io.ara.core.agent.AgentView;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.AraAgents;
+import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.TaskScopes;
 import io.ara.core.auth.ScopeSet;
 import io.ara.core.common.AgentId;
 import org.slf4j.Logger;
@@ -197,6 +199,23 @@ public final class AgentRegistry {
      */
     public AgentView viewFor(ScopeSet effectiveScopes) {
         return new FilteredAgentView(this, effectiveScopes);
+    }
+
+    /**
+     * A scope-filtered {@link AgentView} for the caller a task stands for (ADR-033 §3.3):
+     * the same authority {@code TaskScopes} resolves for any scope reader — the task's
+     * execution context first (the on-behalf-of intersection, already attenuated at every
+     * hop), then the bare scope set on the run context, then empty. A {@code null} task
+     * resolves to {@link ScopeSet#EMPTY}, which hides every agent that declares
+     * {@code visibleToScopes}/{@code requiredScopes}: no task, no caller authority, so
+     * nothing gated is discoverable through this view.
+     *
+     * <p>Built fresh per call like {@link #viewFor(ScopeSet)}; the overload exists so a
+     * caller holding a task never re-derives the precedence — the one {@code TaskScopes}
+     * encodes — itself.
+     */
+    public AgentView viewFor(AgentTask task) {
+        return viewFor(TaskScopes.of(task).scopes());
     }
 
     /**

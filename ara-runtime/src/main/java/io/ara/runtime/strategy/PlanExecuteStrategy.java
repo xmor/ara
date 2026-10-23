@@ -111,8 +111,10 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         StrategyConfig.PlanExecute pe = (config.strategyConfig() instanceof StrategyConfig.PlanExecute p)
                 ? p : StrategyConfig.PlanExecute.defaults();
 
+        // Resolved against this task, not the caller-independent catalog: the planner must
+        // never be shown a tool that this caller will be denied at dispatch.
         List<AraTool> resolvedTools = tools.resolveEnabled(
-                config.enabledTools() != null ? config.enabledTools() : List.of());
+                config.enabledTools() != null ? config.enabledTools() : List.of(), task);
         if (resolvedTools.stream().anyMatch(tool -> CloseStep.TOOL_ID.equals(tool.toolId()))) {
             // Failing here, rather than letting the agent's tool shadow ours or ours shadow its,
             // is the only outcome that cannot silently break a step: one of the two would stop

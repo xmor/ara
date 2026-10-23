@@ -56,6 +56,16 @@ public final class InterceptingToolRegistry implements ToolRegistry {
         return delegate.resolveEnabled(enabledToolIds);
     }
 
+    /**
+     * Forwarded unchanged: interceptors observe tool <em>calls</em>, and have no say in
+     * which tools a caller may see. Dropping the task here would make the interception
+     * chain silently widen the catalog.
+     */
+    @Override
+    public List<AraTool> resolveEnabled(List<String> enabledToolIds, AgentTask task) {
+        return delegate.resolveEnabled(enabledToolIds, task);
+    }
+
     @Override
     public Optional<AraTool> findById(String toolId) {
         return delegate.findById(toolId);
