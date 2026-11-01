@@ -1,6 +1,7 @@
 package io.ara.runtime.agent;
 
 import io.ara.core.agent.AgentConfig;
+import io.ara.core.agent.ToolExchange;
 import io.ara.core.agent.AgentExecutionContext;
 import io.ara.core.agent.AgentInterceptor;
 import io.ara.core.agent.AgentResponse;
@@ -595,7 +596,8 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
             restoreWorkingMemory(memoryManager, resumed.get());
             task = withVerdicts(task, resumed.get());
         } else {
-            seedWorkingMemory(memoryManager, config, session, effectiveSystemPrompt, task);
+            seedWorkingMemory(memoryManager, config, session, effectiveSystemPrompt, task,
+                    dispatched.llm().supportsNativeTools());
         }
 
         ExecutionResult result = executeCheckpointed(task, session, config, strategy, dispatched, memoryManager);
@@ -609,7 +611,10 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         }
         // Record the turn before resetting working memory
         if (config.maxConversationTurns() > 0) {
-            session.conversationHistory().addTurn(task.input(), result.output(), task.media());
+            List<ToolExchange> toolCalls = config.replayToolCalls()
+                    ? ToolCallHistory.record(result.steps(), dispatched.tools())
+                    : List.of();
+            session.conversationHistory().addTurn(task.input(), result.output(), task.media(), toolCalls);
         }
         return handleSuccess(task, session, result, elapsed, dispatched.llm());
     }
@@ -722,13 +727,19 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
      * about nothing — while the reference stays in {@code ConversationTurn} for anyone who
      * needs to fetch the file again.
      */
-    private void seedWorkingMemory(MemoryManager memoryManager, AgentConfig config,
-                                    AgentSession session, String effectiveSystemPrompt, AgentTask task) {
+    private void seedWorkingMemory(MemoryManager memoryManager, AgentConfig config, AgentSession session,
+                                    String effectiveSystemPrompt, AgentTask task, boolean nativeTools) {
         memoryManager.appendToWorkingMemory("system", effectiveSystemPrompt);
         int maxTurns = config.maxConversationTurns();
         if (maxTurns > 0) {
-            for (var turn : session.conversationHistory().recentTurns(maxTurns)) {
-                memoryManager.appendToWorkingMemory("user",      replayText(turn));
+            List<ConversationTurn> recent = session.conversationHistory().recentTurns(maxTurns);
+            for (int i = 0; i < recent.size(); i++) {
+                ConversationTurn turn = recent.get(i);
+                memoryManager.appendToWorkingMemory("user", replayText(turn));
+                // the calls go between the question and the answer, where the run made them
+                if (config.replayToolCalls()) {
+                    ToolCallHistory.replay(memoryManager, turn, i, i == recent.size() - 1, nativeTools);
+                }
                 memoryManager.appendToWorkingMemory("assistant", turn.assistantOutput());
             }
         }

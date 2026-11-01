@@ -3,6 +3,7 @@ package io.ara.runtime.agent;
 import io.ara.core.agent.ConversationTurn;
 import io.ara.core.agent.SessionId;
 import io.ara.core.agent.SessionStore;
+import io.ara.core.agent.ToolExchange;
 import io.ara.core.media.MediaRef;
 
 import java.util.List;
@@ -72,7 +73,15 @@ public final class ConversationHistory {
      * so a session's persisted history stays small however large the documents were.
      */
     public void addTurn(String userInput, String assistantOutput, List<MediaRef> media) {
-        ConversationTurn turn = new ConversationTurn(userInput, assistantOutput, media);
+        addTurn(userInput, assistantOutput, media, List.of());
+    }
+
+    /**
+     * Appends a turn with the tool calls the agent made on it, when its memory configuration keeps them. Same
+     * write-through contract as {@link #addTurn(String, String)}.
+     */
+    public void addTurn(String userInput, String assistantOutput, List<MediaRef> media, List<ToolExchange> toolCalls) {
+        ConversationTurn turn = new ConversationTurn(userInput, assistantOutput, media, toolCalls);
         writeLock.lock();
         try {
             turns.add(turn);

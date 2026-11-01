@@ -159,6 +159,7 @@ public final class AgentSpecDocument {
         set(builder::maxReflections, memory.integer("maxReflections"));
         set(builder::reflectionPrompt, memory.string("reflectionPrompt"));
         set(builder::contextSummarizerAgentId, memory.string("contextSummarizerAgentId"));
+        set(builder::replayToolCalls, memory.bool("replayToolCalls"));
         memory.finish();
     }
 
@@ -226,6 +227,11 @@ public final class AgentSpecDocument {
         out.put("maxReflections", memory.maxReflections());
         put(out, "reflectionPrompt", memory.reflectionPrompt());
         put(out, "contextSummarizerAgentId", memory.contextSummarizerAgentId());
+        // written only when on: off is the absence of the field, which is also what keeps the hash of a spec that does
+        // not use the option what it was before the option existed
+        if (memory.keepsToolCalls()) {
+            out.put("replayToolCalls", true);
+        }
         return out;
     }
 

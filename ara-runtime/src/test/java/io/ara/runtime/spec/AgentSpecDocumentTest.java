@@ -69,7 +69,7 @@ class AgentSpecDocumentTest {
                 .asyncDelegation(new AsyncDelegation(2, 500)).asyncSupport(AsyncSupport.REQUIRED)
                 .workingMemoryTokenBudget(1000).workingMemoryEviction("drop_oldest")
                 .maxConversationTurns(5).maxReflections(4).reflectionPrompt("Reflect.")
-                .contextSummarizerAgentId("summariser")
+                .contextSummarizerAgentId("summariser").replayToolCalls(true)
                 .build();
         return AgentSpec.root(config)
                 .withFewShotRefs(List.of("shot-1", "shot-2")).withSchemaRef("in-v1")

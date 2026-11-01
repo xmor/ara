@@ -79,4 +79,16 @@ public interface AraTool {
     default List<String> requiredScopes() {
         return List.of();
     }
+
+    /**
+     * What this tool leaves in the session history when the agent keeps tool calls across turns. Default: the call and
+     * its result, which is right for most tools; a tool whose results are large (fetched pages, file contents) should
+     * return {@link ToolHistoryPolicy#CALL_ONLY}, and one whose arguments are sensitive {@link ToolHistoryPolicy#NONE}.
+     * Irrelevant when the agent does not keep tool calls.
+     *
+     * @return the policy; never {@code null}
+     */
+    default ToolHistoryPolicy historyPolicy() {
+        return ToolHistoryPolicy.CALL_AND_RESULT;
+    }
 }

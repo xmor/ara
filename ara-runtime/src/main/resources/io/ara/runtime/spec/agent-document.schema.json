@@ -89,7 +89,8 @@
         "maxConversationTurns": { "type": "integer", "minimum": 0 },
         "maxReflections": { "type": "integer" },
         "reflectionPrompt": { "type": "string" },
-        "contextSummarizerAgentId": { "type": "string" }
+        "contextSummarizerAgentId": { "type": "string" },
+        "replayToolCalls": { "type": "boolean" }
       }
     },
     "contract": {

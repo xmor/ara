@@ -114,6 +114,7 @@ public record AgentConfig(
     public int    maxReflections()           { return memory.maxReflections(); }
     public String reflectionPrompt()         { return memory.reflectionPrompt(); }
     public String contextSummarizerAgentId() { return memory.contextSummarizerAgentId(); }
+    public boolean replayToolCalls()         { return memory.keepsToolCalls(); }
 
     // -------------------------------------------------------------------------
     // Factory
@@ -187,7 +188,8 @@ public record AgentConfig(
                 .maxConversationTurns(memory.maxConversationTurns())
                 .maxReflections(memory.maxReflections())
                 .reflectionPrompt(memory.reflectionPrompt())
-                .contextSummarizerAgentId(memory.contextSummarizerAgentId());
+                .contextSummarizerAgentId(memory.contextSummarizerAgentId())
+                .replayToolCalls(memory.keepsToolCalls());
     }
 
     // -------------------------------------------------------------------------
@@ -242,6 +244,7 @@ public record AgentConfig(
         private int    maxReflections           = 2;
         private String reflectionPrompt         = null;
         private String contextSummarizerAgentId = null;
+        private boolean replayToolCalls         = false;
 
         private Builder() {}
 
@@ -346,6 +349,8 @@ public record AgentConfig(
         public Builder maxReflections(int v)              { maxReflections = v;           return this; }
         public Builder reflectionPrompt(String v)         { reflectionPrompt = v;         return this; }
         public Builder contextSummarizerAgentId(String v) { contextSummarizerAgentId = v; return this; }
+        /** Keeps each turn's tool calls in the session history and replays them; see {@link MemoryConfig}. */
+        public Builder replayToolCalls(boolean v)         { replayToolCalls = v;          return this; }
 
         public AgentConfig build() {
             LlmProfile primary = primaryLlm != null ? primaryLlm : LlmProfile.builder().build();
@@ -366,7 +371,8 @@ public record AgentConfig(
 
             MemoryConfig mem = new MemoryConfig(
                     workingMemoryTokenBudget, workingMemoryEviction,
-                    maxConversationTurns, maxReflections, reflectionPrompt, contextSummarizerAgentId);
+                    maxConversationTurns, maxReflections, reflectionPrompt, contextSummarizerAgentId,
+                    replayToolCalls ? Boolean.TRUE : null);
 
             return new AgentConfig(id, llmCfg, exec, mem);
         }
