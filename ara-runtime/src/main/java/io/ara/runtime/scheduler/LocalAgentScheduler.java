@@ -72,6 +72,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * N1's own findings call out, not the general "don't do slow work inside a map's per-bin lock"
  * pinning risk those findings are otherwise about.
  *
+ * <p><b>P1, 2026-11-06 — {@code register} builds the new job before cancelling the old.</b>
+ * The remapping function used to cancel the existing entry's {@link ScheduledFuture} and only
+ * then call {@link #scheduleJob}, which is where a cron expression is actually parsed
+ * ({@link AgentSchedule.Trigger.Cron} only validates non-blankness). An invalid expression —
+ * malformed, or well-formed with no next occurrence like {@code "0 0 30 2 *"} — threw out of
+ * {@code compute} after the cancellation had already landed: the caller saw the exception, but
+ * the surviving entry held a cancelled future that {@link #list} kept reporting as active and
+ * that {@link #resume} could never re-arm (it only treats a {@code null} future as paused), so
+ * the schedule never fired again. Building first inverts the failure order — a throw now leaves
+ * the old job untouched — and is safe inside the remapping function for the same reason the P2
+ * note gives: {@link #scheduleJob} never blocks.
+ *
  * <p><b>2026-09-30 — a schedule never overlaps with itself.</b> A tick whose previous run is
  * still executing is skipped. {@link #agentExecutor} is a virtual-thread-per-task executor with
  * no ceiling, so before this an agent that outlasted its own interval was launched again on every
@@ -157,10 +169,19 @@ public final class LocalAgentScheduler implements AgentScheduler {
         Objects.requireNonNull(schedule, "schedule must not be null");
 
         entries.compute(schedule.scheduleId(), (id, existing) -> {
+            // The new job is built *before* the old one is cancelled. If the new definition is
+            // invalid, scheduleJob throws from inside CronEvaluator (a malformed expression, or
+            // a well-formed one with no next occurrence like "0 0 30 2 *" — Feb 30 never
+            // exists) and the exception aborts this compute with the mapping left untouched,
+            // old still-live job included. Cancelling first, as this used to, killed the old
+            // job before the new one existed: the caller saw the exception while the surviving
+            // entry held an already-cancelled future that list() kept reporting as active and
+            // that resume() could never re-arm (it only treats a null future as paused) — a
+            // zombie schedule, recoverable only by registering it again.
+            ScheduledFuture<?> future = schedule.active() ? scheduleJob(schedule) : null;
             if (existing != null && existing.future() != null) {
                 existing.future().cancel(false);
             }
-            ScheduledFuture<?> future = schedule.active() ? scheduleJob(schedule) : null;
             // A re-registration replaces the definition but must not orphan a run of the previous
             // one: that run still holds the old flag and will release it on completion, so the
             // new definition keeps waiting on that same flag rather than starting a second,

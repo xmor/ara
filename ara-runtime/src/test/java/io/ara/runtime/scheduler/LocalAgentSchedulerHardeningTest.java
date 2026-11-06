@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -467,6 +468,60 @@ class LocalAgentSchedulerHardeningTest {
 
         assertEquals(countAtCancel, fireCount.get(),
                 "no firing after cancel() — an orphaned duplicate job from the race would still be firing here");
+    }
+
+    // ── P1: a failed re-registration must not kill the previous job ────────────
+
+    /**
+     * {@code register} used to cancel the existing entry's {@link java.util.concurrent.ScheduledFuture}
+     * <em>before</em> calling {@code scheduleJob} — the point where a cron expression is actually
+     * parsed ({@link io.ara.core.agent.AgentSchedule.Trigger.Cron} itself only checks
+     * non-blankness). A re-registration with an invalid expression therefore threw out of the
+     * {@code entries.compute} with the old job already cancelled: the caller saw the exception,
+     * but the schedule it meant to keep never fired again — {@code list()} kept reporting it
+     * active (its future was non-null, merely cancelled) and {@code resume()} could not re-arm it
+     * (it only treats a null future as paused). Regression test drives the real path with a short
+     * interval so "the old job keeps firing" is a counted, deterministic assertion rather than a
+     * timing hope.
+     */
+    @Test
+    void failedReRegistration_leavesThePreviousJobRunning() throws Exception {
+        AtomicInteger fireCount = new AtomicInteger();
+        registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("zombie-agent")) {
+            @Override public AgentResponse execute(AgentTask task) {
+                fireCount.incrementAndGet();
+                return success(task);
+            }
+        });
+
+        scheduler.register(AgentSchedule.builder()
+                .scheduleId("zombie")
+                .agentId(AgentId.of("zombie-agent"))
+                .every(Duration.ofMillis(50))
+                .withInput("go")
+                .build());
+        waitFor(() -> fireCount.get() >= 2);   // old job demonstrably alive
+
+        int firesAtFailure = fireCount.get();
+        assertThrows(IllegalArgumentException.class, () ->
+                scheduler.register(AgentSchedule.builder()
+                        .scheduleId("zombie")
+                        .agentId(AgentId.of("zombie-agent"))
+                        .cron("99 * * * *")   // minute 99 is out of range — CronEvaluator throws
+                        .withInput("go")
+                        .build()));
+
+        waitFor(() -> fireCount.get() > firesAtFailure);
+        assertTrue(fireCount.get() > firesAtFailure,
+                "the previous job must keep firing after a failed re-registration");
+        assertTrue(listedAsActive("zombie"),
+                "a failed re-registration must leave the old definition intact, still active");
+
+        scheduler.cancel("zombie");
+        int firesAtCancel = fireCount.get();
+        Thread.sleep(300);
+        assertEquals(firesAtCancel, fireCount.get(),
+                "the surviving job must still be the reachable one — cancel() stops it");
     }
 
     // ── P2 (cron self-reschedule): pause() racing scheduleCron's own reschedule step ──
