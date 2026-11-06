@@ -225,6 +225,99 @@ class DataflowSchedulerTest {
         assertEquals(0, resumed.firedTimes("done"));
     }
 
+    /**
+     * Resuming a run that crashed mid-{@code mapOver} used to throw {@code
+     * IllegalArgumentException: unknown node: worker[plan#0.0]}: a child's journal entries
+     * (childId {@code workerId[parent#occ.i]}) fell through to {@code graph.node()}, which
+     * only knows real nodes — both for a child {@code Finished} (through
+     * {@code applyReplayedOutcome}) and for a child {@code Started} with no matching {@code
+     * Finished} (through the uncertain-node policy lookup). The resume now routes children
+     * to their own replay: a child Completed entry re-deposits its {@code collectInto}
+     * contribution; a child Started-only defers to the parent's own {@code
+     * onUncertainResume}.
+     *
+     * <p>The mid-children truncation is a snapshot taken between the child journal writes
+     * (drive journals every child's Started+Finished in one tight loop right after the
+     * parent's Finished). A child whose entries the snapshot misses has no trace: it ran,
+     * but the parent occurrence already has its journalled Finished and will not re-run, so
+     * its contribution is lost — the journal-order tradeoff documented on
+     * {@code applyReplayedChildOutcome}'s sibling comment in the scheduler. This test pins
+     * the honest semantics: no crash, replayed children deposit exactly once each.
+     */
+    @Test
+    void resume_midMapOver_replaysChildEntriesWithoutCrashing_andStillCollects() {
+        WorkflowResult full = run(mapOverGraph("ok1,ok2,ok3"));
+
+        // Crash snapshot taken after the second child's Finished: the replay re-deposits the
+        // two journalled children's contributions, then the live path finishes the rest.
+        List<JournalEntry> truncated = truncateAfterNthChildFinished(full, 2);
+
+        WorkflowResult resumed = new DataflowScheduler(mapOverGraph("ok1,ok2,ok3"), 10)
+                .run("start", pool, truncated);
+
+        assertTrue(resumed.ok(), "resume mid-mapOver should complete: " + resumed.failureReason());
+        @SuppressWarnings("unchecked")
+        List<Object> findings = (List<Object>) resumed.state().get("findings");
+        assertEquals(List.of("OK1", "OK2"), findings,
+                "the two journalled children must collect exactly once each; the third's "
+                        + "entries were lost with the crash and the parent does not re-run");
+
+        // A child Started with no Finished (crash snapshot taken between the two journal
+        // writes) must not reach the uncertain-node machinery either — its policy lookup
+        // graph.node(childId) was the second crash site.
+        List<JournalEntry> startedOnly = truncateAfterNthChildStarted(full, 1);
+        WorkflowResult resumedFromStartedOnly = new DataflowScheduler(
+                mapOverGraph("ok1,ok2,ok3"), 10).run("start", pool, startedOnly);
+        assertTrue(resumedFromStartedOnly.ok(),
+                "a child Started without Finished must not crash the resume: " + resumedFromStartedOnly.failureReason());
+    }
+
+    /** {@code start -> plan -> mapOver(worker) -> collector}, elements as a parameter. The
+     *  concatLists reducer for {@code findings} mirrors what {@code Workflow.Builder.mapOver}
+     *  registers automatically — a graph built directly must declare it the same way. */
+    private WorkflowGraph mapOverGraph(String elements) {
+        return new WorkflowGraph(
+                List.of(echo("start", "S", null),
+                        WorkflowNode.of("plan", in -> elements)
+                                .withMapOver(new WorkflowNode.MapOverSpec("worker",
+                                        planOutput -> List.of(planOutput.split(",")),
+                                        element -> element.toUpperCase(java.util.Locale.ROOT),
+                                        "findings", 10, io.ara.core.agent.AgentChain.FailurePolicy.FAIL_FAST)),
+                        echo("collector", "C", null)),
+                List.of(WorkflowEdge.of("start", "plan"), WorkflowEdge.of("plan", "collector")),
+                Map.of("findings", Reducers.concatLists()));
+    }
+
+    /** The journal prefix ending right after the {@code n}-th {@code worker[...]} Finished entry. */
+    private static List<JournalEntry> truncateAfterNthChildFinished(WorkflowResult result, int n) {
+        List<JournalEntry> journal = result.journal();
+        int seen = 0;
+        for (int i = 0; i < journal.size(); i++) {
+            if (journal.get(i) instanceof JournalEntry.Finished f && f.nodeId().startsWith("worker[")) {
+                seen++;
+                if (seen == n) {
+                    return journal.subList(0, i + 1);
+                }
+            }
+        }
+        throw new IllegalStateException("only " + seen + " child Finished entries, needed " + n + ": " + result.order());
+    }
+
+    /** The journal prefix ending right after the {@code n}-th {@code worker[...]} Started entry. */
+    private static List<JournalEntry> truncateAfterNthChildStarted(WorkflowResult result, int n) {
+        List<JournalEntry> journal = result.journal();
+        int seen = 0;
+        for (int i = 0; i < journal.size(); i++) {
+            if (journal.get(i) instanceof JournalEntry.Started s && s.nodeId().startsWith("worker[")) {
+                seen++;
+                if (seen == n) {
+                    return journal.subList(0, i + 1);
+                }
+            }
+        }
+        throw new IllegalStateException("only " + seen + " child Started entries, needed " + n + ": " + result.order());
+    }
+
     @Test
     void nodeThrows_isRecordedAsFailed_andStopsTheRun() {
         WorkflowGraph graph = new WorkflowGraph(

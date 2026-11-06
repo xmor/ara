@@ -203,13 +203,28 @@ public final class DataflowScheduler {
         for (JournalEntry entry : priorJournal) {
             journal.add(entry);
             if (entry instanceof JournalEntry.Started started) {
+                // A mapOver child's Started (childId is "workerId[parent#occ.i]", never a real
+                // graph node id) must not reach the uncertain-node machinery below: its policy
+                // lookup graph.node(childId) throws for the very reason the Finished branch
+                // was fixed to route children to applyReplayedChildOutcome — a child is not a
+                // graph node, so graph.node() cannot be asked about it. Occurrence counting
+                // does not apply either: children are always journaled with occurrence 0 and
+                // consume no tokens (consumeTokens returns 0 for a child since no edge names
+                // it). If its Finished is missing the parent occurrence that spawned it was
+                // in flight at crash time — the parent's own Started entry is what carries
+                // that uncertainty, via its own onUncertainResume, so the child adds nothing.
+                if (isMapOverChild(started.nodeId())) {
+                    continue;
+                }
                 occurrence.merge(started.nodeId(), 1, Integer::sum);
                 clocks.put(started.nodeId() + "#" + started.occurrence(), consumeTokens(started.nodeId()) + 1);
                 if (!finishedKeys.contains(started.nodeId() + "#" + started.occurrence())) {
                     uncertain.add(started);
                 }
             } else if (entry instanceof JournalEntry.Finished finished) {
-                Optional<WorkflowResult> stopped = applyReplayedOutcome(finished);
+                Optional<WorkflowResult> stopped = isMapOverChild(finished.nodeId())
+                        ? applyReplayedChildOutcome(finished)
+                        : applyReplayedOutcome(finished);
                 if (stopped.isPresent()) {
                     return stopped;
                 }
@@ -223,6 +238,78 @@ public final class DataflowScheduler {
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * Recognises a {@code mapOver} child's journal id ({@code workerId[parent#occ.i]}, built in
+     * {@link #runMapOverChildren}) by the {@code '['} and {@code ']'} no real node id may
+     * carry — {@code WorkflowGraph}'s constructor validates ids only for non-nullness via the
+     * edges' referential integrity, but {@code Workflow.Builder.mapOver} requires the workerId
+     * to be distinct from every declared node id, and a bracketed id could not be declared as
+     * a node without colliding with the builder's own structural checks. Bounded by the same
+     * rule: any journal whose child ids stop matching this shape was not written by this
+     * scheduler's live path.
+     */
+    private static boolean isMapOverChild(String nodeId) {
+        return nodeId.indexOf('[') >= 0 && nodeId.endsWith("]");
+    }
+
+    /**
+     * Replays a {@code mapOver} child's journaled {@code Finished} — the resume-side
+     * counterpart of the child-journalling loop in {@link #drive}. It must mirror that loop
+     * exactly or a resumed run silently diverges from the one it continues: the same
+     * "collided result wins" return and the same skip-children-with-no-collectInto. Children
+     * never charge the budget here: the parent occurrence's single charge (one journal entry,
+     * one charge, ADR-054 D6) already covered the whole fan-out in the live run — the parent's
+     * replayed {@code Finished} re-charges it — so charging children again would double-count
+     * the fan-out the second time the parent's own entry replays.
+     */
+    private Optional<WorkflowResult> applyReplayedChildOutcome(JournalEntry.Finished finished) {
+        if (!(finished.outcome() instanceof NodeOutcome.Completed completed)) {
+            // A failed/suspended child entry replays as nothing: in the live run a child
+            // failure only ever surfaces through the parent's own Failed outcome, which is
+            // what stops the run — the parent's entry is where the resume hears about it.
+            return Optional.empty();
+        }
+        // childId is workerId + "[" + parentId + "#" + parentOccurrence + "." + sub + "]":
+        // the parent lives INSIDE the brackets — the prefix is the workerId, which is not a
+        // graph node (mapOver refuses to shadow one). Parsing the prefix as the parent was
+        // this fix's own first draft's bug: it made mapOverSpecFor return null for every
+        // real child, so replayed children silently contributed nothing.
+        int bracket = finished.nodeId().indexOf('[');
+        String coords = finished.nodeId().substring(bracket + 1, finished.nodeId().length() - 1);
+        int hash = coords.indexOf('#');
+        int lastDot = coords.lastIndexOf('.');
+        if (hash < 0 || lastDot < hash) {
+            return Optional.empty();   // not a child id this scheduler's live path writes
+        }
+        String parentId = coords.substring(0, hash);
+        WorkflowNode.MapOverSpec spec = mapOverSpecFor(parentId);
+        if (spec == null || spec.collectInto() == null) {
+            return Optional.empty();
+        }
+        int parentOccurrence;
+        int sub;
+        try {
+            parentOccurrence = Integer.parseInt(coords.substring(hash + 1, lastDot));
+            sub = Integer.parseInt(coords.substring(lastDot + 1));
+        } catch (NumberFormatException e) {
+            return Optional.empty();   // same bound: unparseable coordinates, not our shape
+        }
+        return applyWrite(parentId, parentOccurrence, sub,
+                new WorkflowNode.Write(spec.collectInto(), out -> List.of(out)), completed);
+    }
+
+    /**
+     * Resolves the {@code MapOverSpec} of the {@code mapOver} source node {@code parentId}
+     * belongs to. Returns {@code null} when the parent is unknown to this graph (a journal
+     * from a different workflow) — callers then skip the child rather than crash.
+     */
+    private WorkflowNode.MapOverSpec mapOverSpecFor(String parentId) {
+        if (declarationOrder.containsKey(parentId)) {
+            return graph.node(parentId).mapOver();
+        }
+        return null;
     }
 
     private Optional<WorkflowResult> applyReplayedOutcome(JournalEntry.Finished finished) {
