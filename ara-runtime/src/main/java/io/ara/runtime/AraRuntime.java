@@ -127,6 +127,10 @@ public final class AraRuntime implements AutoCloseable {
     private final AuthorizationService authorizationService;
     private final RuntimeLifecycle lifecycle;
     private final Map<String, LlmClient> llmClients;
+    /** Read-only view of {@link #llmClients}: follows clients registered later. */
+    private final Map<String, LlmClient> llmClientsView;
+    /** Applied to a client registered on the running runtime, so it is instrumented like the built-in ones. */
+    private volatile UnaryOperator<LlmClient> registeredClientWrapper = UnaryOperator.identity();
     private final ToolRegistry     toolRegistry;
     private final Map<String, Retriever> retrievers;
     /**
@@ -161,7 +165,11 @@ public final class AraRuntime implements AutoCloseable {
         this.temporaryScopeRegistry = temporaryScopeRegistry;
         this.authorizationService = new io.ara.runtime.auth.AuthorizationService(abacPolicyEngine);
         this.lifecycle = lifecycle;
-        this.llmClients    = llmClients;
+        // Kept as given when it is already concurrent (the assembler shares it with the router);
+        // otherwise copied, so registerLlmClient works for any caller of this constructor.
+        this.llmClients    = llmClients instanceof java.util.concurrent.ConcurrentMap
+                ? llmClients : new java.util.concurrent.ConcurrentHashMap<>(llmClients);
+        this.llmClientsView = java.util.Collections.unmodifiableMap(this.llmClients);
         this.toolRegistry  = toolRegistry;
         this.retrievers    = retrievers;
     }
@@ -708,11 +716,44 @@ public final class AraRuntime implements AutoCloseable {
      * surfaces (e.g. an AgentOS-compat {@code GET /registry?resource_type=model} route)
      * that need the full catalog of configured models, not a per-call resolution.
      *
-     * @return an immutable map from transport id to client; never {@code null}, never empty
+     * @return a read-only view from transport id to client, which also shows clients added later with
+     *         {@link #registerLlmClient}; never {@code null}, never empty
      *         (a runtime cannot be built with zero registered clients — the invariant is
      *         enforced at build time by the package-private {@code RuntimeAssembler})
      */
-    public Map<String, LlmClient> llmClients() { return llmClients; }
+    public Map<String, LlmClient> llmClients() { return llmClientsView; }
+
+    /**
+     * Registers an LLM client under {@code id} on a running runtime. Agents created or
+     * replaced afterwards can use it as their {@code transportId}; agents already running keep
+     * the clients they leased. The client is instrumented like the ones registered at build
+     * time and appears in {@link #llmClients()}.
+     *
+     * <p>A client cannot be removed or replaced under the same id: to change what an id
+     * points at, register a client that delegates to something you can swap.
+     *
+     * <p>The reflection router built by default sees the new client too. A router supplied with
+     * {@link Builder#reflectionRouter} does not: it resolves ids however it was written to.
+     *
+     * @throws IllegalArgumentException if {@code id} is blank
+     * @throws IllegalStateException    if {@code id} is already registered
+     */
+    public synchronized void registerLlmClient(String id, LlmClient client) {
+        Objects.requireNonNull(client, "client must not be null");
+        if (id == null || id.isBlank()) {
+            throw new IllegalArgumentException("id must not be blank");
+        }
+        if (llmClients.containsKey(id)) {
+            throw new IllegalStateException("LLM client '" + id + "' is already registered");
+        }
+        LlmClient wrapped = registeredClientWrapper.apply(client);
+        factory.registerLlmClient(id, wrapped);
+        llmClients.put(id, wrapped);
+    }
+
+    void wrapRegisteredLlmClientsWith(UnaryOperator<LlmClient> wrapper) {
+        this.registeredClientWrapper = Objects.requireNonNull(wrapper);
+    }
 
     /**
      * Returns a {@link ToolRegistry} suitable for discovery/listing surfaces (e.g. an

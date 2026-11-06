@@ -60,7 +60,28 @@ public final class DefaultLlmRouter implements LlmRouter {
                             String defaultClientId,
                             LlmClientFactory clientFactory,
                             AraTelemetry telemetry) {
-        this.registry        = Map.copyOf(Objects.requireNonNull(registry));
+        this(registry, defaultClientId, clientFactory, telemetry, true);
+    }
+
+    /**
+     * A router that reads {@code liveRegistry} on every call instead of a snapshot, so a client
+     * added to the map later is found under its id. The caller owns the map and must make it
+     * safe for concurrent reads and writes.
+     */
+    public static DefaultLlmRouter over(Map<String, LlmClient> liveRegistry,
+                                        String defaultClientId,
+                                        LlmClientFactory clientFactory,
+                                        AraTelemetry telemetry) {
+        return new DefaultLlmRouter(liveRegistry, defaultClientId, clientFactory, telemetry, false);
+    }
+
+    private DefaultLlmRouter(Map<String, LlmClient> registry,
+                             String defaultClientId,
+                             LlmClientFactory clientFactory,
+                             AraTelemetry telemetry,
+                             boolean snapshot) {
+        Objects.requireNonNull(registry);
+        this.registry        = snapshot ? Map.copyOf(registry) : registry;
         this.defaultClientId = Objects.requireNonNull(defaultClientId);
         this.clientFactory   = clientFactory;
         this.telemetry       = Objects.requireNonNull(telemetry, "telemetry must not be null");

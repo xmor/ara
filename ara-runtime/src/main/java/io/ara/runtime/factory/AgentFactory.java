@@ -196,6 +196,22 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
     }
 
     /**
+     * Makes {@code client} resolvable under {@code id} by agents created from now on, without
+     * rebuilding the factory. Agents already running keep the clients they leased.
+     *
+     * @throws IllegalStateException if {@code id} is already registered
+     */
+    public void registerLlmClient(String id, LlmClient client) {
+        try {
+            llmTransports.seed(id, client);
+        } catch (IllegalStateException alreadyPublished) {
+            // seed() suggests publish(), an internal of the registry; to a caller this id is simply taken
+            // (registered at build time, or published earlier through updateSharedModel).
+            throw new IllegalStateException("LLM client '" + id + "' is already registered", alreadyPublished);
+        }
+    }
+
+    /**
      * Shuts down the internal drain-deadline schedulers owned by {@link #llmTransports} and
      * {@link #mcpTransports} (concurrency hardening P4/U14) — one virtual thread each,
      * otherwise leaked for the JVM's lifetime since nothing previously called

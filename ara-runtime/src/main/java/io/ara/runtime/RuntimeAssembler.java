@@ -76,7 +76,8 @@ final class RuntimeAssembler {
         RuntimeLifecycle lifecycle = new RuntimeLifecycle(cfg.name(), cfg.shutdownTimeoutSec());
         LocalMessageBus messageBus = new LocalMessageBus(registry, b.telemetry, b.approvalGate,
                 b.temporaryScopeRegistry, lifecycle.trackedExecutor());
-        Map<String, LlmClient> instrumentedClients = instrumentClients();
+        // Live: a client registered on the running runtime is added here, and the router below sees it.
+        Map<String, LlmClient> instrumentedClients = new ConcurrentHashMap<>(instrumentClients());
         ExecutionPlanner planner = buildExecutionPlanner(instrumentedClients);
         Map<String, ToolRegistry> perAgentRegistries = new ConcurrentHashMap<>();
         Function<AgentConfig, ToolRegistry> perAgentToolRegistry = resolvePerAgentToolRegistry(perAgentRegistries);
@@ -92,10 +93,12 @@ final class RuntimeAssembler {
         if (approvalResumer != null) {
             approvalResumer.recover();   // after a restart, the questions the checkpoints still hold
         }
-        return new AraRuntime(cfg, agentFactory, registry, lifecycle, b.agentProvider, scheduler, ctxStore,
+        AraRuntime runtime = new AraRuntime(cfg, agentFactory, registry, lifecycle, b.agentProvider, scheduler, ctxStore,
                 b.approvalGate, b.temporaryScopeRegistry, b.abacPolicyEngine,
-                Map.copyOf(instrumentedClients), discoveryRegistry(perAgentRegistries),
+                instrumentedClients, discoveryRegistry(perAgentRegistries),
                 Map.copyOf(b.namedRetrievers));
+        runtime.wrapRegisteredLlmClientsWith(client -> new InstrumentedLlmClient(client, b.telemetry));
+        return runtime;
     }
 
     /** Resolve the runtime configuration, falling back to defaults. */
@@ -223,7 +226,7 @@ final class RuntimeAssembler {
     private ExecutionPlanner buildExecutionPlanner(Map<String, LlmClient> instrumentedClients) {
         LlmRouter reflection = b.reflectionRouter != null
                 ? b.reflectionRouter
-                : new DefaultLlmRouter(instrumentedClients, b.defaultClientId, b.llmClientFactory, b.telemetry);
+                : DefaultLlmRouter.over(instrumentedClients, b.defaultClientId, b.llmClientFactory, b.telemetry);
 
         ReactStrategy       reactStrategy     = new ReactStrategy();
         ReSpActStrategy     respactStrategy   = new ReSpActStrategy();

@@ -159,6 +159,21 @@ AgentConfig config = AgentConfig.defaults()
         .build();
 ```
 
+### Adding a client to a running runtime
+
+Clients registered with `llmClient(...)` are fixed when the runtime is built. To add one later —
+for example a model a user connects from an admin UI — use `registerLlmClient`:
+
+```java
+runtime.registerLlmClient("local-llama", AraLlmClientFactory.ollama().modelName("llama3.1").build());
+```
+
+Agents created or replaced from then on can use it as their `transportId`; agents already running keep
+the clients they leased. The client is instrumented like the ones registered at build time and shows up
+in `runtime.llmClients()` (a read-only view). An id cannot be registered twice and a registered client
+cannot be removed or replaced: if what an id points at must change, register a client that delegates
+to something you can swap.
+
 ## Models in a configuration file
 
 The clients above can be described in `ara.yml` instead of Java, so that a deployment's models are
