@@ -38,6 +38,17 @@ public final class PiiRedactor implements InputProcessor, OutputProcessor {
     private static final Pattern PHONE = Pattern.compile(
             "(?:\\+?\\d{1,3}[\\s\\-.])?(?:\\(?\\d{2,4}\\)?[\\s\\-.])?\\d{3,4}[\\s\\-.]\\d{4,7}");
 
+    // bare Italian numbers written with no separator at all — "3331234567", "0612345678" —
+    // which PHONE's core (\d{3,4}<separator>\d{4,7}) cannot see: the most common written form
+    // of an Italian mobile was sailing through unredacted. Prefix-pinned (mobiles: exactly 10
+    // digits starting with 3; landlines: 9-10 starting with 0) rather than any \d{9,10}\b on
+    // purpose — an unprefixed bare-run rule would also eat epoch timestamps (10 digits
+    // starting with 1) and generic numeric ids, over-redaction the contract would tolerate
+    // but there is no reason to accept when the prefix narrows the surface for free. Numeric
+    // ids that do start with 3/0 at that length are still redacted: the accepted cost, in
+    // the direction this class treats as safe (over-redaction, never under).
+    private static final Pattern PHONE_BARE = Pattern.compile("\\b3\\d{9}\\b|\\b0\\d{8,9}\\b");
+
     // card: 13-19 consecutive digits (optionally spaced/dashed in groups)
     private static final Pattern CARD = Pattern.compile(
             "\\b(?:\\d[ \\-]?){13,19}\\b");
@@ -64,6 +75,7 @@ public final class PiiRedactor implements InputProcessor, OutputProcessor {
         result = CF   .matcher(result).replaceAll("[CF]");
         result = CARD .matcher(result).replaceAll("[CARD]");
         result = PHONE.matcher(result).replaceAll("[PHONE]");
+        result = PHONE_BARE.matcher(result).replaceAll("[PHONE]");
         return ProcessingResult.pass(result);
     }
 }
