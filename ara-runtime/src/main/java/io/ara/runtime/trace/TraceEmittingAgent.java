@@ -168,6 +168,12 @@ public final class TraceEmittingAgent implements AraAgent, SessionHistoryAware, 
         return delegate instanceof SessionScoped s ? s.activeSessionCount() : 0;
     }
 
+    /** Delegates to the wrapped agent; empty if it does not manage sessions. */
+    @Override
+    public List<Map<String, Object>> sessionsSnapshot() {
+        return delegate instanceof SessionScoped s ? s.sessionsSnapshot() : List.of();
+    }
+
     @Override
     public void cancelAllSessions() {
         if (delegate instanceof SessionScoped s) s.cancelAllSessions();

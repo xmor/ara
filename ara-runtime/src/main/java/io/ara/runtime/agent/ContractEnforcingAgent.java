@@ -100,6 +100,12 @@ public final class ContractEnforcingAgent implements AraAgent, SessionHistoryAwa
         return inner instanceof SessionScoped s ? s.activeSessionCount() : 0;
     }
 
+    /** Delegates to the wrapped agent; empty if it does not manage sessions. */
+    @Override
+    public List<Map<String, Object>> sessionsSnapshot() {
+        return inner instanceof SessionScoped s ? s.sessionsSnapshot() : List.of();
+    }
+
     @Override
     public void cancelAllSessions() {
         if (inner instanceof SessionScoped s) s.cancelAllSessions();

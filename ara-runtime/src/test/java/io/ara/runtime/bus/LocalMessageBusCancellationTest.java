@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -68,6 +69,9 @@ class LocalMessageBusCancellationTest {
 
         @Override public void invalidateSession(SessionId sessionId) { }
         @Override public int activeSessionCount() { return terminateCalls.isEmpty() ? 1 : 0; }
+
+        @Override
+        public List<Map<String, Object>> sessionsSnapshot() { return List.of(); }
         @Override public void cancelAllSessions() { }
     }
 

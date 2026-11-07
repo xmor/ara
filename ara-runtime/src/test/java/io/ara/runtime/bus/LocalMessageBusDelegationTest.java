@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -57,6 +58,9 @@ class LocalMessageBusDelegationTest {
         @Override public void terminate(SessionId sessionId) { terminated.add(sessionId); }
         @Override public void invalidateSession(SessionId sessionId) { }
         @Override public int activeSessionCount() { return 0; }
+
+        @Override
+        public List<Map<String, Object>> sessionsSnapshot() { return List.of(); }
         @Override public void cancelAllSessions() { }
     }
 

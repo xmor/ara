@@ -2,6 +2,9 @@ package io.ara.runtime.agent;
 
 import io.ara.core.agent.SessionId;
 
+import java.util.List;
+import java.util.Map;
+
 /**
  * Implemented by agents that manage per-session lifecycle: cancelling an in-flight task
  * on one session, dropping a session's resources immediately, and reporting how many
@@ -59,6 +62,15 @@ public interface SessionScoped {
      * @return the number of currently tracked sessions; never negative
      */
     int activeSessionCount();
+
+    /**
+     * A read-only snapshot of the live sessions' metadata, one map per session with
+     * {@code session_id}, {@code turn_count}, {@code last_accessed_at} (epoch millis),
+     * {@code ttl_remaining_ms} and {@code state} — the material an observability console
+     * lists sessions with. Inspecting never keeps a session alive past its TTL; comes
+     * from {@link SessionManager#listActive()} when the caller cannot reach it directly.
+     */
+    List<Map<String, Object>> sessionsSnapshot();
 
     /**
      * Requests cooperative cancellation of the in-flight task on <em>every</em> session

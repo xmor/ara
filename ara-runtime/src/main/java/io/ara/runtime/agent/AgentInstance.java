@@ -821,6 +821,12 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         return sessionManager.activeSessionCount();
     }
 
+    /** The per-session metadata for an observability console, from {@link SessionManager#listActive()}. */
+    @Override
+    public List<Map<String, Object>> sessionsSnapshot() {
+        return sessionManager.listActive();
+    }
+
     /** Invalidates (removes) the session with the given id. */
     @Override
     public void invalidateSession(SessionId sessionId) {
