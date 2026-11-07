@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -139,6 +140,34 @@ class InMemoryDocumentStoreTest {
                 "indexDocument must call embedAll exactly once regardless of chunk count");
         assertEquals(0, counting.embedCalls.get(),
                 "indexDocument must not fall back to a per-chunk embed() loop");
+    }
+
+    @Test
+    void indexDocument_withAPolicyCutsTheChunksAsAsked() {
+        String content = "cat sentence about a cat. ".repeat(80);
+        InMemoryDocumentStore defaults = store();
+        InMemoryDocumentStore narrow = store();
+
+        int byDefault = defaults.indexDocument("d", "t", content);
+        int withPolicy = narrow.indexDocument("d", "t", content, new ChunkPolicy(200, 20));
+
+        assertTrue(withPolicy > byDefault, "withPolicy=" + withPolicy + " byDefault=" + byDefault);
+        assertEquals(byDefault, store().indexDocument("d", "t", content, ChunkPolicy.DEFAULT),
+                "the default policy is the three-argument split");
+        assertTrue(narrow.retrieve("cat", 50).stream().allMatch(c -> c.content().length() <= 200));
+    }
+
+    @Test
+    void kbStoreDefaultMethodRefusesACustomPolicyItCannotHonour() {
+        KbStore minimal = new KbStore() {
+            @Override public void ensureCollection() { }
+            @Override public int indexDocument(String docId, String title, String content) { return 7; }
+            @Override public boolean deleteDocument(String docId) { return false; }
+            @Override public java.util.Map<String, String> listDocuments() { return java.util.Map.of(); }
+            @Override public List<io.ara.core.retriever.RetrievedChunk> retrieve(String query, int maxResults) { return List.of(); }
+        };
+        assertEquals(7, minimal.indexDocument("d", "t", "c", ChunkPolicy.DEFAULT));
+        assertThrows(UnsupportedOperationException.class, () -> minimal.indexDocument("d", "t", "c", new ChunkPolicy(200, 20)));
     }
 
     @Test

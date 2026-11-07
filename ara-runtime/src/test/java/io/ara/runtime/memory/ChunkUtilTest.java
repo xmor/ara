@@ -6,6 +6,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -85,5 +86,55 @@ class ChunkUtilTest {
             assertFalse(chunks.get(i).equals(chunks.get(i - 1)),
                     "consecutive chunks must not be duplicates");
         }
+    }
+
+    // ── ChunkPolicy ───────────────────────────────────────────────────────────
+
+    @Test
+    void defaultPolicySplitsExactlyLikeTheOneArgumentMethod() {
+        String text = ("Una frase di prova sulle ferie. ").repeat(120);
+        assertEquals(ChunkUtil.chunk(text), ChunkUtil.chunk(text, ChunkUtil.CHUNK_SIZE, ChunkUtil.CHUNK_OVERLAP));
+        assertEquals(ChunkUtil.chunk(text), ChunkPolicy.DEFAULT.split(text));
+        assertTrue(ChunkPolicy.DEFAULT.isDefault());
+        assertFalse(new ChunkPolicy(300, 40).isDefault());
+    }
+
+    @Test
+    void smallerChunksMeanMoreOfThem_andNoneIsLongerThanTheSize() {
+        String text = ("Una frase di prova sulle ferie. ").repeat(120);
+
+        List<String> wide = ChunkUtil.chunk(text, 1200, 100);
+        List<String> narrow = ChunkUtil.chunk(text, 300, 40);
+
+        assertTrue(narrow.size() > wide.size(), "narrow=" + narrow.size() + " wide=" + wide.size());
+        assertTrue(narrow.stream().allMatch(c -> c.length() <= 300), "a chunk exceeds the requested size");
+        assertTrue(wide.stream().allMatch(c -> c.length() <= 1200), "a chunk exceeds the requested size");
+    }
+
+    @Test
+    void overlapRepeatsTheTailOfThePreviousChunk() {
+        String text = "x".repeat(1000); // one paragraph, hard-cut
+        List<String> chunks = ChunkUtil.chunk(text, 400, 50);
+
+        assertTrue(chunks.size() >= 3, "got " + chunks.size());
+        // with no sentence boundary every window is a full 400 characters and starts 50 before the last one ended
+        assertEquals(400, chunks.get(0).length());
+        assertEquals(400, chunks.get(1).length());
+    }
+
+    @Test
+    void zeroOverlapIsAllowed() {
+        assertEquals(3, ChunkUtil.chunk("y".repeat(900), 300, 0).size() , "three clean windows");
+    }
+
+    @Test
+    void aPolicyOutsideItsBoundsIsRefused() {
+        assertThrows(IllegalArgumentException.class, () -> new ChunkPolicy(ChunkPolicy.MIN_SIZE - 1, 0));
+        assertThrows(IllegalArgumentException.class, () -> new ChunkPolicy(ChunkPolicy.MAX_SIZE + 1, 0));
+        assertThrows(IllegalArgumentException.class, () -> new ChunkPolicy(400, -1));
+        // half the chunk or more would stop the window from advancing
+        assertThrows(IllegalArgumentException.class, () -> new ChunkPolicy(400, 200));
+        assertThrows(IllegalArgumentException.class, () -> ChunkUtil.chunk("text", 50, 0));
+        assertEquals(new ChunkPolicy(400, 199), new ChunkPolicy(400, 199));
     }
 }

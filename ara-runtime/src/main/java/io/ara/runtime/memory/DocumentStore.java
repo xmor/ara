@@ -106,11 +106,18 @@ public final class DocumentStore implements KbStore {
      * @return number of chunks indexed
      */
     public int indexDocument(String docId, String title, String content) {
+        return indexDocument(docId, title, content, ChunkPolicy.DEFAULT);
+    }
+
+    /** As {@link #indexDocument(String, String, String)}, with the chunks cut by {@code policy}. */
+    @Override
+    public int indexDocument(String docId, String title, String content, ChunkPolicy policy) {
         Objects.requireNonNull(docId,   "docId must not be null");
         Objects.requireNonNull(title,   "title must not be null");
         Objects.requireNonNull(content, "content must not be null");
+        Objects.requireNonNull(policy,  "policy must not be null");
 
-        List<String> chunks = chunk(content);
+        List<String> chunks = policy.split(content);
         log.info("[DocumentStore] Indexing '{}' → {} chunks", title, chunks.size());
 
         // One batched embedding call for every chunk, rather than one network round trip per

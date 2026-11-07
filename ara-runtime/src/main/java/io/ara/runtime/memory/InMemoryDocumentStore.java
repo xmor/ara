@@ -62,11 +62,17 @@ public final class InMemoryDocumentStore implements KbStore {
     // ── Write ─────────────────────────────────────────────────────────────────
 
     public int indexDocument(String docId, String title, String content) {
+        return indexDocument(docId, title, content, ChunkPolicy.DEFAULT);
+    }
+
+    @Override
+    public int indexDocument(String docId, String title, String content, ChunkPolicy policy) {
         Objects.requireNonNull(docId,   "docId must not be null");
         Objects.requireNonNull(title,   "title must not be null");
         Objects.requireNonNull(content, "content must not be null");
+        Objects.requireNonNull(policy,  "policy must not be null");
 
-        List<String> chunks = DocumentStore.chunk(content);
+        List<String> chunks = policy.split(content);
         log.info("[InMemoryDocumentStore] Indexing '{}' → {} chunks", title, chunks.size());
 
         // U26, 2026-09-22: embeddingClient.embed is a network call to an embedding provider —

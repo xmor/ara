@@ -38,6 +38,20 @@ public final class ChunkUtil {
      * list containing the original text is returned.
      */
     public static List<String> chunk(String text) {
+        return split(text, CHUNK_SIZE, CHUNK_OVERLAP);
+    }
+
+    /**
+     * Like {@link #chunk(String)} with a chunk size and overlap of the caller's choosing.
+     *
+     * @throws IllegalArgumentException if the two do not satisfy {@link ChunkPolicy}'s bounds
+     */
+    public static List<String> chunk(String text, int size, int overlap) {
+        return new ChunkPolicy(size, overlap).split(text);
+    }
+
+    /** The splitter itself; {@code size} and {@code overlap} are already known to be valid. */
+    static List<String> split(String text, int size, int overlap) {
         List<String> chunks = new ArrayList<>();
         String[] paragraphs = text.split("\n\n+");
 
@@ -48,7 +62,7 @@ public final class ChunkUtil {
                 continue;
             }
 
-            if (current.length() + p.length() + 2 <= CHUNK_SIZE) {
+            if (current.length() + p.length() + 2 <= size) {
                 if (!current.isEmpty()) {
                     current.append("\n\n");
                 }
@@ -59,14 +73,14 @@ public final class ChunkUtil {
                     // Preserve overlap from the tail of the previous chunk.
                     String tail = current.toString();
                     current.setLength(0);
-                    if (tail.length() > CHUNK_OVERLAP) {
-                        current.append(tail.substring(tail.length() - CHUNK_OVERLAP));
+                    if (tail.length() > overlap) {
+                        current.append(tail.substring(tail.length() - overlap));
                     } else {
                         current.append(tail);
                     }
                 }
-                if (p.length() > CHUNK_SIZE) {
-                    splitLarge(p, chunks);
+                if (p.length() > size) {
+                    splitLarge(p, chunks, size, overlap);
                 } else {
                     if (!current.isEmpty()) {
                         current.append("\n\n");
@@ -84,30 +98,30 @@ public final class ChunkUtil {
     /**
      * Helper that breaks a large {@code text} segment into smaller pieces. It first tries
      * to break on a sentence boundary (". ") and, if that would still produce a segment
-     * larger than {@link #CHUNK_SIZE / 2}, falls back to a hard character cut.
+     * larger than half of {@code size}, falls back to a hard character cut.
      */
-    private static void splitLarge(String text, List<String> out) {
+    private static void splitLarge(String text, List<String> out, int size, int overlap) {
         int start = 0;
         while (start < text.length()) {
-            int end = Math.min(start + CHUNK_SIZE, text.length());
+            int end = Math.min(start + size, text.length());
             // Try to break on a period followed by a space.
             if (end < text.length()) {
                 int dot = text.lastIndexOf(". ", end);
-                if (dot > start + CHUNK_SIZE / 2) {
+                if (dot > start + size / 2) {
                     end = dot + 2; // include the period and space.
                 }
             }
             out.add(text.substring(start, end).strip());
             // The window has consumed the tail: everything is emitted, so stop. Without this,
-            // the final chunk is shorter than CHUNK_OVERLAP, (end - CHUNK_OVERLAP) falls at or
+            // the final chunk is shorter than overlap, (end - overlap) falls at or
             // below start, and the step below collapses to start + 1 — walking the tail one
-            // character at a time and emitting ~CHUNK_OVERLAP near-duplicate chunks.
+            // character at a time and emitting ~overlap near-duplicate chunks.
             if (end == text.length()) {
                 break;
             }
             // Move start forward, keeping an overlap so that context is not lost. The window is
-            // guaranteed to advance because end > start + CHUNK_SIZE / 2 > CHUNK_OVERLAP here.
-            start = end - CHUNK_OVERLAP;
+            // guaranteed to advance because end > start + size / 2 > overlap here.
+            start = end - overlap;
         }
     }
 }
