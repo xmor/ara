@@ -19,11 +19,13 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -430,9 +432,22 @@ public final class LocalAgentScheduler implements AgentScheduler {
                 .map(agent -> {
                     AgentFuture future;
                     try {
-                        AgentTask task = AgentTask.of(schedule.inputTemplate());
+                        // The template renders here, at fire time: a date written when the schedule
+                        // was registered would be off by however long it has been ticking since.
+                        AgentTask task = AgentTask.of(InputTemplates.render(schedule.inputTemplate()));
                         future = AraAgents.executeAsync(agent, task, agentExecutor);
-                        future.async().whenComplete((r, ex) -> onFireOutcome(schedule, task, inFlight, r, ex));
+                        CompletableFuture<AgentResponse> outcome = future.async();
+                        if (schedule.maxDuration() != null) {
+                            // The timeout completes this very future (orTimeout mutates it), so it
+                            // must be attached before the completion callback: when the oven bell
+                            // rings, the callback sees the TimeoutException and releases the
+                            // overlap flag like any other terminal outcome. The underlying run is
+                            // not interrupted — it keeps going underneath, and a still-hung run
+                            // holds its session busy (SessionBusyPolicy may refuse the next
+                            // ticks), but the schedule itself is not wedged for ever.
+                            outcome.orTimeout(schedule.maxDuration().toMillis(), TimeUnit.MILLISECONDS);
+                        }
+                        outcome.whenComplete((r, ex) -> onFireOutcome(schedule, task, inFlight, r, ex));
                     } catch (Throwable t) {
                         // Task construction / dispatch failed synchronously — before whenComplete
                         // was ever registered. Without this catch, onFire would have already fired
@@ -506,7 +521,15 @@ public final class LocalAgentScheduler implements AgentScheduler {
                                AgentResponse r, Throwable ex) {
         release(inFlight);
         AgentResponse outcome = r;
-        if (outcome == null && ex != null) {
+        if (outcome == null && ex instanceof TimeoutException timeout) {
+            // The oven bell, not the run: the run itself has no say yet — it may still, in fact,
+            // be going. The listener sees a failure with a reason that says so.
+            outcome = AgentResponse.failure(
+                    task.taskId(),
+                    schedule.agentId(),
+                    "timed out after " + schedule.maxDuration() + ": the run may still be executing underneath",
+                    Duration.ZERO);
+        } else if (outcome == null && ex != null) {
             outcome = AgentResponse.failure(
                     task.taskId(),
                     schedule.agentId(),
@@ -599,16 +622,11 @@ public final class LocalAgentScheduler implements AgentScheduler {
 
         private CronEvaluator() {}
 
-        /**
-         * Returns the number of seconds between now and the next fire of {@code expression}.
-         * The expression is fully parsed first, so malformed input throws immediately.
-         *
-         * @param expression a 5-field cron expression
-         * @throws IllegalArgumentException if the expression is syntactically invalid
-         * @throws IllegalStateException    if no next occurrence can be found (should not
-         *                                  happen for any well-formed expression)
-         */
-        public static long secondsUntilNext(String expression) {
+        private record Parsed(java.util.Set<Integer> minutes, java.util.Set<Integer> hours,
+                              java.util.Set<Integer> doms, java.util.Set<Integer> months,
+                              java.util.Set<Integer> dows, boolean domRestricted, boolean dowRestricted) { }
+
+        private static Parsed parse(String expression) {
             String[] fields = expression.trim().split("\\s+");
             if (fields.length != 5)
                 throw new IllegalArgumentException(
@@ -620,32 +638,79 @@ public final class LocalAgentScheduler implements AgentScheduler {
             java.util.Set<Integer> months  = parseField(fields[3], 1, 12, false);
             java.util.Set<Integer> dows     = parseField(fields[4], 0,  6, true);
 
-            boolean domRestricted = doms != null;
-            boolean dowRestricted = dows != null;
+            return new Parsed(minutes, hours, doms, months, dows,
+                    doms != null, dows != null);
+        }
 
-            LocalDateTime now  = LocalDateTime.now();
-            LocalDateTime next = now.plusMinutes(1).withSecond(0).withNano(0);
+        /** The first minute strictly after {@code from}, with the seconds shaved the way cron matches them. */
+        private static LocalDateTime minuteAfter(LocalDateTime from) {
+            return from.plusMinutes(1).withSecond(0).withNano(0);
+        }
 
+        /**
+         * Returns the number of seconds between now and the next fire of {@code expression}.
+         * The expression is fully parsed first, so malformed input throws immediately.
+         *
+         * @param expression a 5-field cron expression
+         * @throws IllegalArgumentException if the expression is syntactically invalid
+         * @throws IllegalStateException    if no next occurrence can be found (should not
+         *                                  happen for any well-formed expression)
+         */
+        public static long secondsUntilNext(String expression) {
+            Parsed parsed = parse(expression);
+            LocalDateTime now = LocalDateTime.now();
+            LocalDateTime next = nextOccurrence(minuteAfter(now), parsed, expression);
+            long delay = java.time.temporal.ChronoUnit.SECONDS.between(now, next);
+            return Math.max(1, delay);
+        }
+
+        /** One scan: the first instant from (and including) {@code start} whose fields all match. */
+        private static LocalDateTime nextOccurrence(LocalDateTime start, Parsed parsed, String expression) {
+            // A leap-cycle-safe upper bound: scanning minute-by-minute over ~4 years and 1 day
+            // guarantees we reach the next "Feb 29" for expressions like "0 0 29 2 *".
+            LocalDateTime next = start;
             for (int i = 0; i < MAX_SCAN_MINUTES; i++) {
-                boolean domMatch = !domRestricted || doms.contains(next.getDayOfMonth());
-                boolean dowMatch = !dowRestricted
-                        || dows.contains(next.getDayOfWeek().getValue() % 7);
+                boolean domMatch = !parsed.domRestricted() || parsed.doms().contains(next.getDayOfMonth());
+                boolean dowMatch = !parsed.dowRestricted()
+                        || parsed.dows().contains(next.getDayOfWeek().getValue() % 7);
                 // Standard cron day matching: OR when both restricted, AND (trivially) otherwise.
-                boolean dayMatch = (domRestricted && dowRestricted)
+                boolean dayMatch = (parsed.domRestricted() && parsed.dowRestricted())
                         ? (domMatch || dowMatch)
                         : (domMatch && dowMatch);
 
-                if ((minutes == null || minutes.contains(next.getMinute()))
-                        && (hours  == null || hours.contains(next.getHour()))
-                        && (months == null || months.contains(next.getMonthValue()))
+                if ((parsed.minutes() == null || parsed.minutes().contains(next.getMinute()))
+                        && (parsed.hours()  == null || parsed.hours().contains(next.getHour()))
+                        && (parsed.months() == null || parsed.months().contains(next.getMonthValue()))
                         && dayMatch) {
-                    long delay = java.time.temporal.ChronoUnit.SECONDS.between(now, next);
-                    return Math.max(1, delay);
+                    return next;
                 }
                 next = next.plusMinutes(1);
             }
-
             throw new IllegalStateException("Could not find next occurrence for cron: " + expression);
+        }
+
+        /**
+         * The forward chronology of {@code expression}: the next {@code max} fire times strictly
+         * after {@code from}, in ascending order. This is what a composing UI shows ("would fire
+         * at ..., ..., ...") without registering anything; for a well-formed expression it always
+         * completes, so the bound is {@code max} and the per-scan ceiling as in {@link #secondsUntilNext}.
+         *
+         * @param from the instant the preview starts from (usually now, or a test's pinned time)
+         * @throws IllegalArgumentException if the expression is syntactically invalid
+         * @throws IllegalStateException    if a later occurrence cannot be found for some entry (should
+         *                                  not happen for any well-formed expression)
+         */
+        public static java.util.List<LocalDateTime> nextFires(LocalDateTime from, String expression, int max) {
+            if (max <= 0) throw new IllegalArgumentException("max must be positive, got " + max);
+            Parsed parsed = parse(expression);
+            java.util.List<LocalDateTime> out = new java.util.ArrayList<>(max);
+            LocalDateTime cursor = minuteAfter(from);
+            for (int i = 0; i < max; i++) {
+                LocalDateTime fire = nextOccurrence(cursor, parsed, expression);
+                out.add(fire);
+                cursor = fire.plusMinutes(1);
+            }
+            return out;
         }
 
         /**

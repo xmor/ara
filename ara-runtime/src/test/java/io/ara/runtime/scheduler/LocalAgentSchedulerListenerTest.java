@@ -168,4 +168,83 @@ class LocalAgentSchedulerListenerTest {
                         .filter(s -> "s-blank".equals(s.scheduleId())).count(),
                 "schedule must remain registered despite throwing on each tick");
     }
+
+    /**
+     * A run still going when its {@code maxDuration} expires is reported as a failure that says
+     * so, without anyone having to be killed: the underlying execution keeps going underneath
+     * (a parked stub thread here) and the schedule stays free to fire again.
+     */
+    @Test
+    void aRunStillGoingPerTheMaxDuration_isTimedOutWithAnHonestReason() throws InterruptedException {
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicReference<AgentResponse> responseRef = new AtomicReference<>();
+        newScheduler(new ScheduleExecutionListener() {
+            @Override public void onComplete(String scheduleId, AgentResponse response) {
+                responseRef.set(response);
+                completed.countDown();
+            }
+        }).start();
+
+        CountDownLatch never = new CountDownLatch(1);
+        registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("stuck")) {
+            @Override public AgentResponse execute(io.ara.core.agent.AgentTask task) {
+                try {
+                    never.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return success(task);
+            }
+        });
+        scheduler.register(AgentSchedule.builder()
+                .scheduleId("s-stuck")
+                .agentId(AgentId.of("stuck"))
+                .every(Duration.ofHours(24))
+                .withInput("go")
+                .maxDuration(Duration.ofMillis(200))
+                .build());
+
+        scheduler.triggerNow("s-stuck");
+
+        assertTrue(completed.await(2, TimeUnit.SECONDS), "the timeout must complete the outcome");
+        AgentResponse out = responseRef.get();
+        assertNotNull(out);
+        assertFalse(out.isSuccess());
+        assertTrue(out.failureReason().startsWith("timed out after PT0.2S"), out.failureReason());
+        assertTrue(out.failureReason().contains("still be executing"), out.failureReason());
+    }
+
+    /** The input is rendered at fire time: the agent sees today's date, not registration's. */
+    @Test
+    void theInputTemplateIsRendered_justBeforeTheAgentRuns() throws InterruptedException {
+        AtomicReference<String> seenInput = new AtomicReference<>();
+        CountDownLatch completed = new CountDownLatch(1);
+        newScheduler(new ScheduleExecutionListener() {
+            @Override public void onComplete(String scheduleId, AgentResponse response) {
+                completed.countDown();
+            }
+        }).start();
+
+        registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("rendered")) {
+            @Override public AgentResponse execute(io.ara.core.agent.AgentTask task) {
+                seenInput.set(task.input());
+                return success(task);
+            }
+        });
+        scheduler.register(AgentSchedule.builder()
+                .scheduleId("s-rendered")
+                .agentId(AgentId.of("rendered"))
+                .every(Duration.ofHours(24))
+                .withInput("finestra: da {date-7} a {today}")
+                .build());
+
+        scheduler.triggerNow("s-rendered");
+
+        assertTrue(completed.await(2, TimeUnit.SECONDS));
+        String seen = seenInput.get();
+        assertNotNull(seen);
+        String today = java.time.LocalDate.now().toString();
+        assertEquals("finestra: da " + java.time.LocalDate.now().minusDays(7) + " a " + today, seen);
+        assertFalse(seen.contains("{"), seen);
+    }
 }

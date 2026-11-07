@@ -19,18 +19,36 @@ import java.util.Objects;
  *     .agentId(agent.id())
  *     .every(Duration.ofHours(24))
  *     .withInput("Genera il report giornaliero")
+ *     .maxDuration(Duration.ofMinutes(30))   // optional: a run still going past the limit is timed out
  *     .build();
  *
  * runtime.scheduler().register(schedule);
  * }</pre>
+ *
+ * <p><b>Input templating.</b> {@code inputTemplate} is rendered at every fire, so the text the
+ * agent receives is never a date that was right when the schedule was registered. The tokens are:
+ * <ul>
+ *   <li>{@code {today}} — now, ISO ({@code yyyy-MM-dd})</li>
+ *   <li>{@code {today:FORMAT}} — now, in a {@link java.time.format.DateTimeFormatter} pattern</li>
+ *   <li>{@code {date±N}} — N days from today, ISO (e.g. {@code {date-7}})</li>
+ *   <li>{@code {date±N:FORMAT}} — N days from today, in a pattern</li>
+ * </ul>
+ * Unknown tokens are left as they are; a broken pattern fails the fire with a dispatch failure,
+ * which the schedule history shows.
  */
 public record AgentSchedule(
         String   scheduleId,
         AgentId  agentId,
         Trigger  trigger,
         String   inputTemplate,
-        boolean  active
+        boolean  active,
+        Duration maxDuration
 ) {
+
+    /** The old arity, before {@code maxDuration}: a schedule without a run-timeout line. */
+    public AgentSchedule(String scheduleId, AgentId agentId, Trigger trigger, String inputTemplate, boolean active) {
+        this(scheduleId, agentId, trigger, inputTemplate, active, null);
+    }
 
     public AgentSchedule {
         Objects.requireNonNull(scheduleId,    "scheduleId must not be null");
@@ -38,6 +56,9 @@ public record AgentSchedule(
         Objects.requireNonNull(trigger,       "trigger must not be null");
         Objects.requireNonNull(inputTemplate, "inputTemplate must not be null");
         if (scheduleId.isBlank()) throw new IllegalArgumentException("scheduleId must not be blank");
+        if (maxDuration != null && (maxDuration.isNegative() || maxDuration.isZero())) {
+            throw new IllegalArgumentException("maxDuration must be positive, or null for no limit");
+        }
     }
 
     // ── Trigger ───────────────────────────────────────────────────────────────
@@ -107,6 +128,7 @@ public record AgentSchedule(
         private Trigger trigger;
         private String  inputTemplate = "";
         private boolean active        = true;
+        private Duration maxDuration  = null;
 
         public Builder scheduleId(String scheduleId) {
             this.scheduleId = scheduleId;
@@ -135,6 +157,23 @@ public record AgentSchedule(
             return this;
         }
 
+        /**
+         * A hard ceiling on how long one scheduled run may take. {@code null} (the default) runs
+         * without a limit. A run that is still going when the ceiling passes is reported to the
+         * listener as a failure ("timed out ...") and the schedule is free to fire again — the
+         * underlying execution is not interrupted: it keeps running to its end or its own stall.
+         */
+        public Builder maxDuration(Duration maxDuration) {
+            this.maxDuration = maxDuration;
+            return this;
+        }
+
+        /** Same as {@link #maxDuration(Duration)} in the units the schedule document speaks. */
+        public Builder maxDurationMs(Long maxDurationMs) {
+            this.maxDuration = maxDurationMs == null ? null : Duration.ofMillis(maxDurationMs);
+            return this;
+        }
+
         public Builder active(boolean active) {
             this.active = active;
             return this;
@@ -144,7 +183,7 @@ public record AgentSchedule(
             Objects.requireNonNull(scheduleId, "scheduleId is required");
             Objects.requireNonNull(agentId,    "agentId is required");
             Objects.requireNonNull(trigger,    "trigger is required — call every() or cron()");
-            return new AgentSchedule(scheduleId, agentId, trigger, inputTemplate, active);
+            return new AgentSchedule(scheduleId, agentId, trigger, inputTemplate, active, maxDuration);
         }
     }
 }

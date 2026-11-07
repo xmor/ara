@@ -320,4 +320,46 @@ class AgentScheduleTest {
         assertThrows(IllegalArgumentException.class, () ->
                 LocalAgentScheduler.CronEvaluator.secondsUntilNext("0 0 * * FUNDAY"));
     }
+
+    // ── The preview a composing UI shows ─────────────────────────────────────
+
+    @Test
+    void thePreview_listsTheNextFiresInOrder_fromAPinnedMoment() {
+        java.time.LocalDateTime from = java.time.LocalDateTime.of(2026, 11, 7, 10, 0);   // a Saturday
+        java.util.List<java.time.LocalDateTime> fires =
+                LocalAgentScheduler.CronEvaluator.nextFires(from, "0 9 * 1 *", 3);
+        assertEquals(java.util.List.of(
+                        java.time.LocalDateTime.of(2027, 1, 1, 9, 0),
+                        java.time.LocalDateTime.of(2027, 1, 2, 9, 0),
+                        java.time.LocalDateTime.of(2027, 1, 3, 9, 0)),
+                fires,
+                "month 1 is January: the three January days ahead, ascending");
+    }
+
+    @Test
+    void thePreviewOfAWeeklyCron_walksTheChosenDaysOnly() {
+        java.time.LocalDateTime from = java.time.LocalDateTime.of(2026, 11, 7, 12, 0);   // Saturday afternoon
+        java.util.List<java.time.LocalDateTime> fires =
+                LocalAgentScheduler.CronEvaluator.nextFires(from, "0 7 * * MON,WED", 4);
+        assertEquals(4, fires.size());
+        assertEquals(java.time.DayOfWeek.MONDAY, fires.get(0).getDayOfWeek());
+        assertEquals(java.time.LocalDateTime.of(2026, 11, 9, 7, 0), fires.get(0));
+        assertEquals(java.time.LocalDateTime.of(2026, 11, 11, 7, 0), fires.get(1));
+        assertEquals(java.time.LocalDateTime.of(2026, 11, 18, 7, 0), fires.get(3));
+    }
+
+    @Test
+    void thePreviewIsStrictlyAfterTheStart_andItsCronIsStillValidated() {
+        java.time.LocalDateTime from = java.time.LocalDateTime.of(2026, 11, 7, 10, 0);
+        java.util.List<java.time.LocalDateTime> fires =
+                LocalAgentScheduler.CronEvaluator.nextFires(from, "* * * * *", 3);
+        for (java.time.LocalDateTime fire : fires) {
+            assertTrue(fire.isAfter(from));
+        }
+        assertTrue(fires.get(3 - 1).isAfter(fires.get(0)), "ascending");
+        assertThrows(IllegalArgumentException.class, () ->
+                LocalAgentScheduler.CronEvaluator.nextFires(from, "0 9 *", 3));
+        assertThrows(IllegalArgumentException.class, () ->
+                LocalAgentScheduler.CronEvaluator.nextFires(from, "* * * * *", 0));
+    }
 }

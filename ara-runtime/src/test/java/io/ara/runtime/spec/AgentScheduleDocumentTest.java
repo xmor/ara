@@ -19,6 +19,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -93,6 +94,38 @@ class AgentScheduleDocumentTest {
                 .scheduleId("bare").agentId(AgentId.of("A")).every(Duration.ofSeconds(5)).build();
 
         assertEquals(bare, valid(AgentScheduleDocument.decode(AgentScheduleDocument.encode(List.of(bare), FIXED)).get(0)));
+    }
+
+    /** The optional run-timeout and its absence ride the same document: absent stays absent. */
+    @Test
+    void theRunTimeoutRoundTrips_andItsAbsenceStaysAbsence() {
+        AgentSchedule timed = AgentSchedule.builder()
+                .scheduleId("timed").agentId(AgentId.of("A")).every(Duration.ofSeconds(5))
+                .maxDuration(Duration.ofMinutes(30)).build();
+
+        JsonNode tree = AgentScheduleDocument.encode(List.of(timed), FIXED);
+        assertEquals(1_800_000, tree.get("schedules").get(0).get("maxDurationMs").asLong());
+        assertEquals(timed, valid(AgentScheduleDocument.decode(tree).get(0)));
+
+        AgentSchedule untimed = AgentSchedule.builder()
+                .scheduleId("untimed").agentId(AgentId.of("A")).cron("0 6 * * *").build();
+        JsonNode plain = AgentScheduleDocument.encode(List.of(untimed), FIXED);
+        assertNull(plain.get("schedules").get(0).get("maxDurationMs"), "no field where none applies");
+        assertEquals(untimed, valid(AgentScheduleDocument.decode(plain).get(0)));
+    }
+
+    @Test
+    void aNonPositiveRunTimeoutIsRefused_atDecodeAndAtBuild() throws Exception {
+        JsonNode broken = json("""
+                {"schemaVersion": 2, "exportedAt": "2026-10-21T08:15:30Z", "schedules": [
+                  {"scheduleId": "t", "agentName": "A", "inputTemplate": "x", "triggerType": "INTERVAL",
+                   "intervalSeconds": 5, "maxDurationMs": 0, "active": true}]}
+                """);
+        Entry entry = AgentScheduleDocument.decode(broken).get(0);
+        assertInstanceOf(Entry.Invalid.class, entry);
+        assertThrows(IllegalArgumentException.class, () -> AgentSchedule.builder()
+                .scheduleId("t").agentId(AgentId.of("A")).every(Duration.ofSeconds(5))
+                .maxDurationMs(-1L).build());
     }
 
     @Test

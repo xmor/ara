@@ -135,6 +135,10 @@ public final class AgentScheduleDocument {
                     node.put("cronExpression", cron.expression());
                 }
             }
+            if (schedule.maxDuration() != null) {
+                // Optional and additive: an element without it reads as it always did at version 2.
+                node.put("maxDurationMs", schedule.maxDuration().toMillis());
+            }
             node.put("active", schedule.active());
         }
         return root;
@@ -225,12 +229,14 @@ public final class AgentScheduleDocument {
         }
         Long intervalSeconds = entry.longValue("intervalSeconds");
         String cronExpression = entry.string("cronExpression");
+        Long maxDurationMs = entry.longValue("maxDurationMs");
         Boolean active = strict ? entry.bool("active") : lenientBoolean(entry.raw("active"));
 
         AgentSchedule.Builder builder = AgentSchedule.builder()
                 .scheduleId(scheduleId)
                 .agentId(AgentId.of(agentName));
         DocumentFields.set(builder::withInput, inputTemplate);
+        DocumentFields.set(builder::maxDurationMs, maxDurationMs);
         DocumentFields.set(builder::active, active);
 
         switch (type) {
