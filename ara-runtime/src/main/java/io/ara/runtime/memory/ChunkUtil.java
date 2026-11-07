@@ -106,7 +106,9 @@ public final class ChunkUtil {
             int end = Math.min(start + size, text.length());
             // Try to break on a period followed by a space.
             if (end < text.length()) {
-                int dot = text.lastIndexOf(". ", end);
+                // The ". " must end at or before the window does (it starts at end - 2 at the latest);
+                // searching from `end` itself let a chunk run two characters past the size.
+                int dot = text.lastIndexOf(". ", end - 2);
                 if (dot > start + size / 2) {
                     end = dot + 2; // include the period and space.
                 }

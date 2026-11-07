@@ -137,4 +137,15 @@ class ChunkUtilTest {
         assertThrows(IllegalArgumentException.class, () -> ChunkUtil.chunk("text", 50, 0));
         assertEquals(new ChunkPolicy(400, 199), new ChunkPolicy(400, 199));
     }
+
+    @Test
+    void noChunkIsLongerThanTheSize_evenWhenASentenceEndsRightAtTheWindowEdge() {
+        // "ab. " repeated: every window edge falls within a few characters of a ". "
+        String text = "ab. ".repeat(500);
+        for (int size : new int[]{100, 101, 102, 103, 200, 600}) {
+            for (String chunk : ChunkUtil.chunk(text, size, 10)) {
+                assertTrue(chunk.length() <= size, "size " + size + " but a chunk has " + chunk.length());
+            }
+        }
+    }
 }

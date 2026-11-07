@@ -154,7 +154,7 @@ class InMemoryDocumentStoreTest {
         assertTrue(withPolicy > byDefault, "withPolicy=" + withPolicy + " byDefault=" + byDefault);
         assertEquals(byDefault, store().indexDocument("d", "t", content, ChunkPolicy.DEFAULT),
                 "the default policy is the three-argument split");
-        assertTrue(narrow.retrieve("cat", 50).stream().allMatch(c -> c.content().length() <= 200));
+        assertTrue(narrow.retrieve("cat", 50).stream().allMatch(c -> c.content().length() <= 200), narrow.retrieve("cat", 50).stream().map(c -> String.valueOf(c.content().length())).toList().toString());
     }
 
     @Test
