@@ -37,6 +37,90 @@ class AraRuntimeRegisterLlmClientTest {
     }
 
     @Test
+    void aRuntimeWithNoClientBuildsAndStarts_andGetsItsFirstModelWhileRunning() {
+        AraRuntime runtime = AraRuntime.builder().build();
+        runtime.start();
+        try {
+            assertTrue(runtime.llmClients().isEmpty());
+
+            runtime.registerLlmClient("lmstudio", answering("dal primo modello"));
+
+            AgentResponse response = agentOn(runtime, "a", "lmstudio").execute(AgentTask.of("ciao"));
+            assertEquals("dal primo modello", response.content());
+        } finally {
+            runtime.stop();
+        }
+    }
+
+    @Test
+    void onAnEmptyRuntime_anAgentRunBeforeItsModelExists_failsThatRun_notTheRuntime() {
+        AraRuntime runtime = AraRuntime.builder().build();
+        runtime.start();
+        try {
+            AraAgent agent = agentOn(runtime, "a", "lmstudio");
+            boolean failed;
+            try {
+                failed = !agent.execute(AgentTask.of("ciao")).isSuccess();
+            } catch (RuntimeException e) {
+                failed = true;
+            }
+            assertTrue(failed, "no model is registered under 'lmstudio' yet");
+
+            runtime.registerLlmClient("lmstudio", answering("ora c'è"));
+            assertEquals("ora c'è", agentOn(runtime, "b", "lmstudio").execute(AgentTask.of("ciao")).content());
+        } finally {
+            runtime.stop();
+        }
+    }
+
+    @Test
+    void onAnEmptyRuntime_theFirstRegisteredClientBecomesTheDefault() {
+        AraRuntime runtime = AraRuntime.builder().build();
+        runtime.start();
+        try {
+            runtime.registerLlmClient("lmstudio", answering("dal default"));
+            runtime.registerLlmClient("other", answering("dall'altro"));
+
+            // an agent asking for a model nobody registered falls back to the default, as with a builder client
+            assertEquals("dal default", agentOn(runtime, "a", "unregistered").execute(AgentTask.of("ciao")).content());
+        } finally {
+            runtime.stop();
+        }
+    }
+
+    @Test
+    void onAnEmptyRuntime_anExplicitDefaultStaysTheDefault() {
+        AraRuntime runtime = AraRuntime.builder().defaultLlmClient("chosen").build();
+        runtime.start();
+        try {
+            runtime.registerLlmClient("first", answering("dal primo"));
+            runtime.registerLlmClient("chosen", answering("da quello scelto"));
+
+            assertEquals("da quello scelto", agentOn(runtime, "a", "unregistered").execute(AgentTask.of("ciao")).content());
+        } finally {
+            runtime.stop();
+        }
+    }
+
+    @Test
+    void aRuntimeBuiltWithClients_keepsItsDefaultWhenMoreAreRegistered() {
+        AraRuntime runtime = started();
+        try {
+            runtime.registerLlmClient("second", answering("dal secondo"));
+
+            assertEquals("dal primo", agentOn(runtime, "a", "unregistered").execute(AgentTask.of("ciao")).content());
+        } finally {
+            runtime.stop();
+        }
+    }
+
+    @Test
+    void aDefaultNamingNoneOfTheGivenClients_isStillATypoCaughtAtBuild() {
+        assertThrows(IllegalStateException.class, () -> AraRuntime.builder()
+                .llmClient("first", answering("x")).defaultLlmClient("frist").build());
+    }
+
+    @Test
     void aClientRegisteredAfterStartIsUsedByANewAgent() {
         AraRuntime runtime = started();
         try {

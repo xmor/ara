@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Supplier;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -40,7 +41,8 @@ public final class DefaultLlmRouter implements LlmRouter {
     private static final Logger log = LoggerFactory.getLogger(DefaultLlmRouter.class);
 
     private final Map<String, LlmClient> registry;
-    private final String                 defaultClientId;
+    /** Read on every call: a runtime born without clients adopts its first one as default later. */
+    private final Supplier<String>       defaultClientId;
     private final LlmClientFactory       clientFactory;
     private final AraTelemetry           telemetry;
     private final AtomicInteger          roundRobinIndex = new AtomicInteger(0);
@@ -60,7 +62,12 @@ public final class DefaultLlmRouter implements LlmRouter {
                             String defaultClientId,
                             LlmClientFactory clientFactory,
                             AraTelemetry telemetry) {
-        this(registry, defaultClientId, clientFactory, telemetry, true);
+        this(registry, fixed(defaultClientId), clientFactory, telemetry, true);
+    }
+
+    private static Supplier<String> fixed(String id) {
+        Objects.requireNonNull(id);
+        return () -> id;
     }
 
     /**
@@ -72,11 +79,23 @@ public final class DefaultLlmRouter implements LlmRouter {
                                         String defaultClientId,
                                         LlmClientFactory clientFactory,
                                         AraTelemetry telemetry) {
+        Objects.requireNonNull(defaultClientId);
+        return over(liveRegistry, () -> defaultClientId, clientFactory, telemetry);
+    }
+
+    /**
+     * Like {@link #over(Map, String, LlmClientFactory, AraTelemetry)}, with a default id that may change: read on
+     * every call, so a runtime that started without clients can make its first registered one the default.
+     */
+    public static DefaultLlmRouter over(Map<String, LlmClient> liveRegistry,
+                                        Supplier<String> defaultClientId,
+                                        LlmClientFactory clientFactory,
+                                        AraTelemetry telemetry) {
         return new DefaultLlmRouter(liveRegistry, defaultClientId, clientFactory, telemetry, false);
     }
 
     private DefaultLlmRouter(Map<String, LlmClient> registry,
-                             String defaultClientId,
+                             Supplier<String> defaultClientId,
                              LlmClientFactory clientFactory,
                              AraTelemetry telemetry,
                              boolean snapshot) {
@@ -135,14 +154,15 @@ public final class DefaultLlmRouter implements LlmRouter {
         }
 
         // 3. Default client
-        LlmClient def = registry.get(defaultClientId);
+        String defaultId = defaultClientId.get();
+        LlmClient def = registry.get(defaultId);
         if (def != null) {
-            log.debug("LlmRouter: using default client '{}'", defaultClientId);
+            log.debug("LlmRouter: using default client '{}'", defaultId);
             return def;
         }
 
         throw new IllegalStateException(
                 "No LlmClient found for transportId='" + transportId
-                + "' and no default registered (defaultClientId='" + defaultClientId + "')");
+                + "' and no default registered (defaultClientId='" + defaultId + "')");
     }
 }

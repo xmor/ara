@@ -87,7 +87,8 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
 
     private static final Logger log = LoggerFactory.getLogger(AgentFactory.class);
 
-    private final String defaultLlmClientId;
+    /** Not final: a runtime born without clients adopts its first registered one ({@link #useDefaultLlmClient}). */
+    private volatile String defaultLlmClientId;
     private final LlmClientFactory llmClientFactory;
     private final MediaStore       mediaStore;
     private final ArtifactExtractor artifactExtractor;
@@ -201,6 +202,14 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
      *
      * @throws IllegalStateException if {@code id} is already registered
      */
+    /**
+     * Makes {@code id} the fallback for agents created from now on whose model is not found. Used by a runtime that
+     * started with no client, when its first one is registered; agents already created keep the default they had.
+     */
+    public void useDefaultLlmClient(String id) {
+        this.defaultLlmClientId = Objects.requireNonNull(id);
+    }
+
     public void registerLlmClient(String id, LlmClient client) {
         try {
             llmTransports.seed(id, client);
@@ -762,12 +771,12 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
          * Builds and returns the {@link AgentFactory}.
          *
          * @return the configured factory
+         * <p>No LLM client is required here: clients can be registered later
+         * ({@link AgentFactory#registerLlmClient}), and an agent whose model is still missing fails when it is wired.
+         *
          * @throws IllegalStateException if any mandatory field is null
          */
         public AgentFactory build() {
-            if (llmClientRegistry.isEmpty()) {
-                throw new IllegalStateException("AgentFactory.Builder: at least one llmClient must be registered");
-            }
             // ADR-0091 D3: one of the two memory factories; the scoped one supersedes the other.
             if (memoryManagerFactory == null && scopedMemoryManagerFactory == null) {
                 requireNonNull(null, "memoryManagerFactory / memoryManagerScopeFactory");

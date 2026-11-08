@@ -749,6 +749,21 @@ public final class AraRuntime implements AutoCloseable {
         LlmClient wrapped = registeredClientWrapper.apply(client);
         factory.registerLlmClient(id, wrapped);
         llmClients.put(id, wrapped);
+        java.util.function.Consumer<String> adopt = defaultAdopter;
+        if (adopt != null) {
+            defaultAdopter = null;
+            adopt.accept(id);
+        }
+    }
+
+    /**
+     * Set by the assembler only for a runtime built with no LLM client and no explicit default: the first client
+     * registered becomes the default, as the first one given to the builder would have. Used once, then cleared.
+     */
+    private volatile java.util.function.Consumer<String> defaultAdopter;
+
+    void adoptFirstRegisteredAsDefaultWith(java.util.function.Consumer<String> adopter) {
+        this.defaultAdopter = Objects.requireNonNull(adopter);
     }
 
     void wrapRegisteredLlmClientsWith(UnaryOperator<LlmClient> wrapper) {
@@ -1012,6 +1027,8 @@ public final class AraRuntime implements AutoCloseable {
         // reachable within io.ara.runtime.
         final java.util.Map<String, LlmClient> namedClients = new java.util.LinkedHashMap<>();
         String defaultClientId = "default";
+        /** Whether {@link #defaultLlmClient} was called: then the default is fixed, even on a runtime born empty. */
+        boolean defaultClientExplicit;
         final java.util.Map<String, Retriever> namedRetrievers = new java.util.LinkedHashMap<>();
         String defaultRetrieverId;
         RetrieverRouter retrieverRouter;
@@ -1090,7 +1107,14 @@ public final class AraRuntime implements AutoCloseable {
             return this;
         }
 
-        /** Registers a named LLM client. The first registered name is used as default. */
+        /**
+         * Registers a named LLM client. The first registered name is used as default.
+         *
+         * <p>Registering none is allowed: the runtime then starts without models, and they are added
+         * while it runs with {@link AraRuntime#registerLlmClient}. An agent run before its model is
+         * registered fails at that run, not at build time. On such a runtime the first client
+         * registered becomes the default, unless {@link #defaultLlmClient} named one.
+         */
         public Builder llmClient(String id, LlmClient llmClient) {
             Objects.requireNonNull(id, "id must not be null");
             Objects.requireNonNull(llmClient, "llmClient must not be null");
@@ -1102,6 +1126,7 @@ public final class AraRuntime implements AutoCloseable {
         /** Sets which registered id acts as the fallback when llmProvider is not found. */
         public Builder defaultLlmClient(String id) {
             this.defaultClientId = Objects.requireNonNull(id);
+            this.defaultClientExplicit = true;
             return this;
         }
 

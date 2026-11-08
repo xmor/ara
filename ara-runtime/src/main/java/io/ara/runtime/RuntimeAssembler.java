@@ -41,6 +41,7 @@ import io.ara.runtime.wiring.AggregatingToolRegistry;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Consumer;
 
@@ -78,7 +79,9 @@ final class RuntimeAssembler {
                 b.temporaryScopeRegistry, lifecycle.trackedExecutor());
         // Live: a client registered on the running runtime is added here, and the router below sees it.
         Map<String, LlmClient> instrumentedClients = new ConcurrentHashMap<>(instrumentClients());
-        ExecutionPlanner planner = buildExecutionPlanner(instrumentedClients);
+        // The default id can change once: a runtime born with no client adopts its first registered one.
+        AtomicReference<String> defaultClientId = new AtomicReference<>(b.defaultClientId);
+        ExecutionPlanner planner = buildExecutionPlanner(instrumentedClients, defaultClientId);
         Map<String, ToolRegistry> perAgentRegistries = new ConcurrentHashMap<>();
         Function<AgentConfig, ToolRegistry> perAgentToolRegistry = resolvePerAgentToolRegistry(perAgentRegistries);
         // ADR-048 D2: a run suspended for an approval is only a checkpoint until something waits
@@ -98,6 +101,12 @@ final class RuntimeAssembler {
                 instrumentedClients, discoveryRegistry(perAgentRegistries),
                 Map.copyOf(b.namedRetrievers));
         runtime.wrapRegisteredLlmClientsWith(client -> new InstrumentedLlmClient(client, b.telemetry));
+        if (b.namedClients.isEmpty() && !b.defaultClientExplicit) {
+            runtime.adoptFirstRegisteredAsDefaultWith(id -> {
+                defaultClientId.set(id);
+                agentFactory.useDefaultLlmClient(id);
+            });
+        }
         return runtime;
     }
 
@@ -148,11 +157,11 @@ final class RuntimeAssembler {
 
     /** Fails fast on configurations {@link #assemble()} could not wire correctly. */
     private void validate() {
-        if (b.namedClients.isEmpty()) {
-            throw new IllegalStateException(
-                    "AraRuntime.Builder: at least one llmClient must be registered");
-        }
-        if (!b.namedClients.containsKey(b.defaultClientId)) {
+        // No client at all is a valid start: a runtime whose models are added while it runs
+        // (AraRuntime.registerLlmClient) begins empty. Routing reads the live registry, so an agent
+        // run before its model exists fails there, naming the model it asked for. A default that
+        // names none of the clients actually given, on the other hand, can only be a typo.
+        if (!b.namedClients.isEmpty() && !b.namedClients.containsKey(b.defaultClientId)) {
             throw new IllegalStateException(
                     "AraRuntime.Builder: default LLM client '" + b.defaultClientId
                             + "' is not among the registered clients " + b.namedClients.keySet()
@@ -223,10 +232,11 @@ final class RuntimeAssembler {
     }
 
     /** Registers the built-in strategies (react, respact, plan_execute, reflexion, reflact), RAG variants, and any extras. */
-    private ExecutionPlanner buildExecutionPlanner(Map<String, LlmClient> instrumentedClients) {
+    private ExecutionPlanner buildExecutionPlanner(Map<String, LlmClient> instrumentedClients,
+                                                   AtomicReference<String> defaultClientId) {
         LlmRouter reflection = b.reflectionRouter != null
                 ? b.reflectionRouter
-                : DefaultLlmRouter.over(instrumentedClients, b.defaultClientId, b.llmClientFactory, b.telemetry);
+                : DefaultLlmRouter.over(instrumentedClients, defaultClientId::get, b.llmClientFactory, b.telemetry);
 
         ReactStrategy       reactStrategy     = new ReactStrategy();
         ReSpActStrategy     respactStrategy   = new ReSpActStrategy();
