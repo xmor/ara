@@ -102,14 +102,18 @@ final class McpToolMapper {
     /** The last path segment of {@code uri}, or {@code null} when it has none worth showing. */
     static String nameFromUri(String uri) {
         if (uri == null || uri.isBlank()) return null;
-        String path = uri;
-        int cut = path.indexOf('?');
-        if (cut >= 0) path = path.substring(0, cut);
-        cut = path.indexOf('#');
-        if (cut >= 0) path = path.substring(0, cut);
+        String path;
+        try {
+            // The path only: neither the host of "https://example.org/" nor the scheme-specific
+            // part of an opaque "urn:x:y" is a file name.
+            path = java.net.URI.create(uri.strip()).getPath();
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        if (path == null) return null;
         while (path.endsWith("/")) path = path.substring(0, path.length() - 1);
         String last = path.substring(path.lastIndexOf('/') + 1);
-        return last.isBlank() || last.contains(":") ? null : last;
+        return last.isBlank() ? null : last;
     }
 
     private static String extension(String mimeType) {
