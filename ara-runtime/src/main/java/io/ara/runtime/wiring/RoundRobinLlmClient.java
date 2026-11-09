@@ -5,6 +5,7 @@ import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmException;
 import io.ara.core.llm.LlmMessage;
+import io.ara.core.llm.ToolMediaPlacement;
 
 import java.util.List;
 import java.util.Objects;
@@ -100,5 +101,19 @@ final class RoundRobinLlmClient implements LlmClient {
                 .map(LlmClient::supportedMediaTypes)
                 .reduce((a, b) -> a.stream().filter(b::contains).collect(Collectors.toUnmodifiableSet()))
                 .orElseGet(Set::of);
+    }
+
+    /**
+     * {@code INLINE_IN_TOOL_RESULT} only when every candidate says so; otherwise the form every
+     * provider accepts. The candidate is picked per call, so promising the inline form on the
+     * strength of one of them would put an image in a tool result that an OpenAI-compatible
+     * candidate silently discards — a wrong answer with no error, the same reasoning as the
+     * intersection of {@link #supportedMediaTypes()}.
+     */
+    @Override
+    public ToolMediaPlacement toolMediaPlacement() {
+        return clients.stream().allMatch(c -> c.toolMediaPlacement() == ToolMediaPlacement.INLINE_IN_TOOL_RESULT)
+                ? ToolMediaPlacement.INLINE_IN_TOOL_RESULT
+                : ToolMediaPlacement.FOLLOWING_USER_MESSAGE;
     }
 }

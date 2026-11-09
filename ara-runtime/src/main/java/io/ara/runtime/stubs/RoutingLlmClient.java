@@ -5,6 +5,7 @@ import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmMessage;
+import io.ara.core.llm.ToolMediaPlacement;
 
 import java.util.HashMap;
 import java.util.List;
@@ -102,6 +103,15 @@ public final class RoutingLlmClient implements LlmClient {
             shared = shared.stream().filter(other::contains).collect(Collectors.toUnmodifiableSet());
         }
         return shared;
+    }
+
+    /** Inline only if the default and every route are; see {@code FailoverLlmClient}. */
+    @Override
+    public ToolMediaPlacement toolMediaPlacement() {
+        boolean allInline = defaultClient.toolMediaPlacement() == ToolMediaPlacement.INLINE_IN_TOOL_RESULT
+                && routes.values().stream()
+                        .allMatch(c -> c.toolMediaPlacement() == ToolMediaPlacement.INLINE_IN_TOOL_RESULT);
+        return allInline ? ToolMediaPlacement.INLINE_IN_TOOL_RESULT : ToolMediaPlacement.FOLLOWING_USER_MESSAGE;
     }
 
     // ── Factory ───────────────────────────────────────────────────────────────

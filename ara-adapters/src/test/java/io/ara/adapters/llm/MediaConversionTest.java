@@ -81,11 +81,14 @@ class MediaConversionTest {
                 List.of(LlmMessage.user("check the recess clause", List.of(pdf, image))),
                 contextWith(store), fullyCapable()));
 
-        assertEquals(4, contents.size());
+        assertEquals(6, contents.size());
         assertEquals("check the recess clause", assertInstanceOf(TextContent.class, contents.get(0)).text());
         assertEquals(ToolConversionUtils.MEDIA_FRAME, assertInstanceOf(TextContent.class, contents.get(1)).text());
-        assertInstanceOf(PdfFileContent.class, contents.get(2));
-        assertInstanceOf(ImageContent.class, contents.get(3));
+        // Each media sits right behind its own label, so the model can name it by id.
+        assertEquals("[" + pdf.describe() + "]", assertInstanceOf(TextContent.class, contents.get(2)).text());
+        assertInstanceOf(PdfFileContent.class, contents.get(3));
+        assertEquals("[" + image.describe() + "]", assertInstanceOf(TextContent.class, contents.get(4)).text());
+        assertInstanceOf(ImageContent.class, contents.get(5));
     }
 
     @Test
@@ -96,9 +99,10 @@ class MediaConversionTest {
         List<Content> contents = userContents(ToolConversionUtils.toNativeAwareChatMessages(
                 List.of(LlmMessage.user("", List.of(pdf))), contextWith(store), fullyCapable()));
 
-        assertEquals(2, contents.size(), "no user text part when the task had no words");
+        assertEquals(3, contents.size(), "no user text part when the task had no words");
         assertEquals(ToolConversionUtils.MEDIA_FRAME, assertInstanceOf(TextContent.class, contents.get(0)).text());
-        assertInstanceOf(PdfFileContent.class, contents.get(1));
+        assertEquals("[" + pdf.describe() + "]", assertInstanceOf(TextContent.class, contents.get(1)).text());
+        assertInstanceOf(PdfFileContent.class, contents.get(2));
     }
 
     @Test
@@ -120,7 +124,7 @@ class MediaConversionTest {
         List<Content> contents = userContents(ToolConversionUtils.toNativeAwareChatMessages(
                 List.of(LlmMessage.user("read it", List.of(pdf))), contextWith(store), fullyCapable()));
 
-        PdfFileContent sent = assertInstanceOf(PdfFileContent.class, contents.get(2));
+        PdfFileContent sent = assertInstanceOf(PdfFileContent.class, contents.get(3));
         assertEquals(Base64.getEncoder().encodeToString(PDF_BYTES), sent.pdfFile().base64Data());
     }
 
@@ -133,7 +137,7 @@ class MediaConversionTest {
                 List.of(LlmMessage.user("read it", List.of(remote))),
                 contextWith(MediaStore.noop()), fullyCapable()));
 
-        PdfFileContent sent = assertInstanceOf(PdfFileContent.class, contents.get(2));
+        PdfFileContent sent = assertInstanceOf(PdfFileContent.class, contents.get(3));
         assertEquals("https://example.test/contract.pdf", sent.pdfFile().url().toString());
     }
 

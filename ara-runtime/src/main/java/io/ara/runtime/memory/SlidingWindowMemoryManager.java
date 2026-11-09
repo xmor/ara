@@ -11,7 +11,6 @@ import io.ara.core.memory.MemoryEntry;
 import io.ara.core.memory.SemanticEntry;
 import io.ara.core.memory.SemanticStore;
 import io.ara.core.memory.TokenCounter;
-import io.ara.core.memory.ToolCallMetadata;
 import io.ara.core.telemetry.AraTelemetry;
 import io.ara.core.telemetry.Span;
 import io.ara.core.telemetry.SpanStatus;
@@ -194,18 +193,8 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
     }
 
     @Override
-    public void appendToWorkingMemory(String role, String content) {
-        add(MemoryEntry.of(role, content));
-    }
-
-    @Override
-    public void appendToWorkingMemory(String role, String content, ToolCallMetadata metadata) {
-        add(MemoryEntry.of(role, content, metadata));
-    }
-
-    @Override
-    public void appendToWorkingMemory(String role, String content, java.util.List<MediaRef> media) {
-        add(MemoryEntry.of(role, content, media));
+    public void appendToWorkingMemory(MemoryEntry entry) {
+        add(entry);
     }
 
     @Override

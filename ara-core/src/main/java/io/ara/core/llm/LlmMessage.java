@@ -1,6 +1,8 @@
 package io.ara.core.llm;
 
 import io.ara.core.media.MediaRef;
+import io.ara.core.memory.MemoryEntry;
+import io.ara.core.memory.ToolCallMetadata;
 
 import java.util.List;
 import java.util.Objects;
@@ -33,8 +35,13 @@ import java.util.Objects;
  * @param toolName    the tool name — non-null for {@code "assistant_tool_call"} and {@code "tool"}
  *                    roles; {@code null} for all other roles
  * @param media       images and documents accompanying this message, in presentation order;
- *                    never {@code null}, and only meaningful for the {@code "user"} role —
- *                    no provider accepts attachments on a system or tool-result message
+ *                    never {@code null}, and meaningful for the {@code "user"} and {@code "tool"}
+ *                    roles. No provider accepts attachments on a system message. A tool result
+ *                    is different: OpenAI-compatible endpoints take only text in a tool message,
+ *                    so what an adapter does with the media of a {@code "tool"} message — send
+ *                    them in a following user message, or inside the result where the provider
+ *                    allows it — is its decision, and the message just says which media belong to
+ *                    which result
  * @param reasoning   what the model reasoned before making this tool call, as its provider
  *                    returned it; {@code null} when there was none, and only meaningful for the
  *                    {@code "assistant_tool_call"} role. See {@link #assistantToolCall(String,
@@ -142,8 +149,82 @@ public record LlmMessage(String role, String content, String toolCallId, String 
                 toolCallId, toolName);
     }
 
+    /**
+     * Creates a tool-result message whose tool also returned media. {@code result} is the text of
+     * the result, which should already name each media (see {@code ToolResult#content()}): the
+     * references say which media belong to this result, not how the model will see them.
+     */
+    public static LlmMessage tool(String toolCallId, String toolName, String result, List<MediaRef> media) {
+        return new LlmMessage("tool",
+                result != null ? result : "",
+                toolCallId, toolName, media);
+    }
+
     /** {@code true} when this message carries at least one media reference. */
     public boolean hasMedia() {
         return !media.isEmpty();
+    }
+
+    // ── Memory <-> message: the two conversions, and the only two ────────────────────────────
+
+    /**
+     * The message a {@link MemoryEntry} is sent as: role, content, the call id and tool name of
+     * a tool-call entry, and the media. Every strategy that rebuilds a conversation from working
+     * memory goes through here.
+     *
+     * <h2>Why one pair of conversions, and why both live in this class</h2>
+     * <p>Before they existed, three places copied fields between an entry and a message by hand
+     * — the strategies' {@code materialize}, the checkpoint restore in {@code AgentInstance}, and
+     * the per-field overloads of {@code MemoryManager} — and each copied the fields it knew
+     * about on the day it was written. The media of a tool-call entry were dropped by the first
+     * two for that reason, and the next field added to {@link MemoryEntry} would have been
+     * dropped the same way. One pair of conversions, covered by a round-trip test that lists the
+     * record's components, turns that mistake into a failing test.
+     *
+     * <p>Both directions are here and not one in each type because {@code io.ara.core.llm}
+     * already depends on the media types and this adds {@code memory} to its imports; the
+     * reverse placement would make the two packages depend on each other.
+     *
+     * <h2>What does not survive, by design</h2>
+     * <ul>
+     *   <li>the entry's timestamp — a message has no clock; the entry made from a message is
+     *       stamped when it is made;</li>
+     *   <li>an {@link io.ara.core.memory.EpisodeLabel}: it classifies an entry inside the
+     *       memory tiers and means nothing to a provider;</li>
+     *   <li>{@link #reasoning()}, in the other direction: a memory entry has no place for it.
+     *       ReAct records reasoning as an execution step, and only plan-execute's step-local
+     *       history, which is a list of messages and never goes through memory, keeps it on the
+     *       message.</li>
+     * </ul>
+     * A test pins this list: a component added to {@code MemoryEntry} that is neither carried
+     * here nor named there fails it.
+     */
+    public static LlmMessage of(MemoryEntry entry) {
+        Objects.requireNonNull(entry, "entry must not be null");
+        if (entry.metadata() instanceof ToolCallMetadata call && isToolCallRole(entry.role())) {
+            return new LlmMessage(entry.role(), entry.content(), call.callId(), call.toolName(), entry.media());
+        }
+        return new LlmMessage(entry.role(), entry.content(), null, null, entry.media());
+    }
+
+    /**
+     * The memory entry this message is stored as: the inverse of {@link #of(MemoryEntry)}, used
+     * when a saved conversation is put back into working memory. See {@link #of(MemoryEntry)}
+     * for what is not carried across.
+     *
+     * <p>A tool-call message that lacks its id or its name becomes a plain entry: the metadata
+     * record refuses a null, and an entry without correlation data is what the text protocol
+     * stores anyway.
+     */
+    public MemoryEntry toMemoryEntry() {
+        if (isToolCallRole(role) && toolCallId != null && toolName != null) {
+            return new MemoryEntry(role, content, java.time.Instant.now(),
+                    new ToolCallMetadata(toolCallId, toolName), media);
+        }
+        return MemoryEntry.of(role, content, media);
+    }
+
+    private static boolean isToolCallRole(String role) {
+        return "tool".equals(role) || "assistant_tool_call".equals(role);
     }
 }

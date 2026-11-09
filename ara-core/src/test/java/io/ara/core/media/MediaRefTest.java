@@ -54,4 +54,34 @@ class MediaRefTest {
     void stored_reference_is_not_external() {
         assertFalse(new MediaRef("abc", "image/png", "shot.png", 3, null).isExternal());
     }
+
+    @Test
+    void a_store_id_is_shown_as_its_first_twelve_characters() {
+        String digest = "3f9a1c2e7b4d5a6c8e0f1b2d3c4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a";
+
+        MediaRef reference = new MediaRef(digest, "image/png", "crop-1.png", 12, null);
+
+        assertEquals("3f9a1c2e7b4d", reference.shortId());
+        assertEquals(MediaRef.SHORT_ID_LENGTH, reference.shortId().length());
+    }
+
+    @Test
+    void an_id_no_longer_than_the_prefix_is_shown_whole() {
+        assertEquals("abc", new MediaRef("abc", "image/png", "shot.png", 1, null).shortId());
+    }
+
+    @Test
+    void a_uri_backed_reference_is_shown_by_its_whole_id_because_a_uri_prefix_identifies_nothing() {
+        MediaRef reference = MediaRef.remote(java.net.URI.create("https://example.org/files/contract.pdf"),
+                "application/pdf", "contract.pdf");
+
+        assertEquals("https://example.org/files/contract.pdf", reference.shortId());
+    }
+
+    @Test
+    void describe_is_the_name_and_the_short_id_in_one_fixed_form() {
+        MediaRef reference = new MediaRef("3f9a1c2e7b4d5a6c8e0f1b2d3c4a5b6c", "image/png", "crop-1.png", 12, null);
+
+        assertEquals("crop-1.png (id 3f9a1c2e7b4d)", reference.describe());
+    }
 }

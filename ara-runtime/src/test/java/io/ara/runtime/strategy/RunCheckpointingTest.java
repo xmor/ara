@@ -12,6 +12,8 @@ import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.LlmProfile;
+import io.ara.core.media.MediaRef;
+import io.ara.core.common.Money;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
@@ -156,6 +158,31 @@ class RunCheckpointingTest {
                 "the model must see the original request: " + llm.lastMessages);
         assertTrue(llm.lastMessages.stream().anyMatch(m -> m.content().contains("ECHO")),
                 "the model must see the tool result already obtained: " + llm.lastMessages);
+    }
+
+    /**
+     * The restore used to rebuild each entry by hand and lost the media of any entry that carried
+     * tool-call metadata. Nothing produced such an entry until a tool could return an image, so
+     * the loss was latent; this fixes it in place before that day.
+     */
+    @Test
+    void aResumedRun_keepsTheMediaOfAToolResultTheCheckpointCarries() {
+        MediaRef crop = new MediaRef("3f9a1c2e7b4d", "image/png", "crop-1.png", 12L, null);
+        List<LlmMessage> memory = List.of(
+                LlmMessage.user("say hello"),
+                LlmMessage.assistantToolCall("call-1", "echo", "{\"text\":\"hello\"}"),
+                new LlmMessage("tool", "ECHO: hello", "call-1", "echo", List.of(crop)));
+        RunCheckpoint checkpoint = new RunCheckpoint(SessionId.of("s1"), "task-1", "say hello", 1,
+                memory, List.of(), 0, 0, Money.zero("EUR"));
+        RecordingClient llm = new RecordingClient();
+
+        AgentResponse response = run(CheckpointStore.inMemory(), AgentTask.resuming(checkpoint), llm);
+
+        assertTrue(response.isSuccess(), "the resumed run must work: " + response.failureReason());
+        LlmMessage toolResult = llm.lastMessages.stream()
+                .filter(m -> "tool".equals(m.role())).findFirst().orElseThrow();
+        assertEquals("call-1", toolResult.toolCallId(), "the call id still pairs the result with its call");
+        assertEquals(List.of(crop), toolResult.media(), "the media of the tool result must survive a resume");
     }
 
     @Test

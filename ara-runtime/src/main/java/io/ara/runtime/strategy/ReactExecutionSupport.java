@@ -423,6 +423,12 @@ final class ReactExecutionSupport {
          *                    is empty
          */
         List<LlmMessage> build(MemoryManager memory, String toolCatalog, String suffix) {
+            // The cache below holds the full list; the window is applied to what is handed out,
+            // so a media dropped from one call is still there for the next incremental build.
+            return ToolMediaWindow.apply(buildFull(memory, toolCatalog, suffix));
+        }
+
+        private List<LlmMessage> buildFull(MemoryManager memory, String toolCatalog, String suffix) {
             List<MemoryEntry> entries     = memory.workingMemory();
             String            effectiveSuffix = toolCatalog.isEmpty() ? "" : suffix;
             String            desired     = toolCatalog + '\u0001' + effectiveSuffix;
@@ -487,20 +493,15 @@ final class ReactExecutionSupport {
         }
 
         /**
-         * The plain, un-enhanced form of a memory entry. The metadata branch is what lets
-         * the adapter reconstruct native function-calling turns from the history.
+         * The plain, un-enhanced form of a memory entry: what the adapter turns into provider
+         * messages. It is {@link LlmMessage#of(MemoryEntry)} and nothing else, on purpose: this
+         * used to copy the fields by hand and dropped the media of any entry that carried
+         * tool-call metadata, which no entry did until a tool could return an image. The
+         * conversion, and the test that pins every field of an entry to it, live in one place
+         * so a field added later cannot be dropped here by omission.
          */
         static LlmMessage materialize(MemoryEntry e) {
-            if (e.metadata() instanceof ToolCallMetadata meta
-                    && ("tool".equals(e.role()) || "assistant_tool_call".equals(e.role()))) {
-                // Propagate toolCallId and toolName for native function-calling reconstruction
-                return new LlmMessage(e.role(), e.content(), meta.callId(), meta.toolName());
-            }
-            // Entry media rides along: this is the only path from the task's attachments
-            // to the outgoing request, and the adapter is what turns the references into
-            // provider content. A text-only entry produces exactly the message it did
-            // before media existed.
-            return new LlmMessage(e.role(), e.content(), null, null, e.media());
+            return LlmMessage.of(e);
         }
     }
 
@@ -789,9 +790,7 @@ final class ReactExecutionSupport {
     private static boolean recordObservation(
             ToolCallParser.ToolCallRequest tcr, String callId, ToolResult result, ReActSupport.DispatchContext ctx) {
 
-        String observation = result.success()
-                ? result.output()
-                : "Tool [%s] failed — %s".formatted(tcr.toolId(), result.error());
+        Observation observation = Observation.of(tcr.toolId(), result);
 
         // Guarded because the truncation below allocates a substring on every tool result
         // even when DEBUG is off — the same eager-argument-evaluation trap warned about in
@@ -799,17 +798,21 @@ final class ReactExecutionSupport {
         if (log.isDebugEnabled()) {
             log.debug("Tool [{}] result — success={} output={}",
                     tcr.toolId(), result.success(),
-                    observation.length() > 300 ? observation.substring(0, 300) + "…" : observation);
+                    observation.text().length() > 300 ? observation.text().substring(0, 300) + "…" : observation.text());
         }
         if (ctx.logIo()) {
             log.info("TOOL RESULT [{}] success={} output={}",
-                    tcr.toolId(), result.success(), truncate(observation, ctx.logIoMaxChars()));
+                    tcr.toolId(), result.success(), truncate(observation.text(), ctx.logIoMaxChars()));
         }
 
+        // The media stay on the entry of the result they belong to, so eviction removes the two
+        // together and the adapter decides how the provider receives them.
         if (callId != null && !callId.isBlank()) {
-            ctx.memory().appendToWorkingMemory("tool", observation, new ToolCallMetadata(callId, tcr.toolId()));
+            ctx.memory().appendToWorkingMemory(MemoryEntry.of("tool", observation.text(),
+                    new ToolCallMetadata(callId, tcr.toolId()), observation.media()));
         } else {
-            ctx.memory().appendToWorkingMemory("user", "Observation: " + observation);
+            ctx.memory().appendToWorkingMemory(
+                    MemoryEntry.of("user", observation.asTextProtocolTurn(), observation.media()));
         }
         RunEvents.record(ctx.task(), ctx.steps(), ExecutionStep.observation(result, ctx.iteration()));
         return !result.success();

@@ -86,6 +86,41 @@ public record MediaRef(
         return uri != null;
     }
 
+    /**
+     * How many characters of a {@link MediaStore} id a model is shown. See {@link #shortId()}.
+     */
+    public static final int SHORT_ID_LENGTH = 12;
+
+    /**
+     * The identifier a model is shown and is expected to copy back into a tool argument.
+     *
+     * <p>A store id is a 64-character SHA-256 digest, and a small model copies 64 hex characters
+     * wrongly often enough to matter. The first {@value #SHORT_ID_LENGTH} are 48 bits: among the few
+     * media one session holds a collision is not a practical concern, and the code that resolves the
+     * prefix does so over that small set and reports an ambiguity as an error instead of guessing.
+     * That resolution is the caller's: this only says what is shown.
+     *
+     * <p>A {@link #isExternal() uri-backed} reference has no digest, only a URI as its id, and
+     * the first characters of a URI ({@code https://…}) identify nothing, so it is shown whole.
+     */
+    public String shortId() {
+        if (isExternal() || mediaId.length() <= SHORT_ID_LENGTH) {
+            return mediaId;
+        }
+        return mediaId.substring(0, SHORT_ID_LENGTH);
+    }
+
+    /**
+     * The one-line description of this media that every text shown to a model uses:
+     * {@code crop-1.png (id 3f9a1c2e7b4d)}. Kept here so the line a tool result carries, the label
+     * placed before an attachment and the note for an image a model cannot receive all say the same
+     * thing — a model that reads the id in one and has to find it in another must find it spelled
+     * identically.
+     */
+    public String describe() {
+        return name + " (id " + shortId() + ")";
+    }
+
     private static String requireText(String value, String field) {
         Objects.requireNonNull(value, field + " must not be null");
         if (value.isBlank()) {

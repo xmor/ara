@@ -5,6 +5,7 @@ import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmException;
 import io.ara.core.llm.LlmMessage;
+import io.ara.core.llm.ToolMediaPlacement;
 
 import java.util.List;
 import java.util.Objects;
@@ -83,5 +84,10 @@ public abstract class DelegatingLlmClient implements LlmClient {
     @Override
     public Set<String> supportedMediaTypes() {
         return delegate.supportedMediaTypes();
+    }
+
+    @Override
+    public ToolMediaPlacement toolMediaPlacement() {
+        return delegate.toolMediaPlacement();
     }
 }

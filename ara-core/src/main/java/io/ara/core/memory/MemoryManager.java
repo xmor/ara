@@ -19,33 +19,51 @@ import java.util.List;
 public interface MemoryManager {
 
     /**
+     * Appends {@code entry} to the working memory window, whole: every field it carries
+     * (role, content, metadata, media) must reach {@link #workingMemory()} unchanged.
+     *
+     * <p>This is the one operation an implementation has to provide, and the three
+     * convenience overloads below only build an entry and call it. The shape is deliberate.
+     * Each overload used to be its own abstract-or-default method, so a manager that
+     * forwarded {@code (role, content, metadata)} to a delegate could not also forward
+     * media: there was no overload carrying both, and every new field would have needed
+     * another one, with every forwarding decorator updated by hand. A single entry-taking
+     * method cannot lose a field it does not know about — a decorator that forwards the
+     * entry forwards whatever the entry grows later.
+     *
+     * <p>Implementations that wrap another manager should forward {@code entry} itself, not
+     * rebuild it from its parts. A manager that has no media-aware storage must say so by
+     * refusing the entry or documenting that it drops media; silently storing a reference it
+     * will never send is the failure this method exists to rule out.
+     *
+     * @param entry the entry to append; never {@code null}
+     */
+    void appendToWorkingMemory(MemoryEntry entry);
+
+    /**
      * Appends a message to the working memory window.
      *
      * @param role    the speaker role ("system", "user", "assistant", "tool", "assistant_tool_call")
      * @param content the message content
      */
-    void appendToWorkingMemory(String role, String content);
+    default void appendToWorkingMemory(String role, String content) {
+        appendToWorkingMemory(MemoryEntry.of(role, content));
+    }
 
     /**
      * Appends a tool-call entry with its {@link ToolCallMetadata} (call id and tool name),
      * so adapters can reconstruct native tool-call messages on the next LLM call.
-     * The default implementation ignores {@code metadata}.
      */
     default void appendToWorkingMemory(String role, String content, ToolCallMetadata metadata) {
-        appendToWorkingMemory(role, content);
+        appendToWorkingMemory(MemoryEntry.of(role, content, metadata));
     }
 
     /**
      * Appends an entry carrying media references — images or documents the model should look
      * at alongside {@code content}.
-     *
-     * <p>The default drops the references, which is the right behaviour for a manager that
-     * has no media-aware storage: the alternative would be to pretend the attachments are in
-     * the window when nothing will ever send them. Managers that store {@link MemoryEntry}
-     * (all of the built-in ones, via {@code AbstractMemoryManager}) override this.
      */
     default void appendToWorkingMemory(String role, String content, java.util.List<io.ara.core.media.MediaRef> media) {
-        appendToWorkingMemory(role, content);
+        appendToWorkingMemory(MemoryEntry.of(role, content, media));
     }
 
     /**

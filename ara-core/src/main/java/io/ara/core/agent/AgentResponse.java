@@ -37,10 +37,13 @@ import java.util.Optional;
  *                        (see {@link ContractViolation}). A failure of the agent itself
  *                        never sets it
  * @param artifacts       the parts of {@code content} the runtime extracted and stored as
- *                        references (a code block, a document), in the order they appear; empty
- *                        unless the runtime was given an extractor and a store that accepts
- *                        writes. Their bytes live in the runtime's {@code MediaStore}, never in
- *                        this record, so a long output does not inflate the response
+ *                        references (a code block, a document), in the order they appear, followed
+ *                        by the stored media the answer cites by id (an image a tool returned, a
+ *                        crop), in order of first mention and without repeats; empty unless the
+ *                        runtime has a store and either an extractor or an answer that cites a
+ *                        media of the session. Their bytes live in the runtime's {@code
+ *                        MediaStore}, never in this record, so a long output does not inflate the
+ *                        response
  * @param pendingApprovals the approvals the run is waiting for when {@code finalState} is {@link
  *                        AgentState#AWAITING_APPROVAL}, one per tool call of the suspended turn
  *                        that needs it; empty otherwise. Each {@code requestId} is what a

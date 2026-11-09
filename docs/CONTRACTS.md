@@ -234,6 +234,55 @@ Mistral and an image to Ollama, through one provider-agnostic method.
 
 ---
 
+## Media returned by tools
+
+A tool can return media as well as text — the crop of a region of a scanned page, a rendered
+chart — and the model then looks at it. `ToolResult.success(toolId, output, media)` carries the
+`MediaRef`s; everything else is done by the runtime.
+
+```java
+@Override public ToolResult execute(String argumentJson, AgentTask task) {
+    MediaAccess access = task.runContext().mediaAccess().orElse(null);   // absent without a MediaStore
+    MediaRef source = access.resolve(mediaIdFrom(argumentJson)).orElseThrow();
+    byte[] crop = cropOf(access.read(source), argumentJson);
+    MediaRef ref = access.put("photo-crop.png", "image/png", crop);      // put, not the store
+    return ToolResult.success("crop_region", "Cropped.", List.of(ref));
+}
+```
+
+- **The model is told what it got.** `ToolResult.content()` appends one `Attached: name (id …)`
+  line per media. That is how the model learns the id it will cite, and it stays in the history
+  after the image itself has left it.
+- **`MediaAccess` is the session's view, not the store.** A tool can read only media this session
+  has seen (task attachments, earlier results, what it `put` itself); an id from elsewhere fails
+  with the same message as an unknown one. `put` is what makes a new media visible, so a tool that
+  writes straight to the store produces something the model cannot cite.
+- **Where the image goes is the adapter's business** (`LlmClient.toolMediaPlacement()`):
+  Anthropic takes it inside the tool result; OpenAI-format endpoints, vLLM and Ollama get the text
+  result and then one user message carrying the images, because an image inside a tool message is
+  accepted by those endpoints and silently never reaches the model. A model that cannot take the
+  type gets a note in the tool text instead of a failed run; a user's *own* attachment of an
+  unsupported type still fails.
+- **Every media sent to a model is labelled** `[name (id xxxxxxxxxxxx)]` just before it. Agents
+  that already attach files see one extra text part per media (the parts of a message shift by one).
+- **Only the last block's images are re-sent.** The images of earlier tool results are left out of
+  each call (their text stays), so an image is not paid for on every iteration. An agent that
+  lists the tool `view_media` in its `enabledTools` can ask for one again by id, including a
+  document attached two turns ago. The window covers native tool calls; the text-protocol
+  observation is a user message and is not windowed.
+- **What the model cites comes back.** After a successful run, every media id (12+ hex
+  characters) in the final answer that the session can see is added to `AgentResponse.artifacts()`,
+  after any extracted artifacts, once each, in order of first mention. Ids that do not resolve are
+  ignored; the answer text is never changed.
+
+Without a `MediaStore`, nothing here applies and runs behave as before. Not covered: media in MCP
+tool results, media returned by a delegated sub-agent.
+
+Runnable: `io.ara.examples.multimodal.ToolReturnsImageExample` — offline by default, a vision
+model with `live`.
+
+---
+
 ## Artifacts in the response — code blocks and documents
 
 An answer is a conversation turn; a block of code or a document inside it is *output*. When

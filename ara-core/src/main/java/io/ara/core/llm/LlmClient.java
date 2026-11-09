@@ -214,4 +214,20 @@ public interface LlmClient {
     default java.util.Set<String> supportedMediaTypes() {
         return java.util.Set.of();
     }
+
+    /**
+     * Where this client's provider accepts the media a tool returned — see {@link
+     * ToolMediaPlacement}. Read by the adapter's message conversion, never by strategies.
+     *
+     * <p>Defaults to {@link ToolMediaPlacement#FOLLOWING_USER_MESSAGE}, the form every provider
+     * accepts: a leaf that does not know better must not be sent an image inside a tool result,
+     * because the usual failure is silent loss, not an error. Decorators <strong>must</strong>
+     * delegate to the wrapped client; a composite reports {@code INLINE_IN_TOOL_RESULT} only if
+     * every candidate does, since the one it picks per call may be any of them.
+     *
+     * @return the placement; never {@code null}
+     */
+    default ToolMediaPlacement toolMediaPlacement() {
+        return ToolMediaPlacement.FOLLOWING_USER_MESSAGE;
+    }
 }

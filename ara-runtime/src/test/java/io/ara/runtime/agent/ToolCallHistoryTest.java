@@ -94,6 +94,74 @@ class ToolCallHistoryTest {
         assertEquals(List.of(new ToolExchange("fetch", "{\"url\":\"x\"}", "")), calls, "no page, no secret");
     }
 
+    private static final io.ara.core.media.MediaRef CROP =
+            new io.ara.core.media.MediaRef("3f9a1c2e7b4d5a6c8e0f1b2d3c4a5b6c", "image/png", "crop-1.png", 12, null);
+    private static final io.ara.core.media.MediaRef PAGE =
+            new io.ara.core.media.MediaRef("aa11bb22cc33dd44ee55ff6677889900", "image/png", "page-2.png", 20, null);
+
+    private static ExecutionStep observedWithMedia(String toolId, String text, io.ara.core.media.MediaRef... media) {
+        return ExecutionStep.observation(ToolResult.success(toolId, text, List.of(media)), 1);
+    }
+
+    @Test
+    void theMediaACallReturnedAreKeptWithItsResult() {
+        List<ToolExchange> calls = ToolCallHistory.record(List.of(
+                ExecutionStep.toolCall("crop_region", "{}", 1),
+                observedWithMedia("crop_region", "Crop saved.", CROP)),
+                registry(tool("crop_region", ToolHistoryPolicy.CALL_AND_RESULT)));
+
+        assertEquals(List.of(CROP), calls.get(0).media());
+        assertEquals("Crop saved.\nAttached: crop-1.png (id 3f9a1c2e7b4d)", calls.get(0).result(),
+                "the text names the media, so a later turn that is not shown them still knows they exist");
+    }
+
+    @Test
+    void eachOfTwoParallelCallsKeepsItsOwnMedia() {
+        List<ToolExchange> calls = ToolCallHistory.record(List.of(
+                ExecutionStep.toolCall("crop_region", "{\"n\":1}", 1),
+                ExecutionStep.toolCall("render_page", "{\"n\":2}", 1),
+                observedWithMedia("render_page", "Rendered.", PAGE),
+                observedWithMedia("crop_region", "Crop saved.", CROP)),
+                registry(tool("crop_region", ToolHistoryPolicy.CALL_AND_RESULT),
+                        tool("render_page", ToolHistoryPolicy.CALL_AND_RESULT)));
+
+        assertEquals(List.of(CROP), calls.get(0).media());
+        assertEquals(List.of(PAGE), calls.get(1).media());
+    }
+
+    @Test
+    void aToolThatKeepsOnlyItsCallKeepsNoMediaEither() {
+        // The media are part of the result: a tool that chose to leave its result out of the history
+        // leaves them out with it.
+        List<ToolExchange> calls = ToolCallHistory.record(List.of(
+                ExecutionStep.toolCall("crop_region", "{}", 1),
+                observedWithMedia("crop_region", "Crop saved.", CROP)),
+                registry(tool("crop_region", ToolHistoryPolicy.CALL_ONLY)));
+
+        assertEquals(1, calls.size());
+        assertEquals("", calls.get(0).result());
+        assertEquals(List.of(), calls.get(0).media());
+    }
+
+    @Test
+    void aToolThatLeavesItsCallOutLeavesTheWholeExchangeOut() {
+        List<ToolExchange> calls = ToolCallHistory.record(List.of(
+                ExecutionStep.toolCall("crop_region", "{}", 1),
+                observedWithMedia("crop_region", "Crop saved.", CROP)),
+                registry(tool("crop_region", ToolHistoryPolicy.NONE)));
+
+        assertEquals(List.of(), calls);
+    }
+
+    @Test
+    void aCallWithoutMediaHasNone() {
+        List<ToolExchange> calls = ToolCallHistory.record(List.of(
+                ExecutionStep.toolCall("lights", "{}", 1), observed("lights", "switched off")),
+                registry(tool("lights", ToolHistoryPolicy.CALL_AND_RESULT)));
+
+        assertEquals(List.of(), calls.get(0).media());
+    }
+
     @Test
     void aCallThatNeverGotAResultKeepsTheCall() {
         List<ToolExchange> calls = ToolCallHistory.record(List.of(ExecutionStep.toolCall("lights", "{}", 1)),
@@ -106,9 +174,12 @@ class ToolCallHistoryTest {
     private static final class Written implements MemoryManager {
         final List<String> entries = new ArrayList<>();
 
-        @Override public void appendToWorkingMemory(String role, String content) { entries.add(role + "|" + content); }
-        @Override public void appendToWorkingMemory(String role, String content, ToolCallMetadata metadata) {
-            entries.add(role + "|" + content + "|" + metadata.callId() + "|" + metadata.toolName());
+        @Override public void appendToWorkingMemory(io.ara.core.memory.MemoryEntry entry) {
+            if (entry.metadata() instanceof ToolCallMetadata metadata) {
+                entries.add(entry.role() + "|" + entry.content() + "|" + metadata.callId() + "|" + metadata.toolName());
+            } else {
+                entries.add(entry.role() + "|" + entry.content());
+            }
         }
         @Override public List<io.ara.core.memory.MemoryEntry> workingMemory() { return List.of(); }
         @Override public void clearWorkingMemory() { }

@@ -405,8 +405,8 @@ class ReflexionStrategyTest {
         private final List<MemoryEntry> wm = new ArrayList<>();
 
         @Override
-        public void appendToWorkingMemory(String role, String content) {
-            wm.add(MemoryEntry.of(role, content));
+        public void appendToWorkingMemory(MemoryEntry entry) {
+            wm.add(entry);
         }
 
         @Override

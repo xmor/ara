@@ -62,6 +62,14 @@ public record MemoryEntry(
         return new MemoryEntry(role, content, Instant.now(), metadata, List.of());
     }
 
+    /**
+     * Creates a memory entry carrying both metadata and media: the combination a tool result with an
+     * image needs, and the one the narrower factories could not express.
+     */
+    public static MemoryEntry of(String role, String content, EntryMetadata metadata, List<MediaRef> media) {
+        return new MemoryEntry(role, content, Instant.now(), metadata, media);
+    }
+
     /** Creates a memory entry carrying media references and no metadata. */
     public static MemoryEntry of(String role, String content, List<MediaRef> media) {
         return new MemoryEntry(role, content, Instant.now(), null, media);

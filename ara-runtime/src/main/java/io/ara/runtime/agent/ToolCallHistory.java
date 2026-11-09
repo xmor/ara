@@ -7,6 +7,7 @@ import io.ara.core.agent.ConversationTurn;
 import io.ara.core.agent.ExecutionStep;
 import io.ara.core.agent.StepType;
 import io.ara.core.agent.ToolExchange;
+import io.ara.core.media.MediaRef;
 import io.ara.core.memory.MemoryManager;
 import io.ara.core.memory.ToolCallMetadata;
 import io.ara.core.tool.AraTool;
@@ -66,19 +67,26 @@ final class ToolCallHistory {
      * The tool calls of a run, in the order they were made, each with its result. A call whose tool the agent's registry
      * does not know is left out: that is a strategy's own pseudo-call (a plan put up for approval), not a tool, and a
      * tool removed since has no policy to ask. The tool's {@link AraTool#historyPolicy()} decides what remains.
+     *
+     * <p>The media a call returned follow its result: kept with a result that is kept, dropped with one that is
+     * not. They are kept as references only, to say what the session has seen; replaying a turn never sends them
+     * again (see {@link #replay}).
      */
     static List<ToolExchange> record(List<ExecutionStep> steps, ToolRegistry tools) {
         List<ExecutionStep> calls = new ArrayList<>();
         List<String> results = new ArrayList<>();          // parallel to calls; null until the call is observed
+        List<List<MediaRef>> returned = new ArrayList<>(); // parallel to calls; what the observed call returned
         for (ExecutionStep step : steps) {
             if (step.type() == StepType.TOOL_CALL) {
                 calls.add(step);
                 results.add(null);
+                returned.add(List.of());
             }
             else if (step.type() == StepType.OBSERVATION) {
                 int answered = firstUnanswered(calls, results, step.toolId());
                 if (answered >= 0) {
                     results.set(answered, Objects.requireNonNullElse(step.content(), ""));
+                    returned.set(answered, step.media());
                 }
             }
         }
@@ -91,7 +99,8 @@ final class ToolCallHistory {
                 continue;
             }
             String result = policy == ToolHistoryPolicy.CALL_ONLY ? "" : Objects.requireNonNullElse(results.get(i), "");
-            exchanges.add(new ToolExchange(call.toolId(), call.arguments(), result));
+            List<MediaRef> media = policy == ToolHistoryPolicy.CALL_ONLY ? List.of() : returned.get(i);
+            exchanges.add(new ToolExchange(call.toolId(), call.arguments(), result, media));
         }
         return exchanges;
     }

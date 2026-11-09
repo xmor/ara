@@ -137,6 +137,7 @@ final class PlanStepExecutor {
 
             List<LlmMessage> messages = new ArrayList<>(stepPrefix);
             messages.addAll(stepLocalHistory);
+            messages = ToolMediaWindow.apply(messages);
 
             LlmCompletion completion;
             try {
@@ -255,7 +256,7 @@ final class PlanStepExecutor {
             case CloseStep.Parsed.Accepted accepted -> "Step closed (" + accepted.closing().status() + ").";
         };
         tally.record(ExecutionStep.observation(observation, tally.iterations));
-        appendExchange(stepLocalHistory, closing, text, turnReasoning, observation);
+        appendExchange(stepLocalHistory, closing, text, turnReasoning, Observation.ofText(observation));
 
         return switch (parsed) {
             case CloseStep.Parsed.Refused refused -> null;
@@ -315,9 +316,7 @@ final class PlanStepExecutor {
                 () -> run.tools().execute(tcr.toolId(), tcr.argumentJson(), dispatchTask),
                 run.deadline(), run.config().executionTimeout());
 
-        String observation = result.success()
-                ? result.output()
-                : "Tool [%s] failed — %s".formatted(tcr.toolId(), result.error());
+        Observation observation = Observation.of(tcr.toolId(), result);
         tally.record(ExecutionStep.observation(result, tally.iterations));
         appendExchange(stepLocalHistory, tcr, completionText, reasoning, observation);
     }
@@ -334,7 +333,7 @@ final class PlanStepExecutor {
      */
     private static void appendExchange(
             List<LlmMessage> stepLocalHistory, ToolCallParser.ToolCallRequest tcr,
-            String completionText, String reasoning, String observation) {
+            String completionText, String reasoning, Observation observation) {
         String callId = tcr.toolCallId();
         if (callId != null && !callId.isBlank()) {
             // Native reconstruction — mirrors ReactStrategy's dispatch: pairs with
@@ -343,10 +342,10 @@ final class PlanStepExecutor {
             // ToolExecutionResultMessage instead of collapsing the exchange into plain
             // text turns that a native provider never asked for.
             stepLocalHistory.add(LlmMessage.assistantToolCall(callId, tcr.toolId(), tcr.argumentJson(), reasoning));
-            stepLocalHistory.add(LlmMessage.tool(callId, tcr.toolId(), observation));
+            stepLocalHistory.add(LlmMessage.tool(callId, tcr.toolId(), observation.text(), observation.media()));
         } else {
             stepLocalHistory.add(new LlmMessage("assistant", completionText));
-            stepLocalHistory.add(new LlmMessage("user", "Observation: " + observation));
+            stepLocalHistory.add(new LlmMessage("user", observation.asTextProtocolTurn(), null, null, observation.media()));
         }
     }
 

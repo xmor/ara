@@ -5,6 +5,7 @@ import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmMessage;
+import io.ara.core.llm.ToolMediaPlacement;
 import io.ara.core.media.MediaStore;
 import io.ara.core.telemetry.AraTelemetry;
 import io.ara.runtime.interceptor.AgentInterceptorChain;
@@ -45,6 +46,7 @@ class DelegatingLlmClientTest {
         @Override public String lastUsedProviderId()       { return "capable-last-used"; }
         @Override public boolean supportsNativeTools()     { return true; }
         @Override public Set<String> supportedMediaTypes() { return CAPABLE_MEDIA; }
+        @Override public ToolMediaPlacement toolMediaPlacement() { return ToolMediaPlacement.INLINE_IN_TOOL_RESULT; }
     }
 
     private static Stream<Object[]> decorators() {
@@ -72,6 +74,15 @@ class DelegatingLlmClientTest {
                 name + " must report the delegate's media types, not the empty leaf default");
     }
 
+    @ParameterizedTest(name = "{0} forwards toolMediaPlacement")
+    @MethodSource("decorators")
+    void forwards_toolMediaPlacement(String name, Function<LlmClient, LlmClient> wrap) {
+        // The leaf default is FOLLOWING_USER_MESSAGE, so a decorator that did not forward
+        // would turn an inline-capable client into the slower, more verbose form silently.
+        assertEquals(ToolMediaPlacement.INLINE_IN_TOOL_RESULT, wrap.apply(new CapableClient()).toolMediaPlacement(),
+                name + " must report the delegate's placement, not the leaf default");
+    }
+
     @ParameterizedTest(name = "{0} forwards providerId and lastUsedProviderId")
     @MethodSource("decorators")
     void forwards_provider_identity(String name, Function<LlmClient, LlmClient> wrap) {
@@ -93,7 +104,8 @@ class DelegatingLlmClientTest {
         // method added to LlmClient but not overridden here, leaving every decorator on the
         // leaf default again. Compares declared methods rather than a hand-kept count.
         Set<String> capabilityMethods = Set.of(
-                "providerId", "lastUsedProviderId", "supportsNativeTools", "supportedMediaTypes");
+                "providerId", "lastUsedProviderId", "supportsNativeTools", "supportedMediaTypes",
+                "toolMediaPlacement");
         Set<String> forwarded = Stream.of(DelegatingLlmClient.class.getDeclaredMethods())
                 .map(java.lang.reflect.Method::getName)
                 .filter(capabilityMethods::contains)

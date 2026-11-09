@@ -3,6 +3,7 @@ package io.ara.core.agent;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Flow state of the current request, shared by reference by every agent involved in a
@@ -90,6 +91,20 @@ public record RunContext(
     public static final String EXECUTION_CONTEXT_KEY = "io.ara.auth.executionContext";
 
     /**
+     * {@link #opaque()} key under which a tool finds the {@link io.ara.core.media.MediaAccess} of the
+     * session that runs it: the media that session has already seen, which the tool may read, and a
+     * place to store what it produces. Absent when the runtime has no {@code MediaStore}. Read it with
+     * {@link #mediaAccess()}.
+     *
+     * <p>Unlike the scope and execution-context keys it is <em>not</em> inherited by a delegated task:
+     * each agent that runs replaces it with the view of its own session. What a session may read is a
+     * property of that session, and a sub-agent that inherited its caller's view could read media it
+     * was never given. The opaque channel is where such an object belongs, since it must never reach
+     * a prompt; the replacement happens where the runtime binds the task to its session.
+     */
+    public static final String MEDIA_ACCESS_KEY = "io.ara.media.access";
+
+    /**
      * {@link #opaque()} key under which a delegated task finds the run that delegated it (a
      * {@link DelegatedBy}): the delegating agent and its task. {@code AgentDelegationTool}
      * sets it on every hop, <em>overwriting</em> what the caller inherited, so it always names
@@ -150,6 +165,11 @@ public record RunContext(
     /** Returns the prompt variable stored under {@code key}, or {@code fallback} if absent. */
     public String promptVar(String key, String fallback) {
         return promptVars.getOrDefault(key, fallback);
+    }
+
+    /** The media this run's session may read and write, or empty when the runtime has no media store. */
+    public Optional<io.ara.core.media.MediaAccess> mediaAccess() {
+        return Optional.ofNullable(opaque(MEDIA_ACCESS_KEY, io.ara.core.media.MediaAccess.class));
     }
 
     /** Returns the opaque value stored under {@code key}, cast to {@code type}; {@code null} if absent. */

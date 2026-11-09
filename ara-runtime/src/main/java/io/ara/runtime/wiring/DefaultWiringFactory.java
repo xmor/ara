@@ -249,7 +249,7 @@ public final class DefaultWiringFactory implements WiringFactory {
                     ? baseRegistry
                     : new CompositeToolRegistry(mcpTools, baseRegistry);
 
-            return new AgentWiring(config, llm, toolRegistry, List.copyOf(acquired), artifactSink);
+            return new AgentWiring(config, llm, toolRegistry, List.copyOf(acquired), artifactSink, mediaStore);
         } catch (RuntimeException e) {
             for (Lease<?> lease : acquired) {
                 try {

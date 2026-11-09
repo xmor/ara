@@ -2,6 +2,7 @@ package io.ara.runtime.agent;
 
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.ToolExchange;
+import io.ara.core.agent.ExecutionStep;
 import io.ara.core.agent.AgentExecutionContext;
 import io.ara.core.agent.AgentInterceptor;
 import io.ara.core.agent.AgentResponse;
@@ -23,6 +24,8 @@ import io.ara.core.agent.UserId;
 import io.ara.core.common.AgentId;
 import io.ara.core.common.Money;
 import io.ara.core.media.MediaRef;
+import io.ara.core.media.MediaAccess;
+import io.ara.core.media.MediaStore;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.hitl.ApprovalRequest;
@@ -34,6 +37,7 @@ import io.ara.core.telemetry.AraTelemetry;
 import io.ara.core.telemetry.Span;
 import io.ara.core.telemetry.SpanStatus;
 import io.ara.core.tool.ToolRegistry;
+import io.ara.runtime.media.SessionMediaAccess;
 import io.ara.runtime.interceptor.AgentInterceptorChain;
 import io.ara.runtime.interceptor.InterceptingLlmClient;
 import io.ara.runtime.interceptor.InterceptingToolRegistry;
@@ -50,6 +54,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -437,6 +442,57 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
                 .withExecutionContext(io.ara.core.auth.ExecutionContext.ofAgent(agentId().value(), ownScopes));
     }
 
+    /**
+     * Binds the media this session may read and write onto the task, for the tools of this run (see
+     * {@code MediaAccess}).
+     *
+     * <h2>Why this one is not like the three seeding decisions above</h2>
+     * <ul>
+     *   <li><b>It overwrites.</b> The others attach a channel only when the task does not carry it, because an
+     *       earlier layer's value is the one to keep. This one is the opposite: what a session may read is a
+     *       property of that session, and a sub-agent that inherited its caller's view could read media it was
+     *       never given. The view is replaced at every agent, and when this runtime has no store an inherited
+     *       one is removed.</li>
+     *   <li><b>It runs inside the session lock.</b> The visible set is built from the session's history, and a
+     *       task queued behind another of the same session (the ENQUEUE policy) must see the turn that one
+     *       recorded. Built before the lock, it would miss the media the task ahead had just produced.</li>
+     * </ul>
+     *
+     * <p>Side effect: none beyond the returned task. The set is a snapshot taken here; what the run stores
+     * afterwards is added to the same instance.
+     */
+    private AgentTask withMediaAccess(AgentTask task, AgentSession session) {
+        RunContext context = task.runContext();
+        MediaStore store = session.wiring().mediaStore();
+        if (store == MediaStore.noop()) {
+            RunContext without = context.withOpaque(RunContext.MEDIA_ACCESS_KEY, null);
+            return without == context ? task : task.withRunContext(without);
+        }
+        MediaAccess access = new SessionMediaAccess(store, mediaSeenBy(task, session));
+        return task.withRunContext(context.withOpaque(RunContext.MEDIA_ACCESS_KEY, access));
+    }
+
+    /**
+     * Every media this session has already had in front of it: the attachments of this task, those of every
+     * recorded turn, the media earlier tool calls returned, and, for a run resumed from a checkpoint, the media
+     * in the memory the checkpoint saved (this run's own, before it was suspended).
+     */
+    private static List<MediaRef> mediaSeenBy(AgentTask task, AgentSession session) {
+        List<MediaRef> seen = new ArrayList<>(task.media());
+        for (ConversationTurn turn : session.conversationHistory().allTurns()) {
+            seen.addAll(turn.media());
+            for (ToolExchange exchange : turn.toolCalls()) {
+                seen.addAll(exchange.media());
+            }
+        }
+        task.resumeCheckpoint().ifPresent(checkpoint -> {
+            if (checkpoint.workingMemory() != null) {
+                checkpoint.workingMemory().forEach(message -> seen.addAll(message.media()));
+            }
+        });
+        return seen;
+    }
+
     private AgentResponse executeUnderSessionLock(AgentTask task, AgentSession session,
                                                     AgentConfig sessionConfig, String effectiveSystemPrompt) {
         // Per-session concurrency policy (ADR-016). Different sessions never contend
@@ -465,7 +521,7 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
             }
             session.setRunningThread(Thread.currentThread());
             try {
-                return executeWithTelemetry(task, session, effectiveSystemPrompt);
+                return executeWithTelemetry(withMediaAccess(task, session), session, effectiveSystemPrompt);
             } finally {
                 session.setRunningThread(null);
                 session.clearCancel();
@@ -611,9 +667,7 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         }
         // Record the turn before resetting working memory
         if (config.maxConversationTurns() > 0) {
-            List<ToolExchange> toolCalls = config.replayToolCalls()
-                    ? ToolCallHistory.record(result.steps(), dispatched.tools())
-                    : List.of();
+            List<ToolExchange> toolCalls = toolCallsToKeep(config, result.steps(), dispatched.tools());
             session.conversationHistory().addTurn(task.input(), result.output(), task.media(), toolCalls);
         }
         return handleSuccess(task, session, result, elapsed, dispatched.llm());
@@ -702,17 +756,29 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
      */
     private void restoreWorkingMemory(MemoryManager memoryManager, RunCheckpoint checkpoint) {
         memoryManager.clearWorkingMemory();
+        // One conversion, the inverse of the one the checkpoint was written with: a field the
+        // checkpoint carries is a field the restored entry carries. This used to rebuild the
+        // entry by hand in three branches and lost the media of every tool-call entry.
         for (LlmMessage message : checkpoint.workingMemory()) {
-            boolean isToolCallEntry = "tool".equals(message.role()) || "assistant_tool_call".equals(message.role());
-            if (isToolCallEntry && message.toolCallId() != null && message.toolName() != null) {
-                memoryManager.appendToWorkingMemory(message.role(), message.content(),
-                        new ToolCallMetadata(message.toolCallId(), message.toolName()));
-            } else if (message.hasMedia()) {
-                memoryManager.appendToWorkingMemory(message.role(), message.content(), message.media());
-            } else {
-                memoryManager.appendToWorkingMemory(message.role(), message.content());
-            }
+            memoryManager.appendToWorkingMemory(message.toMemoryEntry());
         }
+    }
+
+    /**
+     * The tool calls this turn leaves in the session history.
+     *
+     * <p>An agent that replays tool calls keeps all of them. One that does not still keeps the calls that
+     * returned media, and only those: the history is also what says which media the session has seen, a tool
+     * may read nothing else, and an image produced on this turn must still be reachable on the next whether or
+     * not the agent replays calls. Keeping the exchange does not replay it: {@code seedWorkingMemory} replays
+     * only for an agent that asks, so nothing the agent did not ask for reaches the model.
+     */
+    private static List<ToolExchange> toolCallsToKeep(AgentConfig config, List<ExecutionStep> steps, ToolRegistry tools) {
+        List<ToolExchange> recorded = ToolCallHistory.record(steps, tools);
+        if (config.replayToolCalls()) {
+            return recorded;
+        }
+        return recorded.stream().filter(exchange -> !exchange.media().isEmpty()).toList();
     }
 
     /**
@@ -904,6 +970,10 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         // Only a completed task has artifacts, and only the final answer is split: a failure keeps its
         // partial text and no references, since nothing was finished enough to be handed on.
         List<MediaRef> artifacts = session.wiring().artifactSink().emit(answered.content());
+        // Then the stored media the answer names by id (ADR D6), resolved through the same view a tool gets, so
+        // only what this session has seen can come back. Without a store there is no view and nothing changes.
+        artifacts = io.ara.runtime.media.CitedMedia.appendCited(
+                artifacts, answered.content(), task.runContext().mediaAccess().orElse(null));
         AgentResponse response = artifacts.isEmpty() ? answered : answered.withArtifacts(artifacts);
         // ADR-0086: called before clearWorkingMemory() so an implementation that reacts to
         // a finished turn (e.g. consolidation) still sees this turn's full window.

@@ -182,6 +182,9 @@ and the crew's token/cost summary. Pass `live` to run the same crew against a re
   profile, not an afterthought.
 - **Multimodal input** — attach a PDF or an image and the model reads it natively; a
   provider that can't handle the type fails loudly *before* the request goes out.
+- **Tools that return images** — a tool can hand the model an image (a crop, a rendered page)
+  and the model looks at it; the one it cites in its answer comes back to the caller as an
+  artifact. See [Media returned by tools](docs/CONTRACTS.md#media-returned-by-tools).
 - **A full execution trace, always** — `AgentResponse.steps()` records the reasoning and
   tool trace on every run, including the partial trace when a run fails.
 - **LLM failover and circuit breaking** — an ordered model chain with a passive breaker
@@ -356,6 +359,7 @@ Everything below lives in `ara-examples` and runs with `main()`.
 | `rag/RagAgentExample` | stub | `rag+react` over an `InMemoryDocumentStore`, plus delegation |
 | `failover/FailoverExample` | stub | Failover and circuit breaking across LLM and embedding endpoints |
 | `multimodal/MultimodalInputExample` | **live** | A PDF to Mistral and an image to Ollama, one provider-agnostic method |
+| `multimodal/ToolReturnsImageExample` | stub / **live** | A `crop_region` tool returns the crop of a scanned document; the model looks at it, cites it, and it comes back in `AgentResponse.artifacts()` — the example checks its own claims |
 | `spec/AgentFromFileExample` | stub | An agent defined in a JSON file: load it, check the names it refers to, run it, write it back |
 | `spec/ImportAgentFromJsonExample` | stub | A fully described agent (fallback model, prices, spend cap, strategy, tools, memory) imported from a JSON file on the classpath, then run |
 | `events/RunEventsExample` | stub | A listener on the task receives every step as it happens, including a delegated agent's, printed as a tree |

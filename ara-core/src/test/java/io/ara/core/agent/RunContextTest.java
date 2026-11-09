@@ -115,4 +115,22 @@ class RunContextTest {
         RunContext ctx = RunContext.empty().withUserMemory(memory).withState(RunState.inMemory());
         assertSame(memory, ctx.userMemory());
     }
+
+    @Test
+    void mediaAccessIsEmptyWhenTheRuntimeOfferedNone() {
+        assertTrue(RunContext.empty().mediaAccess().isEmpty());
+    }
+
+    @Test
+    void mediaAccessIsWhatWasPlacedUnderTheMediaAccessKey() {
+        io.ara.core.media.MediaAccess access = new io.ara.core.media.MediaAccess() {
+            @Override public java.util.Optional<io.ara.core.media.MediaRef> resolve(String idOrPrefix) { return java.util.Optional.empty(); }
+            @Override public byte[] read(io.ara.core.media.MediaRef reference) { return new byte[0]; }
+            @Override public io.ara.core.media.MediaRef put(String name, String mimeType, byte[] bytes) { throw new UnsupportedOperationException(); }
+        };
+
+        RunContext context = RunContext.empty().withOpaque(RunContext.MEDIA_ACCESS_KEY, access);
+
+        assertSame(access, context.mediaAccess().orElseThrow());
+    }
 }

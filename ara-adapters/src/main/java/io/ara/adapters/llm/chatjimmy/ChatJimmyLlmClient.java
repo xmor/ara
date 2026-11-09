@@ -326,6 +326,12 @@ public class ChatJimmyLlmClient implements LlmClient {
 
     private void checkNoMedia(List<LlmMessage> messages) {
         for (LlmMessage m : messages) {
+            // A tool's media is not an attachment of the user: its text already lists it
+            // ("Attached: ..."), and this client has no way to send it, so it is left out
+            // rather than failing a run whose tool happened to return an image.
+            if ("tool".equals(m.role())) {
+                continue;
+            }
             for (var ref : m.media()) {
                 throw LlmException.unsupportedMediaType(providerId(), ref.mimeType(), ref.name(), supportedMediaTypes());
             }

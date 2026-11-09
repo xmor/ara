@@ -5,6 +5,7 @@ import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmException;
 import io.ara.core.llm.LlmMessage;
+import io.ara.core.llm.ToolMediaPlacement;
 import io.ara.core.telemetry.AraTelemetry;
 import io.ara.core.telemetry.Span;
 import io.ara.core.telemetry.SpanStatus;
@@ -296,6 +297,12 @@ public final class CircuitBreakerLlmClient implements LlmClient {
     @Override
     public Set<String> supportedMediaTypes() {
         return delegate.supportedMediaTypes();
+    }
+
+    @Override
+    public ToolMediaPlacement toolMediaPlacement() {
+        // Forwarded for the same reason as supportsNativeTools above.
+        return delegate.toolMediaPlacement();
     }
 
     /**

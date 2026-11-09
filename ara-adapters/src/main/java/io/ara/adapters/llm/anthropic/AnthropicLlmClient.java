@@ -185,6 +185,17 @@ public class AnthropicLlmClient extends AbstractLangChain4jLlmClient {
         return supportedMediaTypes;
     }
 
+    /**
+     * Anthropic documents images and documents inside {@code tool_result}, and the langchain4j
+     * mapper builds them there — the one adapter for which the inline form is declared. The
+     * OpenAI-format adapters keep the default, because there the same content is accepted by
+     * the endpoint and silently never reaches the model.
+     */
+    @Override
+    public ToolMediaPlacement toolMediaPlacement() {
+        return ToolMediaPlacement.INLINE_IN_TOOL_RESULT;
+    }
+
     @Override
     protected ChatResponse chat(ChatRequest request) {
         return chatModel.chat(request);

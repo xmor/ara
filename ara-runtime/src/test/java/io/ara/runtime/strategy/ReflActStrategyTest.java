@@ -15,7 +15,6 @@ import io.ara.core.llm.LlmRouter;
 import io.ara.core.llm.ToolCallEntry;
 import io.ara.core.memory.MemoryEntry;
 import io.ara.core.memory.MemoryManager;
-import io.ara.core.memory.ToolCallMetadata;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
@@ -45,10 +44,7 @@ class ReflActStrategyTest {
     private static final class NoResetMemoryManager implements MemoryManager {
         private final InMemoryMemoryManager delegate = new InMemoryMemoryManager();
 
-        @Override public void appendToWorkingMemory(String role, String content) { delegate.appendToWorkingMemory(role, content); }
-        @Override public void appendToWorkingMemory(String role, String content, ToolCallMetadata m) {
-            delegate.appendToWorkingMemory(role, content, m);
-        }
+        @Override public void appendToWorkingMemory(MemoryEntry entry) { delegate.appendToWorkingMemory(entry); }
         @Override public List<MemoryEntry> workingMemory() { return delegate.workingMemory(); }
         @Override public void clearWorkingMemory() {
             throw new AssertionError("ReflAct must never reset working memory mid-episode");

@@ -82,15 +82,22 @@ per-call overrides without touching the data contract (`AgentContract`) — it d
   trace in a log nobody reads in production; the non-retryable classification is also
   what stops `FailoverLlmClient` from letting a text-only fallback answer instead.
 
+- `LlmClient.toolMediaPlacement()` declares where the provider accepts the media a **tool**
+  returned: `FOLLOWING_USER_MESSAGE` (the default: tool results as text, then one user message with
+  the labelled images) or `INLINE_IN_TOOL_RESULT` (Anthropic). Declare the inline form only for a
+  provider that documents it: OpenAI-format endpoints answer 200 to an image in a tool message and
+  the model never sees it. A tool's media of a type `supportedMediaTypes()` lacks becomes a note in
+  the tool text, not an exception — unlike a user's attachment, which still fails.
+
 ### Capability methods and decorators
 
 Every capability default on `LlmClient` (`supportsNativeTools()`,
-`supportedMediaTypes()`) is the safe answer for a *leaf* client and a lie for a
+`supportedMediaTypes()`, `toolMediaPlacement()`) is the safe answer for a *leaf* client and a lie for a
 decorator. Single-wrap decorators must extend `io.ara.runtime.llm.DelegatingLlmClient`,
 which forwards all of them, rather than hand-copying the delegation — a decorator that
 forgets one silently masks the capability of what it wraps, with no exception and no log
 line. Composites over a list of clients (`Failover`, `RoundRobin`, `Routing`) report the
-**intersection** of their delegates', since they cannot promise what a candidate they
+**intersection** of their delegates' (for `toolMediaPlacement()`, inline only if every delegate is), since they cannot promise what a candidate they
 might pick lacks. Leaf stubs that wrap nothing are correct with the interface defaults.
 
 ### Architectural note: `resolvedTools` and `mediaResolver` on `LlmCallContext`

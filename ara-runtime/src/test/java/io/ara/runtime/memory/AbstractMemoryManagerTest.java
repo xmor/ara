@@ -1,9 +1,12 @@
 package io.ara.runtime.memory;
 
+import io.ara.core.media.MediaRef;
 import io.ara.core.memory.MemoryEntry;
+import io.ara.core.memory.ToolCallMetadata;
 import io.ara.runtime.stubs.InMemoryMemoryManager;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.Iterator;
 import java.util.List;
 
@@ -77,5 +80,46 @@ class AbstractMemoryManagerTest {
 
         assertThrows(UnsupportedOperationException.class,
                 () -> snapshot.add(MemoryEntry.of("user", "should not be allowed")));
+    }
+
+    private static final MediaRef CROP = new MediaRef("3f9a1c2e7b4d", "image/png", "crop-1.png", 12L, null);
+
+    /** The one case the per-field overloads could not express: tool-call metadata and media together. */
+    private static MemoryEntry toolResultWithMedia() {
+        return new MemoryEntry("tool", "Crop saved.", Instant.parse("2026-11-09T10:00:00Z"),
+                new ToolCallMetadata("call-1", "crop_region"), List.of(CROP));
+    }
+
+    @Test
+    void anEntryWithMetadataAndMedia_isStoredWhole() {
+        InMemoryMemoryManager manager = new InMemoryMemoryManager();
+
+        manager.appendToWorkingMemory(toolResultWithMedia());
+
+        assertEquals(List.of(toolResultWithMedia()), manager.workingMemory(),
+                "every field of the entry, timestamp included, reaches working memory");
+    }
+
+    @Test
+    void theSlidingWindow_storesAnEntryWithMetadataAndMediaWhole() {
+        SlidingWindowMemoryManager manager = new SlidingWindowMemoryManager(8_000, EvictionPolicy.DROP_OLDEST);
+
+        manager.appendToWorkingMemory(toolResultWithMedia());
+
+        assertEquals(List.of(toolResultWithMedia()), manager.workingMemory());
+    }
+
+    @Test
+    void theConvenienceOverloads_buildTheSameEntryAsTheBaseOperation() {
+        InMemoryMemoryManager manager = new InMemoryMemoryManager();
+
+        manager.appendToWorkingMemory("user", "plain");
+        manager.appendToWorkingMemory("tool", "result", new ToolCallMetadata("call-1", "crop_region"));
+        manager.appendToWorkingMemory("user", "with media", List.of(CROP));
+
+        List<MemoryEntry> entries = manager.workingMemory();
+        assertEquals(List.of("plain", "result", "with media"), entries.stream().map(MemoryEntry::content).toList());
+        assertEquals(new ToolCallMetadata("call-1", "crop_region"), entries.get(1).metadata());
+        assertEquals(List.of(CROP), entries.get(2).media());
     }
 }

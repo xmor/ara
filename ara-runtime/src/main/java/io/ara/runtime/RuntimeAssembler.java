@@ -366,6 +366,11 @@ final class RuntimeAssembler {
                             ? registry.viewFor(caller.scopes())
                             : null;
                 });
+        // view_media exists only where there is media to show: with the no-op store no run has a
+        // MediaAccess, so exposing the tool would offer the model something that always fails.
+        if (b.mediaStore != io.ara.core.media.MediaStore.noop()) {
+            base = new io.ara.runtime.media.MediaToolRegistry(base);
+        }
         ToolRegistry scoped = new ScopeFilteringToolRegistry(base);
         ToolRegistry withApproval = b.approvalGate != null
                 ? new ApprovalToolRegistry(scoped, b.approvalGate, agentCfg)
