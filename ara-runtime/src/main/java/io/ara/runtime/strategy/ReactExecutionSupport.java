@@ -71,6 +71,15 @@ final class ReactExecutionSupport {
      * Appended to the system prompt to instruct the LLM on ReAct output format.
      * Injected at the end of the system prompt section so it never overrides
      * agent-specific instructions.
+     *
+     * <p><b>It must not name a model's control tokens.</b> It used to say "NEVER output special
+     * tokens like {@code <|channel|>} or {@code <|constrain|>}". gpt-oss needs exactly those tokens
+     * to open its final answer (and {@code <|constrain|>} to answer in JSON): forbidden them, it
+     * produced output the server's parser rejects. Measured on LM Studio with gpt-oss-20b, a
+     * tool-less agent asked for a JSON answer: 0/5 replies with the line, 5/5 without; LM Studio
+     * reports the failure as HTTP 400 "does not match the expected peg-native format". Tokens that
+     * do leak into the text are already handled downstream ({@code ToolCallParser},
+     * {@code ReasoningSplitter}), so the line protected nothing. {@code ReactSuffixTest} keeps it out.
      */
     static final String REACT_SYSTEM_SUFFIX = """
 
@@ -78,7 +87,6 @@ final class ReactExecutionSupport {
     - To invoke a tool, output ONLY a JSON object on a single line: {"tool_id":"<id>","arguments":{...}}
     - For tools with no arguments use an empty object: {"tool_id":"get_current_time","arguments":{}}
     - When you have the final answer, output: Action: FINAL_ANSWER\\nAnswer: <your answer>
-    - NEVER output special tokens like <|channel|> or <|constrain|>. Only plain text and JSON.
     Never mix tool calls and final answers in the same response.""";
 
     /** Marks framework-generated turns sent with the {@code "user"} role, as {@code ReActLoop} does. */

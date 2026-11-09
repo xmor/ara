@@ -42,6 +42,31 @@ class ProviderErrorMapperTest {
     }
 
     @Test
+    void a_400_whose_body_declares_a_server_error_is_a_retryable_server_error() {
+        // The body LM Studio returns, verbatim, when gpt-oss's output breaks its parser.
+        String body = "{\"error\":\"Engine protocol predict stream returned an error: {\\\"code\\\":500,"
+                + "\\\"message\\\":\\\"The model produced output that does not match the expected peg-native "
+                + "format\\\",\\\"type\\\":\\\"server_error\\\"}\"}";
+
+        LlmException mapped = ProviderErrorMapper.fromTypedException(
+                PROVIDER, new InvalidRequestException(body, new HttpException(400, body)));
+
+        assertNotNull(mapped);
+        assertEquals(ErrorType.SERVER_ERROR, mapped.errorType());
+        assertTrue(mapped.isRetryable(), "the request was fine; a new generation can succeed");
+    }
+
+    @Test
+    void a_400_that_merely_mentions_server_errors_stays_an_invalid_request() {
+        LlmException mapped = ProviderErrorMapper.fromTypedException(
+                PROVIDER, new InvalidRequestException("{\"error\":{\"message\":\"bad server_error field\","
+                        + "\"type\":\"invalid_request_error\"}}"));
+
+        assertEquals(ErrorType.INVALID_REQUEST, mapped.errorType());
+        assertFalse(mapped.isRetryable());
+    }
+
+    @Test
     void the_typed_exception_is_found_through_the_cause_chain() {
         // The shape langchain4j actually produces: the typed exception wraps an HttpException,
         // and adapters catch whatever their HTTP layer wrapped it in.

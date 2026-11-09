@@ -86,7 +86,8 @@ public final class ReSpActStrategy implements ExecutionStrategy {
      * Appended to the system prompt to instruct the LLM on the ReSpAct output format.
      * Injected at the end of the system prompt section so it never overrides
      * agent-specific instructions — same placement rule as {@link
-     * ReactExecutionSupport#REACT_SYSTEM_SUFFIX}.
+     * ReactExecutionSupport#REACT_SYSTEM_SUFFIX}, and like it free of any model's control tokens
+     * (see there for why).
      */
     static final String RESPACT_SYSTEM_SUFFIX = """
 
@@ -96,7 +97,6 @@ public final class ReSpActStrategy implements ExecutionStrategy {
     - To say something to the user WITHOUT ending the task (ask a clarifying question, \
     give a status update, share a partial result), output: Action: SPEAK\\nMessage: <your message>
     - When the task is fully complete and needs no reply, output: Action: FINAL_ANSWER\\nAnswer: <your answer>
-    - NEVER output special tokens like <|channel|> or <|constrain|>. Only plain text and JSON.
     Never combine two of these actions in the same response.""";
 
     /** Marker preceding the answer text in a {@code Action: FINAL_ANSWER\nAnswer: <text>} response. */
