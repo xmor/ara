@@ -57,6 +57,10 @@ Your code ──▶ AraRuntime ──▶ Agent (strategy + contract + session)
 </dependency>
 ```
 
+The version shown above is the latest **published release**. The repository root POM may
+already carry the next `-SNAPSHOT` development version; snapshots are not published
+artifacts and should not be used as dependency versions.
+
 **2. Run an agent offline.** `ScriptedLlmClient` replays canned responses, so the first
 run needs no key, no network and no local model:
 
