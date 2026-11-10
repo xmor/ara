@@ -2,14 +2,20 @@ package io.ara.adapters.mcp;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.ara.core.agent.AgentTask;
+import io.ara.core.mcp.McpMedia;
 import io.ara.core.mcp.McpTool;
 import io.ara.core.mcp.McpToolResult;
+import io.ara.core.media.MediaAccess;
+import io.ara.core.media.MediaRef;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
@@ -77,8 +83,29 @@ public class McpAraTool implements AraTool {
         }
     }
 
+    /**
+     * Executes the tool without a run: the text of the result reaches the model, the media it
+     * returned do not, and the output says so. Prefer {@link #execute(String, AgentTask)}.
+     */
     @Override
     public ToolResult execute(String argumentJson) {
+        return execute(argumentJson, null);
+    }
+
+    /**
+     * Executes the tool and stores the media the server returned in the session of {@code task},
+     * through {@link io.ara.core.agent.RunContext#mediaAccess()}, so the model sees them and can
+     * cite them into the response like those of any native tool.
+     *
+     * <p>A media that cannot be stored — no {@code MediaStore} in the runtime, or a type
+     * {@link io.ara.core.media.MediaTypes} does not accept — is not dropped silently: the output
+     * gets a line naming it and the reason, so the model knows the tool produced more than it sees.
+     * Media returned next to an error are ignored, as a failed {@link ToolResult} carries none.
+     *
+     * @param task the task the tool runs for; {@code null} means "no run", as in {@link #execute(String)}
+     */
+    @Override
+    public ToolResult execute(String argumentJson, AgentTask task) {
         Map<String, Object> args;
         try {
             args = parseArgs(argumentJson);
@@ -98,7 +125,10 @@ public class McpAraTool implements AraTool {
             if (result.isError()) {
                 return ToolResult.failure(tool.name(), result.content());
             }
-            return ToolResult.success(tool.name(), result.content());
+            if (result.media().isEmpty()) {
+                return ToolResult.success(tool.name(), result.content());
+            }
+            return withMedia(result, task);
         } catch (InterruptedException e) {
             // Unlike join(), get() responds to Thread.interrupt() — cancel(true) also
             // interrupts the virtual thread the SDK call is running on, so a call parked
@@ -114,6 +144,37 @@ public class McpAraTool implements AraTool {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             return ToolResult.failure(tool.name(), "MCP call failed: " + cause.getMessage());
         }
+    }
+
+    private ToolResult withMedia(McpToolResult result, AgentTask task) {
+        MediaAccess access = task != null ? task.runContext().mediaAccess().orElse(null) : null;
+        List<MediaRef> stored = new ArrayList<>();
+        List<String> omitted = new ArrayList<>();
+        for (McpMedia media : result.media()) {
+            if (access == null) {
+                omitted.add(describe(media) + ": no media store is available in this run");
+                continue;
+            }
+            try {
+                stored.add(access.put(media.name(), media.mimeType(), media.data()));
+            } catch (IllegalArgumentException e) {
+                // MediaTypes refused the type: the reason names the accepted ones, which is
+                // what the model needs to understand why it cannot see this content.
+                log.info("MCP tool '{}' returned {} that cannot be stored: {}",
+                        tool.name(), describe(media), e.getMessage());
+                omitted.add(describe(media) + ": " + e.getMessage());
+            }
+        }
+        StringBuilder output = new StringBuilder(result.content());
+        for (String line : omitted) {
+            if (!output.isEmpty()) output.append('\n');
+            output.append("Not attached: ").append(line);
+        }
+        return ToolResult.success(tool.name(), output.toString(), stored);
+    }
+
+    private static String describe(McpMedia media) {
+        return "'" + media.name() + "' (" + media.mimeType() + ", " + media.data().length + " bytes)";
     }
 
     /**

@@ -126,11 +126,26 @@ public final class ProviderErrorMapper {
             // refusal to answer, not a malformed request, and reporting it as the latter would
             // send whoever reads the error looking for a bug in their own payload.
             case ContentFilteredException e  -> LlmException.contentFiltered(provider, msg);
+            // A 400 whose body says the server failed. LM Studio answers this way when the model's
+            // output breaks its parser ("does not match the expected peg-native format"): HTTP 400
+            // around {"code":500,...,"type":"server_error"}. The request was fine and a new attempt
+            // can succeed, since the generation is not deterministic; reading the status alone
+            // would make it a non-retryable INVALID_REQUEST.
+            case InvalidRequestException e when declaresServerError(msg)
+                                             -> LlmException.serverError(provider, msg, 500);
             case InvalidRequestException e   -> LlmException.invalidRequest(provider, msg);
             case NonRetriableException e     -> LlmException.invalidRequest(provider, msg);
             case RetriableException e        -> LlmException.connectionError(provider, msg, c);
             default -> null;
         };
+    }
+
+    /**
+     * Whether an error body declares a server-side failure, in the OpenAI error shape
+     * ({@code "type":"server_error"}), with or without the escaping of a nested JSON string.
+     */
+    static boolean declaresServerError(String msg) {
+        return msg != null && msg.replace("\\\"", "\"").contains("\"type\":\"server_error\"");
     }
 
     /** Appends the configured timeout to a message, or returns it unchanged when none is known. */
