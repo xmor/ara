@@ -102,6 +102,32 @@ class ReasoningWireTest {
     }
 
     @Test
+    void openAi_customParameters_goInTheBody_ofEveryRequest() throws Exception {
+        String base = serve(OPENAI_REPLY);
+        OpenAiLlmClient client = OpenAiLlmClient.builder().apiKey("k").baseUrl(base + "/v1").modelName("m")
+                .timeout(Duration.ofSeconds(10)).forceHttp1(true)
+                .customParameters(java.util.Map.of("chat_template_kwargs", java.util.Map.of("enable_thinking", false)))
+                .build();
+
+        ask(client, context().build());
+        assertTrue(wire().contains("\"chat_template_kwargs\":{\"enable_thinking\":false}"), body.get());
+
+        ask(client, context().reasoningEffort(ReasoningEffort.LOW).build());
+        assertTrue(wire().contains("\"chat_template_kwargs\":{\"enable_thinking\":false}"),
+                "still there when the agent also sets an effort: " + body.get());
+        assertTrue(wire().contains("\"reasoning_effort\":\"low\""), body.get());
+    }
+
+    @Test
+    void openAi_withoutCustomParameters_theBodyHasNoExtraField() throws Exception {
+        OpenAiLlmClient client = openAi(serve(OPENAI_REPLY));
+
+        ask(client, context().build());
+
+        assertFalse(wire().contains("chat_template_kwargs"), body.get());
+    }
+
+    @Test
     void openAi_sendsNone_asAnEffortOfItsOwn_notAsNoField() throws Exception {
         OpenAiLlmClient client = openAi(serve(OPENAI_REPLY));
 

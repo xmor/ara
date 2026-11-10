@@ -79,6 +79,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
     private final boolean logRequests;
     private final boolean logResponses;
     private final Map<String, String> customHeaders;
+    private final Map<String, Object> customParameters;
     private final boolean documentSupport;
     /**
      * Whether this endpoint accepts a native {@code response_format: json_schema}.
@@ -218,6 +219,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         this.logRequests = s.logRequests();
         this.logResponses = s.logResponses();
         this.customHeaders = builder.customHeaders;
+        this.customParameters = builder.customParameters;
         // Unset by the caller ⇒ derive it: hosted OpenAI (no custom base URL) accepts `file`
         // parts, an arbitrary OpenAI-compatible endpoint usually does not. See
         // supportedMediaTypes().
@@ -250,6 +252,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                 .strictJsonSchema(builder.strictJsonSchema)   // null ⇒ langchain4j's default (strict: false)
                 .timeout(s.timeout())
                 .customHeaders(customHeaders)
+                .customParameters(customParameters)
                 .logRequests(s.logRequests())
                 .logResponses(s.logResponses())
                 .maxRetries(0))
@@ -486,6 +489,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                                     .strictJsonSchema(strictJsonSchema)
                                     .timeout(timeout)
                                     .customHeaders(customHeaders)
+                                    .customParameters(customParameters)
                                     .logRequests(logRequests)
                                     .logResponses(logResponses);
 
@@ -550,6 +554,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         private Duration connectTimeout;
         private boolean sendReasoning = true;
         private Map<String, String> customHeaders = Map.of();
+        private Map<String, Object> customParameters = Map.of();
 
         /** Sets the model from the {@link Models} catalogue (preferred for hosted OpenAI). */
         public Builder model(Models model)        { this.modelName = model.id; return this; }
@@ -571,6 +576,22 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
          */
         public Builder customHeaders(Map<String, String> headers) {
             this.customHeaders = headers != null ? headers : Map.of();
+            return this;
+        }
+
+        /**
+         * Extra fields added to the JSON body of every request (chat and streaming) sent to the
+         * OpenAI-compatible endpoint, for what the server takes beyond the OpenAI API.
+         *
+         * <p>The case this exists for: a vLLM or LM Studio server serving a model that reasons by
+         * default (Qwen3) switches it off with {@code {"chat_template_kwargs": {"enable_thinking": false}}},
+         * which neither {@code reasoning_effort} nor a {@code /no_think} in the prompt does there.
+         * Values go to the wire as given (maps and lists become JSON objects and arrays); a field
+         * the server does not know is its own to reject or ignore. Set per client, so it is what a
+         * deployment decides about a model, not what an agent asks of it.
+         */
+        public Builder customParameters(Map<String, Object> parameters) {
+            this.customParameters = parameters != null ? parameters : Map.of();
             return this;
         }
 
