@@ -19,7 +19,7 @@
   <url>https://github.com/xmor/ara</url>
 
   <properties>
-    <mcp.sdk.version>2.0.1</mcp.sdk.version>
+    <mcp.sdk.version>2.1.0</mcp.sdk.version>
     <!-- OTel — optional; pull in only when telemetry is needed -->
     <opentelemetry.version>1.65.0</opentelemetry.version>
 

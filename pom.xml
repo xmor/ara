@@ -94,7 +94,7 @@
         <!--
         JSON Schema validation for JsonSchemaValidator (ara-runtime). Kept equal to the
         version the MCP SDK's mcp-json-jackson2 pulls into ara-adapters (2.0.4 for
-        mcp.sdk.version 2.0.1): two paths to the same artifact at different versions
+        mcp.sdk.version 2.1.0, as it was for 2.0.1): two paths to the same artifact at different versions
         would trip dependencyConvergence. Bump both together.
         -->
         <json-schema-validator.version>2.0.4</json-schema-validator.version>
