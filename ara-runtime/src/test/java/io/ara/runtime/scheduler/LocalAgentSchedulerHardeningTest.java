@@ -463,6 +463,11 @@ class LocalAgentSchedulerHardeningTest {
                 "exactly one schedule must remain registered under the id, however many callers raced");
 
         scheduler.cancel("race");
+        // cancel() stops future ticks but does not interrupt or await a run already dispatched
+        // to the agent executor, so one in-flight execution may still land just after cancel().
+        // That is not an orphaned job, so let it drain before taking the baseline; an orphan
+        // would keep firing every 50 ms and still be caught by the longer window below.
+        Thread.sleep(100);
         int countAtCancel = fireCount.get();
         Thread.sleep(400);   // several more intervals' worth of time
 
