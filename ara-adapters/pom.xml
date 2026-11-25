@@ -162,14 +162,6 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- UI -->
-    <dependency>
-      <groupId>com.github.almasb</groupId>
-      <artifactId>fxgl</artifactId>
-      <version>21.1</version>
-    </dependency>
-
-
   </dependencies>
 
   <build>
@@ -184,35 +176,6 @@
             </manifestEntries>
           </archive>
         </configuration>
-      </plugin>
-
-      <!--
-      Il pacchetto ui e' una demo (lo stesso giro di ara-examples): serve il toolkit
-      JavaFX a runtime e i test unitari offline non possono renderizzarlo. Escluderlo
-      dal conteggio JaCoCo tiene il floor significativo sul resto del modulo, esattamente
-      come ara-examples salta del tutto jacoco. Se la demo cresce fino a logic testabile,
-      togliere le righe qui sotto e testare quel codice. -->
-      <plugin>
-        <groupId>org.jacoco</groupId>
-        <artifactId>jacoco-maven-plugin</artifactId>
-        <executions>
-          <execution>
-            <id>report</id>
-            <configuration>
-              <excludes>
-                <exclude>io/ara/adapters/ui/**</exclude>
-              </excludes>
-            </configuration>
-          </execution>
-          <execution>
-            <id>check</id>
-            <configuration>
-              <excludes>
-                <exclude>io/ara/adapters/ui/**</exclude>
-              </excludes>
-            </configuration>
-          </execution>
-        </executions>
       </plugin>
     </plugins>
   </build>
