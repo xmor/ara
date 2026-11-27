@@ -19,8 +19,9 @@ import java.util.stream.Collectors;
  *
  * <p>Unlike the previous {@code DefaultLlmRouter}'s global {@code AtomicInteger} (shared
  * across every session on the agent), each instance of this class owns its own counter —
- * built once per {@link AgentWiring}, i.e. once per session, so distribution never leaks
- * across sessions (ADR-039 "Impatto sui collaboratori esistenti").
+ * built once per {@link AgentWiring}, i.e. once per session — the LLM is resolved per
+ * session, not per call, which is what makes the per-session counter safe — so
+ * distribution never leaks across sessions.
  */
 final class RoundRobinLlmClient implements LlmClient {
 
@@ -101,6 +102,15 @@ final class RoundRobinLlmClient implements LlmClient {
                 .map(LlmClient::supportedMediaTypes)
                 .reduce((a, b) -> a.stream().filter(b::contains).collect(Collectors.toUnmodifiableSet()))
                 .orElseGet(Set::of);
+    }
+
+    /** The adaptations every candidate has: like the media types, a pool promises only what any of them can do. */
+    @Override
+    public java.util.List<io.ara.core.media.MediaAdaptation> mediaAdaptations() {
+        return clients.stream()
+                .map(LlmClient::mediaAdaptations)
+                .reduce((a, b) -> a.stream().filter(b::contains).toList())
+                .orElseGet(java.util.List::of);
     }
 
     /**

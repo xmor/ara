@@ -40,6 +40,14 @@
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
     </dependency>
+    <!-- PDF pages as images for providers that read images and reject a PDF (PdfPages, PdfAsImagesLlmClient).
+         Optional: a user of the runtime who never wraps a client with it does not pull PDFBox in. -->
+    <dependency>
+      <groupId>org.apache.pdfbox</groupId>
+      <artifactId>pdfbox</artifactId>
+      <version>3.0.5</version>
+      <optional>true</optional>
+    </dependency>
     <!-- JsonSchemaValidator. The exclusion is repeated here, not only in the parent's
          dependencyManagement, so it is part of this module's own published pom. -->
     <dependency>

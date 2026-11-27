@@ -105,6 +105,17 @@ public final class RoutingLlmClient implements LlmClient {
         return shared;
     }
 
+    /** The adaptations the default and every route all have, like the media types: only what any client it might pick can do. */
+    @Override
+    public java.util.List<io.ara.core.media.MediaAdaptation> mediaAdaptations() {
+        java.util.List<io.ara.core.media.MediaAdaptation> shared = defaultClient.mediaAdaptations();
+        for (LlmClient routed : routes.values()) {
+            java.util.List<io.ara.core.media.MediaAdaptation> other = routed.mediaAdaptations();
+            shared = shared.stream().filter(other::contains).toList();
+        }
+        return shared;
+    }
+
     /** Inline only if the default and every route are; see {@code FailoverLlmClient}. */
     @Override
     public ToolMediaPlacement toolMediaPlacement() {

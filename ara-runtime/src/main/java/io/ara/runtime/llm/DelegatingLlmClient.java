@@ -87,6 +87,11 @@ public abstract class DelegatingLlmClient implements LlmClient {
     }
 
     @Override
+    public java.util.List<io.ara.core.media.MediaAdaptation> mediaAdaptations() {
+        return delegate.mediaAdaptations();
+    }
+
+    @Override
     public ToolMediaPlacement toolMediaPlacement() {
         return delegate.toolMediaPlacement();
     }

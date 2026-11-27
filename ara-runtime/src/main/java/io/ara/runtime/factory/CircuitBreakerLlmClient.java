@@ -300,6 +300,11 @@ public final class CircuitBreakerLlmClient implements LlmClient {
     }
 
     @Override
+    public java.util.List<io.ara.core.media.MediaAdaptation> mediaAdaptations() {
+        return delegate.mediaAdaptations();
+    }
+
+    @Override
     public ToolMediaPlacement toolMediaPlacement() {
         // Forwarded for the same reason as supportsNativeTools above.
         return delegate.toolMediaPlacement();

@@ -439,6 +439,15 @@ public final class FailoverLlmClient implements LlmClient {
                 .orElseGet(Set::of);
     }
 
+    /** The adaptations every candidate has: like the media types, a pool promises only what any of them can do. */
+    @Override
+    public java.util.List<io.ara.core.media.MediaAdaptation> mediaAdaptations() {
+        return clients.stream()
+                .map(LlmClient::mediaAdaptations)
+                .reduce((a, b) -> a.stream().filter(b::contains).toList())
+                .orElseGet(java.util.List::of);
+    }
+
     /**
      * {@code INLINE_IN_TOOL_RESULT} only when every candidate says so; otherwise the form every
      * provider accepts. The candidate is picked per call, so promising the inline form on the

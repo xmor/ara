@@ -12,11 +12,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>The runtime only ever speaks to this interface — concrete adapters live in
  * {@code ara-llm-providers} and are wired by {@code AgentFactory}.
  *
- * <h2>Migration from AgentConfig to LlmCallContext (ADR-017)</h2>
- * <p>The primary method is now {@link #complete(List, LlmCallContext)} which accepts
- * per-call parameters (output schema, temperature override, stop sequences, seed).
- * Implementations must override this method. The {@link #complete(List, AgentConfig)}
- * overload is deprecated and bridges automatically to the new primary method.
+ * <h2>Migration from AgentConfig to LlmCallContext</h2>
+ * <p>{@link AgentConfig} is static per-agent: immutable by design, serialized and loaded
+ * from the database — so it cannot carry the per-call parameters (output schema,
+ * temperature override, stop sequences, seed), which change call by call. Those live in
+ * their own immutable record, {@link LlmCallContext}, built from the agent's config at
+ * call time.
+ * <p>The primary method is now {@link #complete(List, LlmCallContext)}. Implementations
+ * must override this method; the {@link #complete(List, AgentConfig)} overload is
+ * deprecated and bridges automatically to the new primary method.
  */
 public interface LlmClient {
 
@@ -213,6 +217,21 @@ public interface LlmClient {
      */
     default java.util.Set<String> supportedMediaTypes() {
         return java.util.Set.of();
+    }
+
+    /**
+     * The conversions this client does by itself so that a media type its provider cannot take still reaches the model — for
+     * example a PDF turned into one image per page for a provider that reads images and rejects a PDF as a {@code file} part.
+     * The conversion is a declared capability, not a silent fallback: each adaptation is already counted in {@link
+     * #supportedMediaTypes()}, so a caller (and a person, in a UI) can see what the model will really be shown.
+     *
+     * <p>Defaults to none. Decorators must delegate (a decorator that drops it hides a conversion the wrapped client does); a
+     * composite reports the adaptations <em>every</em> candidate has, like it does for the media types.
+     *
+     * @return the adaptations; never {@code null}
+     */
+    default java.util.List<io.ara.core.media.MediaAdaptation> mediaAdaptations() {
+        return java.util.List.of();
     }
 
     /**
