@@ -5,6 +5,7 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.budget.RunBudget;
 import io.ara.core.budget.Spend;
+import io.ara.core.media.MediaRef;
 
 import java.time.Instant;
 import java.util.ArrayDeque;
@@ -24,19 +25,18 @@ import java.util.function.BinaryOperator;
 import java.util.function.Function;
 
 /**
- * The builder facade ADR-054 D7 places in {@code ara-runtime} package {@code workflow}: a
- * fluent way to declare a {@link WorkflowGraph} and its run governor without constructing
- * a {@link DataflowScheduler} by hand. This is the {@code .budget(RunBudget.of()...)}
- * entry point ADR-054 D6 writes against.
+ * The builder facade of the {@code workflow} package in {@code ara-runtime}: a fluent way
+ * to declare a {@link WorkflowGraph} and its run governor together, without constructing a
+ * {@link DataflowScheduler} by hand — the {@code .budget(RunBudget.of()...)} entry point.
  *
  * <p>It is deliberately <em>not</em> the {@code AgentPipeline.Builder → WorkflowGraph}
- * compiler (that is the larger ADR-052 D2 job, and lives in {@code AgentPipeline}): a node
- * here is either a plain function ({@link Builder#node}) or an <b>agent-shaped</b> node
- * ({@link Builder#agent}, ADR-052 D2), which runs a real {@code AraAgent} and captures its
- * {@code AgentResponse} so token/cost reach the journal. What this adds is one place for
- * the graph shape, the per-node {@link WorkflowNode#cost()}, the occurrence cap, and the
- * {@link RunBudget} to be declared together — and, per D7's FF-6, it adds no
- * {@code case}/{@code instanceof} on node type anywhere: it only assembles.
+ * compiler (that larger job lives in {@code AgentPipeline}): a node here is either a plain
+ * function ({@link Builder#node}) or an <b>agent-shaped</b> node ({@link Builder#agent}),
+ * which runs a real {@code AraAgent} and captures its {@code AgentResponse} so token/cost
+ * reach the journal. What this adds is one place for the graph shape, the per-node {@link
+ * WorkflowNode#cost()}, the occurrence cap, and the {@link RunBudget} to be declared
+ * together — and it adds no {@code case}/{@code instanceof} on node type anywhere: it only
+ * assembles, so no pattern or node kind can grow a special case inside the scheduler.
  *
  * <p>A {@link Workflow} is reusable — every {@link #run} builds a fresh single-use
  * scheduler, the invariant {@link DataflowScheduler} documents.
@@ -88,7 +88,33 @@ public final class Workflow {
         return withSpend(new DataflowScheduler(graph, maxOccurrences, run, deadline).run(input, pool), run);
     }
 
-    /** Resumes the workflow from a prior journal (ADR-052 D1) — see {@link DataflowScheduler#run(String, ExecutorService, List)}. */
+    /**
+     * Runs the workflow on a request that carries attachments, the same way an agent's request does. They reach the nodes that declared {@link
+     * Builder#readsRequestMedia}; with none declared the run is refused before any node starts — see {@link
+     * DataflowScheduler#run(String, List, ExecutorService, List)}.
+     */
+    public WorkflowResult run(String input, List<MediaRef> media, ExecutorService pool) {
+        return run(input, media, pool, List.of(), null);
+    }
+
+    /** Like {@link #run(String, List, ExecutorService)}, bounded by {@code deadline} (null is unbounded). */
+    public WorkflowResult run(String input, List<MediaRef> media, ExecutorService pool, Instant deadline) {
+        return run(input, media, pool, List.of(), deadline);
+    }
+
+    /** Like {@link #run(String, List, ExecutorService)}, resuming from a prior journal: the request is presented again, whole. */
+    public WorkflowResult run(String input, List<MediaRef> media, ExecutorService pool, List<JournalEntry> priorJournal) {
+        return run(input, media, pool, priorJournal, null);
+    }
+
+    /** The general form of the overloads with attachments; the others delegate to it. */
+    public WorkflowResult run(String input, List<MediaRef> media, ExecutorService pool, List<JournalEntry> priorJournal,
+                              Instant deadline) {
+        RunBudget run = freshBudget();
+        return withSpend(new DataflowScheduler(graph, maxOccurrences, run, deadline).run(input, media, pool, priorJournal), run);
+    }
+
+    /** Resumes the workflow from a prior journal — see {@link DataflowScheduler#run(String, ExecutorService, List)}. */
     public WorkflowResult run(String input, ExecutorService pool, List<JournalEntry> priorJournal) {
         RunBudget run = freshBudget();
         return withSpend(new DataflowScheduler(graph, maxOccurrences, run).run(input, pool, priorJournal), run);
@@ -147,7 +173,7 @@ public final class Workflow {
         }
 
         /**
-         * Adds an <b>agent-shaped node</b> (ADR-052 D2): the node's work is {@code agent},
+         * Adds an <b>agent-shaped node</b>: the node's work is {@code agent},
          * executed as {@code agent.execute(AgentTask.of(input))}, and the node's outcome is
          * its {@link io.ara.core.agent.AgentResponse} — so token usage and cost are captured
          * in the journal and reach {@code WorkflowResult}/{@code WorkflowStrategy} instead
@@ -182,9 +208,9 @@ public final class Workflow {
 
         /**
          * Attaches a {@link WorkflowNode#cost()} function to an already-added node: its
-         * output to the {@link Spend} the occurrence drew, charged to the {@link #budget}
-         * (ADR-054 D6). Without one a node still counts as one activation but adds nothing
-         * on the token / money axes.
+         * output to the {@link Spend} the occurrence drew, charged to the run's single
+         * {@link #budget}. Without one a node still counts as one activation but adds
+         * nothing on the token / money axes.
          */
         public Builder cost(String id, Function<String, Spend> cost) {
             return replace(id, requireNode(id).withCost(cost));
@@ -198,7 +224,7 @@ public final class Workflow {
         /**
          * Attaches a {@link WorkflowNode.Write} to an already-added node: its output maps
          * through {@code extractor} to a value merged into {@code key} in the run's shared
-         * state (ADR-052 D3) — the declarative replacement for {@code ara-graph}'s retired
+         * state — the declarative replacement for {@code ara-graph}'s retired
          * {@code SharedWorkspace}. If two or more nodes ever write the same {@code key} in
          * one run, declare {@link #reduce} for it — a second write to a key with no
          * declared reducer fails the run rather than guessing.
@@ -209,7 +235,7 @@ public final class Workflow {
 
         /**
          * Declares the shared-state keys an already-added <b>agent-shaped</b> node reads
-         * (ADR-052 D3, the read side of {@link #writes}). At dispatch the node's agent gets an
+         * (the read side of {@link #writes}). At dispatch the node's agent gets an
          * immutable snapshot of exactly these keys through {@code task.runContext().state()};
          * anything else in the shared state is invisible to it. The value is never
          * interpolated into a prompt — the agent (or its {@code PromptShaper}) projects it
@@ -241,9 +267,26 @@ public final class Workflow {
         }
 
         /**
+         * Declares that an agent-shaped node is handed the attachments of the run's request, as {@code
+         * AgentTask#media}, on every occurrence. Nothing else is: a node that does not declare it never sees them, and the engine
+         * has no rule of its own about which nodes should.
+         *
+         * @throws IllegalArgumentException if {@code id} was never added, or is not agent-shaped (an opaque body has no channel
+         *                                  to receive them)
+         */
+        public Builder readsRequestMedia(String id) {
+            WorkflowNode node = requireNode(id);
+            if (node.agent() == null) {
+                throw new IllegalArgumentException("node '" + id + "' is not agent-shaped — only a node added with "
+                        + "agent(...) can declare readsRequestMedia(): an opaque body has no channel to receive attachments");
+            }
+            return replace(id, node.withReadsRequestMedia());
+        }
+
+        /**
          * Declares how an already-added node combines the tokens of its several forward
          * incoming edges into its single input — the "declared way to compose them" that
-         * control #10 refuses to invent on a caller's behalf (ADR-052 D5, ADR-054 D1).
+         * control #10 refuses to invent on a caller's behalf.
          * The list arrives in edge-declaration order, never completion order.
          *
          * <p>It runs on the scheduler's control thread, so keep it cheap — shaping several
@@ -259,11 +302,12 @@ public final class Workflow {
         }
 
         /**
-         * Compiles a declarative pattern spec into this builder (ADR-054's O3: patterns
-         * are specs that compile onto {@code WorkflowGraph}, never special node types in
-         * the scheduler). Each spec carries its own build-time checks and adds only nodes,
-         * edges and the per-node properties declared above — which is what keeps the
-         * scheduler free of any {@code case}/{@code instanceof} on node type (FF-6).
+         * Compiles a declarative pattern spec into this builder: patterns are specs that
+         * compile onto {@code WorkflowGraph}, never special node types in the scheduler.
+         * Each spec carries its own build-time checks and adds only nodes, edges and the
+         * per-node properties declared above — which is what keeps the scheduler free of
+         * any {@code case}/{@code instanceof} on node type, so no pattern can grow a
+         * special case inside it.
          */
         public Builder pattern(WorkflowPattern pattern) {
             Objects.requireNonNull(pattern, "pattern must not be null").compileInto(this);
@@ -271,8 +315,8 @@ public final class Workflow {
         }
 
         /**
-         * Declares how two writes to the same shared-state {@code key} combine (ADR-052
-         * D3) — e.g. {@code reduce("findings", Reducers.concatLists())}. See {@link
+         * Declares how two writes to the same shared-state {@code key} combine — e.g.
+         * {@code reduce("findings", Reducers.concatLists())}. See {@link
          * Reducers} for common combinators.
          */
         public Builder reduce(String key, BinaryOperator<Object> reducer) {
@@ -282,7 +326,7 @@ public final class Workflow {
         }
 
         /**
-         * Declares {@code sourceId} as a dynamic fan-out source (ADR-052 D4): once it
+         * Declares {@code sourceId} as a dynamic fan-out source: once it
          * completes, {@code elements} reads a runtime-determined list from its output, and
          * {@code workerBody} runs once per element — each with its own input, individually
          * journaled under {@code workerId}. Equivalent to {@link #mapOver(String, String,
@@ -327,13 +371,13 @@ public final class Workflow {
             return this;
         }
 
-        /** A forward edge — AND-join semantics at the target (ADR-052 D1). */
+        /** A forward edge — AND-join semantics at the target. */
         public Builder edge(String from, String to) {
             edges.add(WorkflowEdge.of(from, to));
             return this;
         }
 
-        /** A {@code back} edge — OR-merge semantics, the one place cycles are expressed (ADR-052 D1). */
+        /** A {@code back} edge — OR-merge semantics, the one place cycles are expressed. */
         public Builder backEdge(String from, String to) {
             edges.add(WorkflowEdge.back(from, to));
             return this;
@@ -348,7 +392,7 @@ public final class Workflow {
             return this;
         }
 
-        /** The single run governor (ADR-054 D6). Unset ⇒ the run is ungoverned. */
+        /** The single run governor. Unset ⇒ the run is ungoverned. */
         public Builder budget(RunBudget budget) {
             this.budget = Objects.requireNonNull(budget, "budget must not be null");
             return this;
@@ -357,7 +401,7 @@ public final class Workflow {
         /**
          * Declares {@code ids} as intended exits — the pipeline ends normally once one of
          * them completes and selects no further edge. Purely declarative bookkeeping for
-         * {@link #build}'s structural checks (ADR-052 D5): a node with no outgoing edges
+         * {@link #build}'s structural checks: a node with no outgoing edges
          * that was never declared terminal is a dead end (control #3), and a declared
          * terminal is the "exit" every other node must have a path to (controls #1/#2).
          */
@@ -383,25 +427,25 @@ public final class Workflow {
             return new Workflow(graph, maxOccurrences, budget);
         }
 
-        // ── ADR-052 D5: structural build-time checks ────────────────────────────
+        // ── Structural build-time checks ─────────────────────────────────────────
         //
-        // Five of the ten controls the ADR names are checkable on today's facade — graph
-        // shape, plus declared state keys (#7). The rest need what this increment
-        // deliberately doesn't build: #4 (router shape / a mandatory else-arc) presumes an
-        // IntentRouter-like abstraction at this layer, which doesn't exist here (a routing
-        // node's selector is an arbitrary function — AgentPipeline's own compiler enforces
-        // its equivalent separately, on its own richer step/router model); #5 (HITL
-        // presence) and #6 (tool declaration) need agent-shaped nodes carrying an
-        // AgentConfig's tags()/enabledTools(). Those nodes now exist (Builder#agent,
-        // ADR-052 D2): WorkflowNode#agent() exposes the binding, so the controls can read
-        // binding.agent().config().tags()/enabledTools(). They are not written yet because
-        // they are ADR-052 D5's, not D2's — the node model was the blocker, and it is
-        // removed; the checks themselves remain a separate increment; #7 (state-key
-        // compatibility) is checked below now that nodes can declare reads (ADR-052 D3); #8
-        // (termination: a back edge needs a declared maxVisits) would require adding a
-        // required field to WorkflowEdge, breaking every back edge already built
-        // (including AgentPipeline's own compiler) for a guarantee the per-node
-        // maxOccurrences runtime backstop already provides today, just coarser-grained.
+        // Of the structural controls this package names, what today's facade can check
+        // is graph shape plus declared state keys (#7). The rest need what this
+        // increment deliberately doesn't build: #4 (router shape / a mandatory else-arc)
+        // presumes an IntentRouter-like abstraction at this layer, which doesn't exist
+        // here (a routing node's selector is an arbitrary function — AgentPipeline's own
+        // compiler enforces its equivalent separately, on its own richer step/router
+        // model); #5 (HITL presence) and #6 (tool declaration) need agent-shaped nodes
+        // carrying an AgentConfig's tags()/enabledTools(). Those nodes now exist
+        // (Builder#agent): WorkflowNode#agent() exposes the binding, so the controls can
+        // read binding.agent().config().tags()/enabledTools(). They are not written yet
+        // because they are a separate increment — the node model was the blocker, and it
+        // is removed; the checks themselves remain to come; #7 (state-key compatibility)
+        // is checked below now that nodes can declare reads; #8 (termination: a back edge
+        // needs a declared maxVisits) would require adding a required field to
+        // WorkflowEdge, breaking every back edge already built (including AgentPipeline's
+        // own compiler) for a guarantee the per-node maxOccurrences runtime backstop
+        // already provides today, just coarser-grained.
 
         private void validateStructure(WorkflowGraph graph) {
             checkDeadEnds(graph);
@@ -443,7 +487,7 @@ public final class Workflow {
                     if (writers.stream().noneMatch(w -> precedes(graph, w, reader.id()))) {
                         throw new IllegalStateException(
                                 "node '" + reader.id() + "' reads state key '" + key + "' but no node that writes it "
-                                        + "precedes it (ADR-052 D5 control #7) — "
+                                        + "precedes it (control #7) — "
                                         + (writers.isEmpty()
                                                 ? "nothing writes '" + key + "' at all; check the key name or add writes(...)"
                                                 : "it is written only by " + writers
@@ -455,7 +499,7 @@ public final class Workflow {
                                 && !precedes(graph, reader.id(), writer)) {
                             throw new IllegalStateException(
                                     "node '" + reader.id() + "' reads state key '" + key + "', which '" + writer
-                                            + "' also writes on a branch concurrent with it (ADR-052 D5 control #7) — "
+                                            + "' also writes on a branch concurrent with it (control #7) — "
                                             + "whether that write has landed when '" + reader.id() + "' starts depends on "
                                             + "timing; connect '" + writer + "' upstream of '" + reader.id()
                                             + "' or give it a key of its own");
@@ -502,7 +546,7 @@ public final class Workflow {
                 if (graph.out(node.id()).isEmpty() && !terminals.contains(node.id())) {
                     throw new IllegalStateException(
                             "node '" + node.id() + "' has no outgoing edges but was never declared terminal(...) "
-                                    + "(ADR-052 D5 control #3) — call terminal(\"" + node.id()
+                                    + " (control #3) — call terminal(\"" + node.id()
                                     + "\") if ending the run there is intended");
                 }
             }
@@ -534,7 +578,7 @@ public final class Workflow {
                 if (!canReachATerminal.contains(node.id())) {
                     throw new IllegalStateException(
                             "node '" + node.id() + "' has no path to any declared terminal(...) node "
-                                    + "(ADR-052 D5 controls #1/#2) — this is the livelock AgentProof's benchmark "
+                                    + " (controls #1/#2) — this is the livelock AgentProof's benchmark "
                                     + "finds and maxOccurrences today only reports after the fact");
                 }
             }
@@ -542,11 +586,12 @@ public final class Workflow {
 
         /**
          * Control #10 — a node with more than one <em>forward</em> (non-{@code back})
-         * predecessor has no declared way to compose their outputs: D1's join concatenates
+         * predecessor has no declared way to compose their outputs: the scheduler's join
+         * concatenates
          * them with {@code " | "} (see {@code DataflowScheduler#enablingInput}'s own
          * Javadoc), a placeholder its own author calls out, not a policy.
          *
-         * <p>Opting in is what {@link #composer} is for (ADR-054 D1): a node that declares
+         * <p>Opting in is what {@link #composer} is for: a node that declares
          * one has said how its several inputs combine, so there is nothing left to guess
          * and nothing to refuse. Without one the node is still rejected — the default
          * stays "refuse rather than silently concatenate", which is the behaviour every
@@ -561,7 +606,7 @@ public final class Workflow {
                 if (forwardPredecessors > 1) {
                     throw new IllegalStateException(
                             "node '" + node.id() + "' has " + forwardPredecessors + " forward predecessors with "
-                                    + "no declared way to compose them (ADR-052 D5 control #10) — D1's join is a "
+                                    + "no declared way to compose them (control #10) — the default join is a "
                                     + "placeholder concatenation, not a policy; declare composer(\"" + node.id()
                                     + "\", ...) to say how they combine");
                 }
@@ -596,7 +641,7 @@ public final class Workflow {
                         throw new IllegalStateException(
                                 "node '" + node.id() + "' is inside a cycle (" + String.join(", ", new TreeSet<>(forward))
                                         + ") but has a forward incoming edge from '" + incoming.from() + "', outside it "
-                                        + "(ADR-052 D5 control #9) — on the second lap it would wait for a token that "
+                                        + " (control #9) — on the second lap it would wait for a token that "
                                         + "never arrives; declare that edge backEdge(...) if it re-enters the cycle, "
                                         + "or restructure so the cycle is entered only once");
                     }

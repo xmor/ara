@@ -4,7 +4,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * The journal, in two phases per ADR-052 D1: a {@link Started} entry written the moment
+ * The journal, in two phases: a {@link Started} entry written the moment
  * a node occurrence is submitted, a {@link Finished} entry written when it completes.
  *
  * <p>One phase would be simpler, and Step 1 of this port had exactly that: an entry
@@ -24,10 +24,24 @@ public sealed interface JournalEntry permits JournalEntry.Started, JournalEntry.
 
     String input();
 
-    record Started(String nodeId, int occurrence, String input) implements JournalEntry {
+    /**
+     * @param mediaCount how many attachments of the run's request this occurrence was handed: 0 for a node that
+     *                   does not read them. A count, never the references: the journal is a record of what happened — so a
+     *                   host can say "no step of the run read the document" without reading logs — and the request is
+     *                   presented again, whole, by whoever resumes the run.
+     */
+    record Started(String nodeId, int occurrence, String input, int mediaCount) implements JournalEntry {
         public Started {
             Objects.requireNonNull(nodeId, "nodeId must not be null");
             Objects.requireNonNull(input, "input must not be null");
+            if (mediaCount < 0) {
+                throw new IllegalArgumentException("mediaCount must not be negative: " + mediaCount);
+            }
+        }
+
+        /** A node that was handed no attachments — every entry written before attachments existed. */
+        public Started(String nodeId, int occurrence, String input) {
+            this(nodeId, occurrence, input, 0);
         }
 
         @Override

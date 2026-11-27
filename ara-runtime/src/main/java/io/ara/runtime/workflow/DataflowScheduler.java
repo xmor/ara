@@ -2,6 +2,7 @@ package io.ara.runtime.workflow;
 
 import io.ara.core.agent.AgentChain;
 import io.ara.core.budget.RunBudget;
+import io.ara.core.media.MediaRef;
 import io.ara.core.budget.Spend;
 import io.ara.core.common.Money;
 
@@ -16,6 +17,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorCompletionService;
@@ -26,8 +28,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.BinaryOperator;
 
 /**
- * The scheduler ADR-052 D1 decides on: dataflow with a per-node journal, not superstep
- * (BSP, the model LangGraph and Microsoft's frameworks converge on).
+ * The scheduler of the {@code workflow} package: dataflow with a per-node journal, not
+ * superstep (BSP, the model LangGraph and Microsoft's frameworks converge on).
  *
  * <p>A superstep scheduler synchronizes on a global step boundary — every node ready at
  * step N runs, then every node ready at step N+1 runs, and so on. That boundary is where
@@ -37,7 +39,7 @@ import java.util.function.BinaryOperator;
  * was reproduced side by side against the scheduler here, on the same graph, before the
  * activation rule below replaced the superstep model.
  *
- * <p>D1's activation rule sidesteps the whole category by asking a different question:
+ * <p>The activation rule sidesteps the whole category by asking a different question:
  * not "when did a token arrive" but "which edges carry one". Every node ready by that
  * rule is submitted the instant it's ready, with no step boundary anywhere.
  *
@@ -64,11 +66,11 @@ public final class DataflowScheduler {
     private final Set<WorkflowEdge> dead = new LinkedHashSet<>();
     private final Map<String, Integer> occurrence = new HashMap<>();
     private final List<JournalEntry> journal = new ArrayList<>();
-    // ADR-052 D3: every WorkflowNode.Write recorded so far, merged through the graph's
+    // Every WorkflowNode.Write recorded so far, merged through the graph's
     // declared reducers. Mutated only from the thread that called run() — same invariant
     // as every other field above.
     private final Map<String, Object> sharedState = new LinkedHashMap<>();
-    // Canonical merge order for sharedState (ADR-052 D3): every write kept with its logical
+    // Canonical merge order for sharedState: every write kept with its logical
     // clock, and each key re-folded in (clock, declaration order, occurrence, sub) order — so
     // the merged value never depends on which of two concurrent writers finished first.
     private final Map<String, List<Contribution>> contributions = new LinkedHashMap<>();
@@ -77,6 +79,9 @@ public final class DataflowScheduler {
     private final Map<WorkflowEdge, Deque<Integer>> tokenClocks = new LinkedHashMap<>();
     private final Map<String, Integer> clocks = new HashMap<>();
     private final Map<String, Integer> declarationOrder = new HashMap<>();
+    // The attachments of the run's request. Set once by run(...) before anything is dispatched and read only from the
+    // control thread, which hands the same list to every node; each node decides whether it reads them.
+    private List<MediaRef> requestMedia = List.of();
 
     /** One write to a shared-state key, with the coordinates that fix its merge position. */
     private record Contribution(int clock, int declarationOrder, int occurrence, int sub, Object value) {}
@@ -93,16 +98,20 @@ public final class DataflowScheduler {
     /**
      * @param maxOccurrences per-node cap on how many times a node may fire in one run;
      *                       exceeding it fails the run instead of spinning forever on a
-     *                       malformed cycle. ADR-052 D5's controllo n. 8 turns a missing
-     *                       {@code maxVisits} into a build-time error once the facade
-     *                       exists; this is the runtime backstop that holds regardless.
+     *                       malformed cycle. The build-time companion of this backstop —
+     *                       refusing a back edge that declares no visit cap — is
+     *                       deliberately not a build error: a required {@code maxVisits}
+     *                       on {@code WorkflowEdge} would break every back edge already
+     *                       built, including AgentPipeline's own compiler, for a
+     *                       guarantee this backstop already provides, just
+     *                       coarser-grained.
      */
     public DataflowScheduler(WorkflowGraph graph, int maxOccurrences) {
         this(graph, maxOccurrences, null);
     }
 
     /**
-     * @param budget the run's single cost governor (ADR-054 D6), charged once per node
+     * @param budget the run's single cost governor, charged once per node
      *               occurrence — one journal entry, one {@link RunBudget#charge}. A node's
      *               {@link WorkflowNode#cost()} supplies the money / token spend; every
      *               occurrence counts as one activation regardless. When a charge reports
@@ -160,6 +169,23 @@ public final class DataflowScheduler {
      * that never happened.
      */
     public WorkflowResult run(String initialInput, ExecutorService pool, List<JournalEntry> priorJournal) {
+        return run(initialInput, List.of(), pool, priorJournal);
+    }
+
+    /**
+     * Like {@link #run(String, ExecutorService, List)}, with the attachments of the run's request. They reach the nodes
+     * that declared {@link WorkflowNode#readsRequestMedia()}, on every occurrence of those nodes; a node that did not declare it is
+     * handed nothing. A request with attachments that <em>no</em> node reads is refused before anything runs: an attachment is
+     * never dropped without a word. When resuming, the request is presented again, whole, by the caller: the journal
+     * records only how many attachments each occurrence received.
+     */
+    public WorkflowResult run(String initialInput, List<MediaRef> media, ExecutorService pool, List<JournalEntry> priorJournal) {
+        Objects.requireNonNull(media, "media must not be null");
+        if (!media.isEmpty() && graph.nodes().stream().noneMatch(WorkflowNode::readsRequestMedia)) {
+            return new WorkflowResult(journal, false, "the request carries " + media.size() + " attachment"
+                    + (media.size() == 1 ? "" : "s") + " but no node of the workflow reads them", sharedState);
+        }
+        requestMedia = List.copyOf(media);
         graph.edges().forEach(e -> tokens.put(e, new ArrayDeque<>()));
         graph.edges().forEach(e -> tokenClocks.put(e, new ArrayDeque<>()));
         for (int i = 0; i < graph.nodes().size(); i++) {
@@ -260,7 +286,7 @@ public final class DataflowScheduler {
      * exactly or a resumed run silently diverges from the one it continues: the same
      * "collided result wins" return and the same skip-children-with-no-collectInto. Children
      * never charge the budget here: the parent occurrence's single charge (one journal entry,
-     * one charge, ADR-054 D6) already covered the whole fan-out in the live run — the parent's
+     * one charge) already covered the whole fan-out in the live run — the parent's
      * replayed {@code Finished} re-charges it — so charging children again would double-count
      * the fan-out the second time the parent's own entry replays.
      */
@@ -331,7 +357,8 @@ public final class DataflowScheduler {
                     entryLabel(finished) + " had already failed in the prior run: " + failed.reason(), sharedState));
             case NodeOutcome.Suspended suspended -> Optional.of(new WorkflowResult(journal, false,
                     entryLabel(finished) + " is suspended awaiting a decision — resuming past a suspension "
-                            + "isn't supported until ADR-052 D6: " + suspended.reason(), sharedState));
+                            + "is not supported, because what the suspended node ended up doing is unknown: "
+                            + suspended.reason(), sharedState));
         };
     }
 
@@ -378,7 +405,8 @@ public final class DataflowScheduler {
                     return new WorkflowResult(journal, false, "maxOccurrences exceeded on " + id, sharedState);
                 }
                 clocks.put(id + "#" + occ, consumeTokens(id) + 1);
-                journal.add(new JournalEntry.Started(id, occ, input));
+                int mediaCount = node.readsRequestMedia() ? requestMedia.size() : 0;
+                journal.add(new JournalEntry.Started(id, occ, input, mediaCount));
                 running.add(id);
                 inFlight++;
                 String firingInput = input;
@@ -388,7 +416,8 @@ public final class DataflowScheduler {
                 final String fInput = firingInput;
                 final Map<String, Object> fSnapshot = readSnapshot;
                 final ExecutorService fPool = pool;
-                completion.submit(() -> fire(node, occ, fInput, fSnapshot, fPool));
+                final List<MediaRef> fMedia = requestMedia;
+                completion.submit(() -> fire(node, occ, fInput, fSnapshot, fMedia, fPool));
             }
 
             if (inFlight == 0) {
@@ -411,7 +440,7 @@ public final class DataflowScheduler {
             running.remove(fired.nodeId());
             journal.add(new JournalEntry.Finished(fired.nodeId(), fired.occurrence(), fired.input(), fired.outcome()));
 
-            // ADR-054 D6: one journal entry, one charge. The occurrence already ran, so a
+            // One journal entry, one charge. The occurrence already ran, so a
             // breach stops the run on this entry rather than mid-node — naming the axis
             // and the node, the "fallisce nominando il costrutto che ha sforato" behaviour.
             NodeOutcome.Completed completedForCharge =
@@ -421,7 +450,7 @@ public final class DataflowScheduler {
                 return overspent.get();
             }
 
-            // ADR-052 D4: journal and collect every dynamic child before the parent's own
+            // Journal and collect every dynamic child before the parent's own
             // outcome is processed below — a child is never a real WorkflowGraph node, so
             // it never goes through the normal per-node loop this method's caller runs.
             WorkflowNode.MapOverSpec spec = graph.node(fired.nodeId()).mapOver();
@@ -448,9 +477,10 @@ public final class DataflowScheduler {
             }
 
             // Fail-fast: the first Failed or Suspended outcome stops the run immediately,
-            // even with other nodes still in flight. Deciding whether a workflow should
-            // instead tolerate partial failure is ADR-052 D4's job (AgentChain.FailurePolicy,
-            // reused rather than reinvented) — D1 only has to behave safely, not flexibly.
+            // even with other nodes still in flight. Whether a workflow should instead
+            // tolerate partial failure is a declared choice at the fan-out level
+            // (AgentChain.FailurePolicy, reused rather than reinvented) — this scheduler
+            // only has to behave safely, not flexibly.
             switch (fired.outcome()) {
                 case NodeOutcome.Completed completed ->
                         propagateCompletion(fired.nodeId(), fired.occurrence(), completed);
@@ -490,7 +520,7 @@ public final class DataflowScheduler {
         return future;
     }
 
-    /** @param mapOverChildren empty unless {@code node} declares a {@link WorkflowNode#mapOver()} (ADR-052 D4) */
+    /** @param mapOverChildren empty unless {@code node} declares a {@link WorkflowNode#mapOver()} */
     private record Fired(String nodeId, int occurrence, String input, NodeOutcome outcome,
                          List<MapOverChildResult> mapOverChildren) {
         Fired(String nodeId, int occurrence, String input, NodeOutcome outcome) {
@@ -498,15 +528,17 @@ public final class DataflowScheduler {
         }
     }
 
-    /** One dynamic fan-out activation's outcome (ADR-052 D4) — never a real {@link WorkflowGraph} node. */
+    /** One dynamic fan-out activation's outcome — never a real {@link WorkflowGraph} node. */
     private record MapOverChildResult(String childId, String input, NodeOutcome outcome) {}
 
-    private Fired fire(WorkflowNode node, int occurrence, String input, Map<String, Object> readState, ExecutorService pool) {
+    private Fired fire(WorkflowNode node, int occurrence, String input, Map<String, Object> readState,
+                       List<MediaRef> media, ExecutorService pool) {
         try {
-            // node.run(input) is the single execution path (ADR-052 D2): for an opaque node
-            // it is body(), for an agent-shaped one it executes the agent and hands back its
-            // AgentResponse, so the scheduler never branches on the node's kind (FF-6).
-            NodeOutput out = node.run(input, readState);
+            // node.run(input) is the single execution path, whatever the node's kind: for
+            // an opaque node it is body(), for an agent-shaped one it executes the agent
+            // and hands back its AgentResponse, so the scheduler never branches on the
+            // node's kind.
+            NodeOutput out = node.run(input, readState, media);
             String output = out.content();
 
             List<MapOverChildResult> children = List.of();
@@ -624,7 +656,7 @@ public final class DataflowScheduler {
     private static record MapOverChildTask(String childId, String elementInput) {}
 
     /**
-     * Charges the run budget for one node occurrence (ADR-054 D6). The money / token spend
+     * Charges the run budget for one node occurrence. The money / token spend
      * comes from the node's {@link WorkflowNode#cost()} applied to its output — zero for a
      * node that declares none, and zero for one that Failed or Suspended before producing
      * output — while the activation itself always counts as one. Returns a failing {@link
@@ -639,7 +671,7 @@ public final class DataflowScheduler {
         Spend spend = Spend.zero(budget.currency());
         if (completed != null) {
             if (completed.response() != null) {
-                // Agent-shaped node (ADR-052 D2): the AgentResponse is the source of truth
+                // Agent-shaped node: the AgentResponse is the source of truth
                 // for what the occurrence drew — a caller-declared cost() on the same node
                 // would only under- or over-state it. Money is re-based onto the budget's
                 // currency when the response's differs, rather than letting Money.plus
@@ -666,7 +698,7 @@ public final class DataflowScheduler {
     }
 
     /**
-     * ADR-052 D3, read side: an immutable copy of just the keys {@code node} declared in
+     * Read side of the shared state: an immutable copy of just the keys {@code node} declared in
      * {@link WorkflowNode#reads()}, as they stand when the node is dispatched. A declared key
      * nothing has written yet is simply absent — the agent sees an empty {@code Optional}, not
      * an error (whether some node can ever write it is a build-time question, control #7).
@@ -691,11 +723,11 @@ public final class DataflowScheduler {
     }
 
     /**
-     * Applies {@code write} (ADR-052 D3) to {@link #sharedState}. A key written once holds
+     * Applies {@code write} to {@link #sharedState}. A key written once holds
      * that value; a key written again is folded through {@link WorkflowGraph#reducers()}'s
      * entry for it, over <em>every</em> write so far in canonical order ({@link #CANONICAL}):
      * causal order first, and — between writers that are concurrent — declaration order,
-     * never completion order. The same rule D1 applies to a join's inputs, applied to state,
+     * never completion order. The same rule the scheduler applies to a join's inputs, applied to state,
      * so a non-commutative reducer ({@code concatLists}) gives the same result on every run.
      *
      * <p>A key written twice with no declared reducer is refused rather than guessed at —
@@ -716,7 +748,7 @@ public final class DataflowScheduler {
         if (!written.isEmpty() && reducer == null) {
             return Optional.of(new WorkflowResult(journal, false,
                     "node " + nodeId + " wrote key '" + key + "' but it already had a value and no reducer is "
-                            + "declared for it (ADR-052 D3) — call reduce(\"" + key + "\", ...) to say how they combine",
+                            + "declared for it — call reduce(\"" + key + "\", ...) to say how they combine",
                     sharedState));
         }
         written.add(new Contribution(clockOf(nodeId, occurrence), declarationOrder.getOrDefault(nodeId, Integer.MAX_VALUE),
@@ -740,7 +772,7 @@ public final class DataflowScheduler {
     }
 
     /**
-     * D1's activation rule. A node is ready when either:
+     * The activation rule. A node is ready when either:
      * <ul>
      *   <li>a {@code back} edge carries a token — OR-merge, the cycle case: fires without
      *       waiting on anything else, or</li>

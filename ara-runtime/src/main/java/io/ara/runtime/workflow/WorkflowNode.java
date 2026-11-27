@@ -5,6 +5,7 @@ import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.RunState;
 import io.ara.core.budget.Spend;
+import io.ara.core.media.MediaRef;
 
 import java.util.List;
 import java.util.Map;
@@ -17,13 +18,13 @@ import java.util.function.Function;
  * composed input, which of its outgoing edges to activate, and what resuming should do
  * if this node was in flight when a prior run stopped.
  *
- * <p>D1 keeps this deliberately opaque — {@code body} is a plain function, not an
- * {@code io.ara.core.agent.AraAgent}. Wiring an agent-shaped node (routing through
- * {@code AraAgent.execute}, {@code RunState} writes, tool calls) is ADR-052 D2's job:
- * D1 only has to prove the scheduler's activation rule holds, and an opaque function is
- * the smallest thing that can exercise it without dragging in a facade this increment
- * deliberately does not build yet. That increment is now layered on top: a node declared
- * through {@link #agent(String, AgentBinding)} carries an {@link AgentBinding}, and
+ * <p>The base node is deliberately opaque — {@code body} is a plain function, not an
+ * {@code io.ara.core.agent.AraAgent}: the scheduler's activation rule had to be proven
+ * first, and an opaque function is the smallest thing that can exercise it without
+ * dragging in the agent machinery (routing through {@code AraAgent.execute},
+ * {@code RunState} writes, tool calls). That machinery is now layered on top of it:
+ * a node declared through {@link #agent(String, AgentBinding)} carries an
+ * {@link AgentBinding}, and
  * {@link #run(String)} executes the agent and captures its {@link AgentResponse} — so
  * token usage and cost reach the journal instead of vanishing into a string.
  *
@@ -37,17 +38,17 @@ import java.util.function.Function;
  * @param onUncertainResume  what {@link DataflowScheduler} should do with this node on
  *                           resume if it was started but never finished in the prior run
  * @param cost               output to the {@link Spend} this occurrence drew (money,
- *                           tokens, LLM calls), charged to the run's {@code RunBudget}
- *                           (ADR-054 D6); {@code null} means "declares no cost" — the
+ *                           tokens, LLM calls), charged to the run's {@code RunBudget};
+ *                           {@code null} means "declares no cost" — the
  *                           node still counts as one activation but adds nothing on the
  *                           token / money axes. For an agent-shaped node this is ignored
  *                           in favour of the {@link AgentResponse}'s own totals: the
  *                           response is the source of truth once there is one, and a
  *                           caller-declared {@code cost} can only under- or over-state it.
  * @param write              output to a {@link Write}, merged into the run's shared
- *                           state under a declared reducer (ADR-052 D3); {@code null}
- *                           means "writes nothing" — most nodes.
- * @param mapOver            declares this node as a dynamic fan-out source (ADR-052 D4);
+ *                           state under a declared reducer; {@code null} means
+ *                           "writes nothing" — most nodes.
+ * @param mapOver            declares this node as a dynamic fan-out source;
  *                           {@code null} means "an ordinary node" — almost all of them.
  * @param composer           how this node combines the tokens of its several forward
  *                           incoming edges into its single input, in edge-declaration
@@ -61,13 +62,17 @@ import java.util.function.Function;
  *                           cheap: a composer is for <em>shaping</em> the several inputs
  *                           into one, never for the work of deciding between them — that
  *                           belongs in {@link #body()}, which does run on the pool.
- * @param agent              the agent this node runs, when it is agent-shaped (ADR-052
- *                           D2); {@code null} for an ordinary opaque node. When set,
+ * @param agent              the agent this node runs, when it is agent-shaped;
+ *                           {@code null} for an ordinary opaque node. When set,
  *                           {@link #run(String)} executes it and the resulting
  *                           {@link AgentResponse} — not {@link #body()} — is the node's
  *                           outcome, so tokens/cost are captured rather than lost.
- * @param reads              the shared-state keys this node's agent may read (ADR-052 D3,
- *                           the read side of {@link Write}); empty means "reads nothing" —
+ * @param readsRequestMedia  whether this node is handed the attachments of the run's request ({@code AgentTask#media}),
+ *                           alongside the text it composes from its edges. Declared, never inferred: the engine has
+ *                           no rule of its own about which nodes see a document. Agent-shaped nodes only — an opaque body has no
+ *                           channel to receive them. {@code false} for almost every node.
+ * @param reads              the shared-state keys this node's agent may read (the read
+ *                           side of {@link Write}); empty means "reads nothing" —
  *                           most nodes. Only meaningful for an agent-shaped node: an opaque
  *                           {@link #body()} has no channel to receive state through, so
  *                           {@code Workflow.Builder#reads} refuses it. The agent sees an
@@ -85,7 +90,8 @@ public record WorkflowNode(
         MapOverSpec mapOver,
         Function<List<String>, String> composer,
         AgentBinding agent,
-        Set<String> reads
+        Set<String> reads,
+        boolean readsRequestMedia
 ) {
 
     public WorkflowNode {
@@ -95,11 +101,19 @@ public record WorkflowNode(
         reads = reads == null ? Set.of() : Set.copyOf(reads);
     }
 
+    /** Backwards-compatible constructor: a node that does not read the request's attachments. */
+    public WorkflowNode(String id, Function<String, String> body, Function<String, Set<String>> selector,
+                        UncertainResumePolicy onUncertainResume, Function<String, Spend> cost, Write write,
+                        MapOverSpec mapOver, Function<List<String>, String> composer, AgentBinding agent,
+                        Set<String> reads) {
+        this(id, body, selector, onUncertainResume, cost, write, mapOver, composer, agent, reads, false);
+    }
+
     /** Backwards-compatible constructor: a node that declares no {@link #reads}. */
     public WorkflowNode(String id, Function<String, String> body, Function<String, Set<String>> selector,
                         UncertainResumePolicy onUncertainResume, Function<String, Spend> cost, Write write,
                         MapOverSpec mapOver, Function<List<String>, String> composer, AgentBinding agent) {
-        this(id, body, selector, onUncertainResume, cost, write, mapOver, composer, agent, Set.of());
+        this(id, body, selector, onUncertainResume, cost, write, mapOver, composer, agent, Set.of(), false);
     }
 
     /** Backwards-compatible constructor: a node that is not agent-shaped (no {@link AgentBinding}). */
@@ -144,7 +158,7 @@ public record WorkflowNode(
     }
 
     /**
-     * An agent-shaped node (ADR-052 D2): {@code binding}'s agent is the node's work, and
+     * An agent-shaped node: {@code binding}'s agent is the node's work, and
      * its {@link AgentResponse} — tokens, cost, content — is what {@link #run(String)}
      * produces. The derived {@link #body()} runs the same agent, so a caller that reaches
      * for the raw function (there is none in the runtime today, but the accessor is public)
@@ -159,39 +173,40 @@ public record WorkflowNode(
 
     /** Returns a copy of this node with its {@link #onUncertainResume} policy replaced. */
     public WorkflowNode withOnUncertainResume(UncertainResumePolicy policy) {
-        return new WorkflowNode(id, body, selector, policy, cost, write, mapOver, composer, agent, reads);
+        return new WorkflowNode(id, body, selector, policy, cost, write, mapOver, composer, agent, reads, readsRequestMedia);
     }
 
     /** Returns a copy of this node with a {@link #cost} function that maps its output to the {@link Spend} it drew. */
     public WorkflowNode withCost(Function<String, Spend> cost) {
         return new WorkflowNode(id, body, selector, onUncertainResume,
-                Objects.requireNonNull(cost, "cost must not be null"), write, mapOver, composer, agent, reads);
+                Objects.requireNonNull(cost, "cost must not be null"), write, mapOver, composer, agent, reads, readsRequestMedia);
     }
 
     /** Returns a copy of this node with a {@link #write} that maps its output to a shared-state entry. */
     public WorkflowNode withWrite(Write write) {
         return new WorkflowNode(id, body, selector, onUncertainResume, cost,
-                Objects.requireNonNull(write, "write must not be null"), mapOver, composer, agent, reads);
+                Objects.requireNonNull(write, "write must not be null"), mapOver, composer, agent, reads, readsRequestMedia);
     }
 
-    /** Returns a copy of this node with a {@link #mapOver} spec (ADR-052 D4). */
+    /** Returns a copy of this node with a {@link #mapOver} spec. */
     public WorkflowNode withMapOver(MapOverSpec mapOver) {
         return new WorkflowNode(id, body, selector, onUncertainResume, cost, write,
-                Objects.requireNonNull(mapOver, "mapOver must not be null"), composer, agent, reads);
+                Objects.requireNonNull(mapOver, "mapOver must not be null"), composer, agent, reads, readsRequestMedia);
     }
 
     /**
      * Returns a copy of this node with a {@link #composer} — the declared way it combines
-     * the tokens of several forward incoming edges (ADR-052 D5 control #10, ADR-054 D1).
+     * the tokens of several forward incoming edges, and the opt-in that makes
+     * {@code Workflow.Builder}'s control #10 accept this node at all.
      */
     public WorkflowNode withComposer(Function<List<String>, String> composer) {
         return new WorkflowNode(id, body, selector, onUncertainResume, cost, write, mapOver,
-                Objects.requireNonNull(composer, "composer must not be null"), agent, reads);
+                Objects.requireNonNull(composer, "composer must not be null"), agent, reads, readsRequestMedia);
     }
 
     /**
-     * Returns a copy of this node that may read {@code keys} from the run's shared state
-     * (ADR-052 D3). Agent-shaped nodes only — see {@link #reads()}.
+     * Returns a copy of this node that may read {@code keys} from the run's shared state.
+     * Agent-shaped nodes only — see {@link #reads()}.
      *
      * @throws IllegalStateException if this node is not agent-shaped
      */
@@ -201,11 +216,26 @@ public record WorkflowNode(
                     + "to receive shared state through, so it cannot declare reads");
         }
         return new WorkflowNode(id, body, selector, onUncertainResume, cost, write, mapOver, composer, agent,
-                Objects.requireNonNull(keys, "keys must not be null"));
+                Objects.requireNonNull(keys, "keys must not be null"), readsRequestMedia);
     }
 
     /**
-     * The single execution path the scheduler takes (ADR-052 D2). For an opaque node it is
+     * Returns a copy of this node that is handed the attachments of the run's request.
+     * Agent-shaped nodes only: the attachments reach the agent as {@code AgentTask#media}.
+     *
+     * @throws IllegalStateException if this node is not agent-shaped
+     */
+    public WorkflowNode withReadsRequestMedia() {
+        if (agent == null) {
+            throw new IllegalStateException("node '" + id + "' is not agent-shaped: an opaque body has no channel "
+                    + "to receive the request's attachments, so it cannot declare that it reads them");
+        }
+        return new WorkflowNode(id, body, selector, onUncertainResume, cost, write, mapOver, composer, agent, reads, true);
+    }
+
+    /**
+     * The single execution path the scheduler takes, whatever the node's kind. For an
+     * opaque node it is
      * just {@link #body()}; for an agent-shaped one it executes the agent and returns its
      * {@link AgentResponse} alongside the content, so the scheduler can charge the budget
      * and {@code WorkflowStrategy} can report the token split without either knowing what
@@ -221,20 +251,34 @@ public record WorkflowNode(
 
     /**
      * Like {@link #run(String)}, handing an agent-shaped node the snapshot of the shared
-     * state it declared in {@link #reads()} (ADR-052 D3). {@code readState} is what the
+     * state it declared in {@link #reads()}. {@code readState} is what the
      * scheduler captured on its own thread when it dispatched this occurrence — the node
      * never sees the live map. An opaque node ignores it: it can't declare reads.
      */
     NodeOutput run(String input, Map<String, Object> readState) {
-        return agent == null ? NodeOutput.of(body.apply(input)) : executeAgent(id, agent, input, readState);
+        return run(input, readState, List.of());
+    }
+
+    /**
+     * Like {@link #run(String, Map)}, with the attachments of the run's request: an agent-shaped node that declared {@link
+     * #readsRequestMedia()} hands them to its agent on the task; any other node ignores them (the scheduler passes the same
+     * list to every node and leaves the decision to the node, which knows its own shape).
+     */
+    NodeOutput run(String input, Map<String, Object> readState, List<MediaRef> requestMedia) {
+        return agent == null ? NodeOutput.of(body.apply(input))
+                : executeAgent(id, agent, input, readState, readsRequestMedia ? requestMedia : List.of());
     }
 
     private static NodeOutput executeAgent(String id, AgentBinding binding, String input) {
-        return executeAgent(id, binding, input, Map.of());
+        return executeAgent(id, binding, input, Map.of(), List.of());
     }
 
-    private static NodeOutput executeAgent(String id, AgentBinding binding, String input, Map<String, Object> readState) {
+    private static NodeOutput executeAgent(String id, AgentBinding binding, String input, Map<String, Object> readState,
+                                           List<MediaRef> media) {
         AgentTask task = binding.taskFor(input);
+        if (!media.isEmpty()) {
+            task = task.withMedia(media);
+        }
         if (!readState.isEmpty()) {
             task = task.withRunContext(task.runContext().withState(readOnlyView(task.runContext().state(), readState)));
         }
@@ -262,7 +306,7 @@ public record WorkflowNode(
     }
 
     /**
-     * One node's contribution to the run's shared state (ADR-052 D3): when this node
+     * One node's contribution to the run's shared state: when this node
      * completes, {@link #extractor()} maps its output to the value stored under {@link
      * #key()} — merged with whatever is already there via the {@link WorkflowGraph}'s
      * declared reducer for that key, if two or more nodes ever write the same one (see
@@ -278,7 +322,7 @@ public record WorkflowNode(
     }
 
     /**
-     * Dynamic fan-out (ADR-052 D4): when the node this is attached to completes, {@link
+     * Dynamic fan-out: when the node this is attached to completes, {@link
      * #elements()} reads a runtime-determined list from its output, and {@link
      * #workerBody()} — a plain function, the same shape every {@link WorkflowNode#body()}
      * is — runs once per element, each with <em>its own</em> input, never the same task

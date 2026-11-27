@@ -18,14 +18,16 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Adapts a {@link Workflow} to the {@link ExecutionStrategy} contract (ADR-052 D7), the
- * same move {@code PipelineStrategy} already makes for {@link
- * io.ara.runtime.pipeline.AgentPipeline}: hosting a workflow inside a real {@code
- * AgentInstance} gets it per-session isolation and busy policy (ADR-016), cooperative
+ * Adapts a {@link Workflow} to the {@link ExecutionStrategy} contract: a workflow is an
+ * agent, hosted the same way {@code PipelineStrategy} hosts {@link
+ * io.ara.runtime.pipeline.AgentPipeline}. Hosting a workflow inside a real {@code
+ * AgentInstance} gets it per-session isolation (one execution at a time per session,
+ * the busy policy) and cooperative
  * cancellation, the {@code agent.execute} telemetry span, and the interceptor chain for
  * free, instead of the hand-rolled {@code GraphAgent} this retires (mutable {@code
  * volatile} state, {@code RunContext} discarded at the boundary, token/cost always
- * reported {@code 0, 0, 0.0} — the anti-pattern ADR-051 documents).
+ * reported {@code 0, 0, 0.0} — an agent that hides its real spend poisons any cost
+ * governance above it, and the isolation and busy policy had to be rebuilt by hand).
  *
  * <p>Ignores {@code llm}, {@code memory}, and {@code tools} entirely — same reasoning as
  * {@code PipelineStrategy}: a workflow's real work happens inside its own nodes.
@@ -33,11 +35,12 @@ import java.util.concurrent.Executors;
  * <p><b>Token and cost reporting.</b> For a graph of opaque nodes there is no
  * {@code AgentResponse} to read from, so {@link ExecutionResult#promptTokens()}/
  * {@link ExecutionResult#outputTokens()} are {@code 0} — the node's work is a plain
- * function with no usage to report. An <b>agent-shaped</b> node (ADR-052 D2, {@link
+ * function with no usage to report. An <b>agent-shaped</b> node (see {@link
  * Workflow.Builder#agent}) is different: the agent's {@code AgentResponse} is captured in
  * the journal, so those totals are summed here from {@link WorkflowResult} and the split is
  * real. A node that declares a {@link WorkflowNode#cost()} is still charged to the run's
- * {@link io.ara.core.budget.RunBudget} if one is configured (ADR-054 D6); surfacing that
+ * {@link io.ara.core.budget.RunBudget} if one is configured — the single cost governor
+ * for the whole run; surfacing that
  * declared spend through this {@code ExecutionResult} is a separate increment — it needs
  * {@link Workflow#run} to hand back the budget's final {@code Spend}.
  *
@@ -92,9 +95,12 @@ final class WorkflowStrategy implements ExecutionStrategy {
         // own deadline Javadoc) blocked drive() forever, with no independent bound of
         // its own separate from whatever the caller enforces outside this call.
         Instant deadline = Instant.now().plus(config.executionTimeout());
-        WorkflowResult result = workflow.run(task.input(), NODE_POOL, deadline);
+        // The task's attachments are part of the workflow's request, the same way they are for any agent: the nodes that
+        // declared they read them are handed them, and a workflow where none does refuses the request instead of dropping
+        // them.
+        WorkflowResult result = workflow.run(task.input(), task.media(), NODE_POOL, List.of(), deadline);
 
-        // No single designated "output node" exists in the D1 graph model — the last
+        // No single designated "output node" exists in the graph model — the last
         // entry to actually finish (chronological journal order, not declaration order)
         // is the same "best answer so far" convention PipelineStrategy applies to its
         // own last-executed step, extended to a graph that may have run several nodes
